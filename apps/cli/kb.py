@@ -32,7 +32,7 @@ def cmd_sync(args) -> int:
 
     only = [x.strip() for x in args.only.split(",")] if args.only else None
     t0 = time.perf_counter()
-    report = sync(only, activate=not args.no_activate)
+    report = sync(only, activate=not args.no_activate, reuse_embeddings=not args.no_reuse)
     print(f"\n共 {report.total_chunks} 块，耗时 {time.perf_counter() - t0:.1f}s")
     if not report.regression_passed:
         print("回归未通过，索引未激活", file=sys.stderr)
@@ -116,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("sync", help="同步并重建索引")
     p.add_argument("--only", help="只同步指定来源，逗号分隔")
     p.add_argument("--no-activate", action="store_true", help="只建暂存索引，不激活")
+    p.add_argument("--no-reuse", action="store_true", help="不复用已有向量，全部重新嵌入")
     p.set_defaults(fn=cmd_sync)
 
     p = sub.add_parser("search", help="检索")

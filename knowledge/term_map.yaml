@@ -1,0 +1,99 @@
+# 中文技术术语 → 英文检索词映射
+#
+# 存在的理由（I1 实测）：首批语料 100% 为英文官方文档，
+# 而用户用中文提问。关键词检索这一路因此完全失效——
+# 中文 token 永远匹配不上英文正文，bm25 只能靠 "postgresql" 这类
+# ASCII 词排序，结果是"谁提得多谁排前面"，纯噪声。
+#
+# 这里把中文概念展开为英文检索词，让关键词路重新发挥作用。
+# 注意这不能替代场景卡片：卡片是中文的、面向具体故障的，
+# 既能桥接语言鸿沟又能压缩上下文（见 architecture.md 5.3）。
+
+version: 1
+
+terms:
+  # ---- 数据库 ----
+  慢查询: [slow query, slow queries, query performance, EXPLAIN]
+  执行计划: [execution plan, query plan, EXPLAIN, planner]
+  全表扫描: [sequential scan, Seq Scan, full table scan]
+  索引失效: [index not used, unused index, index scan]
+  统计信息: [statistics, ANALYZE, pg_statistic]
+  连接池: [connection pool, pooling, max_connections]
+  事务隔离级别: [transaction isolation level, isolation level]
+  脏读: [dirty read]
+  幻读: [phantom read]
+  不可重复读: [non-repeatable read]
+  死锁: [deadlock]
+  锁等待: [lock wait, lock contention]
+  自增主键: [serial, identity column, sequence]
+  分区表: [partitioned table, table partitioning]
+  真空: [vacuum, autovacuum]
+  膨胀: [bloat, table bloat]
+
+  # ---- 消息与流 ----
+  事务: [transaction, transactional]
+  生产者: [producer]
+  消费者: [consumer]
+  主题: [topic]
+  提交: [commit, committed]
+  重复消费: [duplicate consumption, at-least-once, reprocessing]
+  幂等: [idempotent, idempotence, enable.idempotence]
+  幂等性: [idempotent, idempotence]
+  偏移量: [offset, committed offset]
+  消费者组: [consumer group]
+  重平衡: [rebalance, rebalancing, partition assignment]
+  死信队列: [dead letter queue, DLQ]
+  消息积压: [consumer lag, backlog]
+  精确一次: [exactly-once, exactly once semantics, transactional]
+  事务生产者: [transactional producer, transactional.id]
+  分区: [partition, partitioning]
+  副本: [replica, replication]
+
+  # ---- 缓存 ----
+  序列化: [serializer, serialization, RedisSerializer]
+  反序列化: [deserializer, deserialization]
+  预扣库存: [stock reservation, inventory decrement, atomic decrement]
+  超卖: [oversell, overselling, negative stock]
+  缓存穿透: [cache penetration, null caching]
+  缓存击穿: [hotspot key expiry, cache breakdown]
+  缓存雪崩: [cache avalanche, mass expiry]
+  过期时间: [TTL, expiration, expire]
+  分布式锁: [distributed lock, redlock, SETNX]
+
+  # ---- Spring / Java ----
+  自动配置: [auto-configuration, autoconfigure, conditional]
+  声明式事务: [declarative transaction, Transactional]
+  自调用: [self-invocation, proxy, AOP proxy]
+  回滚: [rollback, rollbackFor]
+  熔断: [circuit breaker, resilience]
+  限流: [rate limiting, rate limiter]
+  降级: [fallback, degradation]
+  线程池: [thread pool, executor, task executor]
+  内存泄漏: [memory leak, heap dump]
+  健康检查: [health check, health endpoint, actuator health]
+  指标: [metrics, micrometer, meter registry]
+  链路追踪: [tracing, distributed tracing, span]
+
+  # ---- Kubernetes ----
+  存活探针: [liveness probe]
+  就绪探针: [readiness probe]
+  启动探针: [startup probe]
+  滚动更新: [rolling update, rollingUpdate]
+  资源限制: [resource limits, requests and limits]
+  驱逐: [eviction, evicted]
+  亲和性: [affinity, node affinity, pod affinity]
+  污点: [taint, toleration]
+  水平扩缩: [horizontal pod autoscaler, HPA, autoscaling]
+  配置项: [ConfigMap, configuration]
+  密钥: [Secret, secrets]
+  持久卷: [persistent volume, PVC]
+
+  # ---- 通用故障 ----
+  超时: [timeout, timed out]
+  重试: [retry, retries, backoff]
+  背压: [backpressure]
+  最终一致性: [eventual consistency]
+  分布式事务: [distributed transaction, two-phase commit, saga]
+  对账: [reconciliation]
+  压测: [load test, benchmark, stress test]
+  发布回滚: [rollback deployment, revert]

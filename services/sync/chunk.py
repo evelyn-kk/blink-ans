@@ -45,12 +45,22 @@ def build_url(src: Source, rel_path: Path, anchor: str | None, page_id: str | No
         return src.url_template.format(path=stem, anchor=anchor or "", base=src.base_url.rstrip("/"))
 
     if src.format == "asciidoc":
-        # Antora 布局: .../modules/<module>/pages/<name>.adoc -> <name>.html
-        if "/pages/" in p:
+        # Antora 布局: .../modules/<module>/pages/<rest>.adoc -> <base>/<module>/<rest>.html
+        # 模块名必须保留：Spring Boot 有 reference / how-to / api 等多个模块，
+        # 丢掉它会让所有链接 404（实测 8/8 失败）。
+        # 例外是 ROOT 模块，Antora 在 URL 中省略该段（spring-data-redis 即是此例）。
+        module = ""
+        if "/modules/" in p and "/pages/" in p:
+            module = p.split("/modules/", 1)[1].split("/pages/", 1)[0]
+            p = p.split("/pages/", 1)[1]
+        elif "/pages/" in p:
             p = p.split("/pages/", 1)[1]
         else:
             p = Path(p).name
-        return f"{src.base_url.rstrip('/')}/{p[:-5] if p.endswith('.adoc') else p}.html{frag}"
+
+        stem = p[:-5] if p.endswith(".adoc") else p
+        prefix = f"{module}/" if module and module != "ROOT" else ""
+        return f"{src.base_url.rstrip('/')}/{prefix}{stem}.html{frag}"
 
     if src.format == "markdown":
         # Hugo 布局: content/en/docs/<rest>.md -> <rest>/

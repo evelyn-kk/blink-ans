@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.schemas.chunk import Chunk, MetadataError, utc_now  # noqa: E402
 from services.retrieval.embed import DEFAULT_MODEL, Embedder  # noqa: E402
 from services.retrieval.search import hybrid_search  # noqa: E402
-from services.retrieval.store import ChunkStore, IndexBuilder  # noqa: E402
+from services.retrieval.store import ChunkStore, EmbeddingCache, IndexBuilder  # noqa: E402
 
 from .chunk import sections_to_chunks  # noqa: E402
 from .fetch import LicenseError, collect_files, fetch, head_commit  # noqa: E402
@@ -116,10 +116,24 @@ def run_regression(index_path: Path, log: Callable[[str], None]) -> tuple[bool, 
     return ok, failures
 
 
+def _embed_with_cache(
+    chunks: list[Chunk], embedder: Embedder, cache: EmbeddingCache
+) -> list[list[float]]:
+    """能复用的复用，剩下的按批嵌入。"""
+    vectors: list[list[float] | None] = [cache.get(c.checksum) for c in chunks]
+    todo = [i for i, v in enumerate(vectors) if v is None]
+    for i in range(0, len(todo), EMBED_BATCH):
+        idx = todo[i : i + EMBED_BATCH]
+        for j, v in zip(idx, embedder.encode([chunks[j].text for j in idx])):
+            vectors[j] = v
+    return [v for v in vectors if v is not None]
+
+
 def sync(
     only: list[str] | None = None,
     *,
     activate: bool = True,
+    reuse_embeddings: bool = True,
     log: Callable[[str], None] = print,
 ) -> SyncReport:
     report = SyncReport()
@@ -132,6 +146,9 @@ def sync(
     log(f"同步 {len(sources)} 个来源")
     builder = IndexBuilder()
     embedder = Embedder()
+    cache = EmbeddingCache() if reuse_embeddings else EmbeddingCache(Path("/nonexistent"))
+    if cache.available:
+        log("  复用当前索引中未变更正文的向量")
     versions: dict[str, str] = {}
 
     try:
@@ -143,11 +160,12 @@ def sync(
                 continue
             versions[src.id] = res.commit
 
-            for i in range(0, len(chunks), EMBED_BATCH):
-                batch = chunks[i : i + EMBED_BATCH]
-                builder.add(batch, embedder.encode([c.text for c in batch]))
+            builder.add(chunks, _embed_with_cache(chunks, embedder, cache))
             report.total_chunks += len(chunks)
 
+        if cache.available:
+            log(f"  向量复用 {cache.hits} 条，新算 {cache.misses} 条")
+        cache.close()
         stats = builder.finalize(versions, DEFAULT_MODEL)
         log(f"暂存索引: {stats.chunks} 块 -> {stats.path.name}")
         for p, n in stats.projects.items():
