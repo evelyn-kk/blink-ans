@@ -35,6 +35,15 @@ def build_url(src: Source, rel_path: Path, anchor: str | None) -> str:
     p = rel_path.as_posix()
     frag = f"#{anchor}" if anchor else ""
 
+    if src.url_strip_prefix and p.startswith(src.url_strip_prefix):
+        p = p[len(src.url_strip_prefix):]
+
+    # 显式模板优先：上游站点结构与仓库目录结构不一定对应
+    # （Kafka 的仓库已迁到 Hugo，但官网仍是单页锚点形式）
+    if src.url_template:
+        stem = p[: p.rfind(".")] if "." in Path(p).name else p
+        return src.url_template.format(path=stem, anchor=anchor or "", base=src.base_url.rstrip("/"))
+
     if src.format == "asciidoc":
         # Antora 布局: .../modules/<module>/pages/<name>.adoc -> <name>.html
         if "/pages/" in p:
