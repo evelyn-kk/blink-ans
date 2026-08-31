@@ -96,9 +96,24 @@ def test_tiny_section_merged_not_dropped():
 
 # ---------- URL 回链 ----------
 
-def test_url_asciidoc_antora_layout():
+def test_url_asciidoc_root_module_omits_segment():
+    """ROOT 模块在 Antora 的 URL 中不出现。"""
     u = build_url(src(), Path("src/main/antora/modules/ROOT/pages/redis/redis-cache.adoc"), "ttl")
     assert u == "https://docs.spring.io/spring-data-redis/reference/redis/redis-cache.html#ttl"
+
+
+def test_url_asciidoc_named_module_is_kept():
+    """非 ROOT 模块名必须保留在 URL 中。
+
+    实测教训: Spring Boot 有 reference / how-to / api 等模块，
+    早期实现只取 /pages/ 之后的部分，导致抽样 8 条链接全部 404。
+    """
+    s = src(project="spring-boot", base_url="https://docs.spring.io/spring-boot/")
+    u = build_url(s, Path("documentation/spring-boot-docs/src/docs/antora/modules/reference/pages/using/build-systems.adoc"), "build-systems")
+    assert u == "https://docs.spring.io/spring-boot/reference/using/build-systems.html#build-systems"
+
+    u2 = build_url(s, Path("documentation/spring-boot-docs/src/docs/antora/modules/how-to/pages/logging.adoc"), None)
+    assert u2 == "https://docs.spring.io/spring-boot/how-to/logging.html"
 
 
 def test_url_markdown_hugo_layout():

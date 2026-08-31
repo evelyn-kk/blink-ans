@@ -18,10 +18,12 @@ import threading
 from pathlib import Path
 
 TERMS_PATH = Path(__file__).resolve().parents[2] / "knowledge" / "tech_terms.txt"
+TERM_MAP_PATH = Path(__file__).resolve().parents[2] / "knowledge" / "term_map.yaml"
 
 _lock = threading.Lock()
 _ready = False
 _version: str | None = None
+_term_map: dict[str, list[str]] = {}
 
 
 def _load() -> None:
@@ -32,7 +34,16 @@ def _load() -> None:
         import jieba
 
         raw = TERMS_PATH.read_bytes()
-        _version = hashlib.sha256(raw).hexdigest()[:12]
+
+        import yaml
+
+        spec = yaml.safe_load(TERM_MAP_PATH.read_text(encoding="utf-8")) or {}
+        _term_map.update(spec.get("terms") or {})
+        # 映射表也参与词典版本：它变了，查询侧展开就变了，需与索引一同复核
+        _version = hashlib.sha256(raw + TERM_MAP_PATH.read_bytes()).hexdigest()[:12]
+
+        for zh in _term_map:
+            jieba.add_word(zh, freq=900)
 
         for line in raw.decode("utf-8").splitlines():
             line = line.strip()
@@ -75,12 +86,39 @@ def to_fts_document(text: str) -> str:
     return " ".join(tokenize(text))
 
 
-def to_fts_query(text: str) -> str:
+def expand_terms(text: str) -> list[str]:
+    """把查询中的中文技术概念展开为英文检索词。
+
+    I1 实测：首批语料 100% 为英文，中文 token 永远匹配不上正文，
+    关键词检索退化为按 "postgresql" 这类 ASCII 词排序的噪声。
+    展开后关键词路才能真正参与排序。
+    """
+    _load()
+    out: list[str] = []
+    lowered = text.lower()
+    for zh, ens in _term_map.items():
+        if zh in text or zh.lower() in lowered:
+            out.extend(ens)
+    return out
+
+
+def to_fts_query(text: str, expand: bool = True) -> str:
     """查询侧：转成 FTS5 的 OR 查询。
 
     用 OR 而非 AND：语音转写会写错技术名词（I0 实测 Kafka→CAFCA），
     要求全部词命中会让一个错字毁掉整次检索。相关性由 bm25 与 RRF 融合决定。
     """
     toks = [t.replace('"', "") for t in tokenize(text)]
-    toks = [t for t in toks if t]
-    return " OR ".join(f'"{t}"' for t in toks) if toks else '""'
+    if expand:
+        for phrase in expand_terms(text):
+            # 英文映射词按空白切开后各自入查询，短语整体也保留
+            toks.extend(p.lower() for p in phrase.split())
+            if " " in phrase:
+                toks.append(phrase.lower())
+    seen, uniq = set(), []
+    for t in toks:
+        t = t.strip().replace('"', "")
+        if t and t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return " OR ".join(f'"{t}"' for t in uniq) if uniq else '""'

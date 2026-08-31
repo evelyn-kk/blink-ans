@@ -162,6 +162,51 @@ class IndexBuilder:
         self.staging.unlink(missing_ok=True)
 
 
+class EmbeddingCache:
+    """按正文校验和复用已有索引里的向量。
+
+    嵌入是同步流程里最慢的一步（I0 实测 12.9 chunk/s，全量 13k 块约 51 分钟），
+    但它只依赖正文。修正 URL 映射、标题路径这类元数据时正文没变，
+    没有理由重算——这也是 development.md 第 4 节要求的增量同步的基础。
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or CURRENT
+        self._db: sqlite3.Connection | None = None
+        self.hits = 0
+        self.misses = 0
+        if self.path.exists():
+            try:
+                self._db = _connect(self.path)
+            except Exception:
+                self._db = None
+
+    @property
+    def available(self) -> bool:
+        return self._db is not None
+
+    def get(self, checksum: str) -> list[float] | None:
+        if self._db is None:
+            return None
+        row = self._db.execute(
+            """SELECT v.embedding AS e FROM chunks c
+               JOIN chunks_vec v ON v.rowid = c.id
+               WHERE c.checksum = ?""",
+            (checksum,),
+        ).fetchone()
+        if row is None or row["e"] is None:
+            self.misses += 1
+            return None
+        self.hits += 1
+        blob = row["e"]
+        return list(struct.unpack(f"{len(blob) // 4}f", blob))
+
+    def close(self) -> None:
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+
+
 class ChunkStore:
     """只读索引访问。"""
 

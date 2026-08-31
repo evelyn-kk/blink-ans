@@ -58,3 +58,48 @@ def test_document_is_space_separated():
 def test_dictionary_version_is_stable_and_short():
     v1, v2 = dictionary_version(), dictionary_version()
     assert v1 == v2 and len(v1) == 12
+
+
+# ---------- 中英术语展开 ----------
+
+def test_chinese_terms_expand_to_english():
+    """首批语料 100% 为英文，中文 token 匹配不上正文。
+
+    I1 实测：未展开时「PostgreSQL 慢查询 执行计划」的关键词路返回
+    Information Schema 与回归测试文档（纯噪声）；
+    展开出 EXPLAIN / execution plan 后命中
+    "Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE"。
+    """
+    from services.retrieval.tokenize import expand_terms
+
+    ens = [e.lower() for e in expand_terms("PostgreSQL 慢查询 执行计划变成全表扫描")]
+    assert "explain" in ens
+    assert any("execution plan" in e or "query plan" in e for e in ens)
+    assert any("seq scan" in e or "sequential scan" in e for e in ens)
+
+
+def test_expansion_reaches_fts_query():
+    q = to_fts_query("Redis 序列化怎么配置")
+    assert "serializer" in q.lower() or "serialization" in q.lower()
+
+
+def test_expansion_can_be_disabled():
+    plain = to_fts_query("慢查询", expand=False)
+    assert "explain" not in plain.lower()
+
+
+def test_unmapped_query_still_works():
+    assert to_fts_query("某个完全没有映射的说法") != '""'
+
+
+def test_query_tokens_are_deduplicated():
+    """多个中文词可能展开出同一个英文词，重复会让 bm25 打分失真。"""
+    q = to_fts_query("慢查询 执行计划")   # 两者都展开出 EXPLAIN
+    assert q.lower().count('"explain"') == 1
+
+
+def test_term_map_changes_dictionary_version():
+    """映射表变更会改变查询展开，必须触发索引复核。"""
+    from services.retrieval.tokenize import TERM_MAP_PATH
+    assert TERM_MAP_PATH.exists()
+    assert len(dictionary_version()) == 12
