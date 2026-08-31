@@ -33,9 +33,15 @@ sources:
     ref: trunk
     license: Apache-2.0
     license_file: LICENSE
-    format: html
+    # 上游已从单页 HTML 迁移到 Hugo Markdown（2026-08-31 核实，112 个 .md 文件）
+    format: markdown
     locale: en
     base_url: https://kafka.apache.org/documentation/
+    url_strip_prefix: "docs/"
+    # 仓库已迁移但官网尚未切换，仍是单页锚点形式：
+    # /documentation/design/ 返回 404，只有 /documentation/#design 可达。
+    # 因此链接只能定位到文档页与锚点，不能定位到独立子页。上游发布新站后需复核。
+    url_template: "{base}/#{anchor}"
     paths:
       - docs
     ingest: true

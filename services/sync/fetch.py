@@ -152,6 +152,14 @@ def collect_files(src: Source, root: Path) -> list[Path]:
         if not base.exists():
             raise FetchError(f"{src.id}: 登记路径 {rel} 不存在于仓库中（上游可能已重构目录）")
         files.extend(p for p in base.rglob("*") if p.suffix.lower() in exts and p.is_file())
+
+    if not files:
+        # 静默的 0 文件比报错更糟：索引会悄悄少掉一整个来源而回归可能仍然通过。
+        # Kafka 就发生过这种情况——文档从 HTML 迁到 Markdown，而注册表仍写 html。
+        raise FetchError(
+            f"{src.id}: 在 {', '.join(src.paths)} 下没有找到任何 {src.format} 文件"
+            f"（后缀 {'/'.join(exts)}）。上游可能变更了文档格式或目录结构，请核对注册表"
+        )
     return sorted(files)
 
 

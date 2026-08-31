@@ -1,0 +1,161 @@
+"""混合检索的行为回归。
+
+用合成向量建一个小索引，避免依赖模型加载——这些断言检验的是融合、
+过滤和预算逻辑，与嵌入质量无关。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from packages.schemas.chunk import Chunk, utc_now  # noqa: E402
+from services.retrieval import store as store_mod  # noqa: E402
+from services.retrieval.embed import DIM  # noqa: E402
+from services.retrieval.search import hybrid_search, keyword_search, rrf_fuse  # noqa: E402
+from services.retrieval.store import ChunkStore, IndexBuilder  # noqa: E402
+
+DOCS = [
+    ("kafka", "kafka", ["Kafka", "消费者"], "消费者组重平衡会导致未提交的 offset 被重新拉取，产生重复消费。"),
+    ("kafka", "kafka", ["Kafka", "事务"], "Kafka 事务型生产者通过 transactional.id 实现精确一次语义。"),
+    ("redis", "spring-data-redis", ["Redis", "库存"], "使用 Lua 脚本做预扣库存可以保证原子性，但主从切换时可能丢失写入导致超卖。"),
+    ("postgresql", "postgresql", ["PostgreSQL", "慢查询"], "慢查询通常来自统计信息过期，执行计划从 Index Scan 退化为 Seq Scan。"),
+    ("kubernetes", "kubernetes", ["Kubernetes", "探针"], "liveness probe 配置过于激进会在 GC 停顿期间误杀 Pod。"),
+]
+
+
+def _vec(i: int) -> list[float]:
+    """确定性的合成向量：第 i 维为 1，其余为 0。查询取哪一维就命中哪一条。"""
+    v = [0.0] * DIM
+    v[i] = 1.0
+    return v
+
+
+@pytest.fixture(scope="module")
+def store(tmp_path_factory) -> ChunkStore:
+    d = tmp_path_factory.mktemp("index")
+    orig = store_mod.INDEX_DIR
+    store_mod.INDEX_DIR = d
+    try:
+        b = IndexBuilder("test")
+        chunks, vecs = [], []
+        for i, (tech, proj, path, text) in enumerate(DOCS):
+            chunks.append(Chunk(
+                source_url=f"https://example.com/{proj}/{i}.html#s",
+                source_project=proj, version_or_commit="abc123", license="Apache-2.0",
+                retrieved_at=utc_now(), title_path=path, technology=tech,
+                content_type="prose", locale="zh", text=text,
+            ))
+            vecs.append(_vec(i))
+        for c in chunks:
+            c.validate()
+        assert b.add(chunks, vecs) == len(chunks)
+        b.finalize({"t": "abc123"}, "synthetic")
+        b.activate()
+        s = ChunkStore(d / "test.db")
+        yield s
+        s.close()
+    finally:
+        store_mod.INDEX_DIR = orig
+
+
+# ---------- 关键词检索 ----------
+
+def test_chinese_keyword_search_works(store):
+    """FTS5 默认分词器对中文命中为 0；预分词后必须能检索到。"""
+    hits = keyword_search(store, "重复消费")
+    assert hits, "中文关键词检索无结果，分词管线可能坏了"
+
+
+def test_tech_term_not_split_in_search(store):
+    assert keyword_search(store, "预扣库存")
+    assert keyword_search(store, "慢查询")
+
+
+def test_keyword_tolerates_partial_query(store):
+    """查询用 OR 融合：转写写错一个词不应毁掉整次检索。"""
+    assert keyword_search(store, "Kafka 消费者 CAFCA 乱码词")
+
+
+# ---------- 融合 ----------
+
+def test_rrf_prefers_item_ranked_by_both(store):
+    """两路都命中的条目应排在只有一路命中的前面。"""
+    kw = [(1, -2.0), (2, -1.0)]
+    vec = [(2, 0.1), (3, 0.2)]
+    fused = rrf_fuse(kw, vec)
+    assert fused[2][0] > fused[1][0] and fused[2][0] > fused[3][0]
+
+
+def test_hybrid_records_which_path_matched(store):
+    hits = hybrid_search(store, "重复消费", _vec(0), limit=5)
+    top = hits[0]
+    assert top.keyword_rank is not None or top.vector_rank is not None
+
+
+def test_vector_only_query_returns_expected_doc(store):
+    hits = hybrid_search(store, "无关词汇xyzzy", _vec(3), limit=1)
+    assert hits and "慢查询" in hits[0].text
+
+
+# ---------- 过滤与预算 ----------
+
+def test_technology_filter_applies_to_both_paths(store):
+    hits = hybrid_search(store, "配置", _vec(0), limit=10, technology="kubernetes")
+    assert hits and all(h.technology == "kubernetes" for h in hits)
+
+
+def test_project_filter(store):
+    hits = hybrid_search(store, "Kafka", _vec(0), limit=10, project="kafka")
+    assert all(h.source_project == "kafka" for h in hits)
+
+
+def test_token_budget_is_respected(store):
+    """上下文预算是 I0 实测的硬约束：超出即首 token 时延超标。"""
+    budget = 30
+    hits = hybrid_search(store, "消费 库存 查询 探针", _vec(0), limit=10, token_budget=budget)
+    assert sum(h.token_estimate for h in hits) <= budget
+
+
+def test_no_results_returns_empty_not_error(store):
+    """完全无共同 token 时返回空列表而非报错。"""
+    assert hybrid_search(store, "zzzqqq xyzzy plugh", None, limit=5) == []
+
+
+def test_or_query_gives_high_recall_low_precision(store):
+    """OR 查询会让几乎任何中文提问都命中——这是有意为之，但有代价。
+
+    用 OR 是为了容忍语音转写的错字（I0 实测 Kafka→CAFCA）：
+    要求全部词命中会让一个错字毁掉整次检索。
+    代价是召回极高而精度全靠 bm25 与 RRF 排序兜底。
+
+    **对 I2 的直接影响：判定"证据不足"不能靠空结果，必须靠相关性阈值。**
+    这条断言就是把该行为固化下来，避免后续误以为空结果可用作判据。
+    """
+    hits = hybrid_search(store, "完全无关的中文句子内容", None, limit=5)
+    assert hits, "含常见中文词的查询预期仍会命中，判定证据不足需另设阈值"
+
+
+# ---------- 引用 ----------
+
+def test_hit_citation_contains_version_and_date(store):
+    hits = hybrid_search(store, "重复消费", _vec(0), limit=1)
+    c = hits[0].citation
+    assert "abc123" in c and hits[0].retrieved_at[:4] in c
+
+
+def test_source_url_is_clickable(store):
+    hits = hybrid_search(store, "重复消费", _vec(0), limit=1)
+    assert hits[0].source_url.startswith("https://")
+
+
+# ---------- 词典版本绑定 ----------
+
+def test_dictionary_mismatch_refuses_to_open(store, monkeypatch):
+    """词典变更后必须拒绝打开旧索引，否则召回静默劣化。"""
+    monkeypatch.setattr(store_mod, "dictionary_version", lambda: "deadbeef0000")
+    with pytest.raises(store_mod.IndexError_, match="词典"):
+        ChunkStore(store.path, check_dictionary=True)

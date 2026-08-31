@@ -71,6 +71,28 @@ def cmd_search(args) -> int:
     return 0
 
 
+def cmd_verify_links(args) -> int:
+    from services.retrieval.store import ChunkStore
+    from services.retrieval.verify_links import verify
+
+    store = ChunkStore(check_dictionary=False)
+    print(f"每个来源抽样 {args.sample} 条链接...")
+    rep = verify(store, args.sample, args.timeout)
+
+    for proj, buckets in sorted(rep.by_project.items()):
+        total = sum(buckets.values())
+        ok = buckets.get("ok", 0)
+        print(f"  {proj:<22} {ok}/{total} 可达" + (f"  异常: {dict(buckets)}" if ok < total else ""))
+
+    if rep.failures:
+        print(f"\n{len(rep.failures)} 条链接不可达:")
+        for proj, url, code in rep.failures[:15]:
+            print(f"  [{code}] {url}")
+        return 1
+    print("\n全部抽样链接可达")
+    return 0
+
+
 def cmd_stats(args) -> int:
     from services.retrieval.store import ChunkStore
 
@@ -104,6 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--project")
     p.add_argument("--keyword-only", action="store_true", help="跳过向量检索")
     p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser("verify-links", help="抽样验证引用链接可达性")
+    p.add_argument("--sample", type=int, default=5, help="每个来源抽样条数")
+    p.add_argument("--timeout", type=float, default=10.0)
+    p.set_defaults(fn=cmd_verify_links)
 
     sub.add_parser("stats", help="索引概况").set_defaults(fn=cmd_stats)
 

@@ -39,6 +39,8 @@ class Source:
     locale: str
     base_url: str
     paths: tuple[str, ...]
+    url_template: str | None = None   # 可用 {path} 与 {anchor} 占位
+    url_strip_prefix: str | None = None
     ingest: bool = True
     ingest_blocked_reason: str | None = None
     sync_frequency: str = "monthly"
@@ -67,7 +69,10 @@ def _one(raw: dict[str, Any]) -> Source:
             f"来源 {raw['id']!r} 标记为不入库，必须写明 ingest_blocked_reason 以便审计"
         )
 
-    known = set(_REQUIRED) | {"ingest", "ingest_blocked_reason", "sync_frequency"}
+    known = set(_REQUIRED) | {
+        "ingest", "ingest_blocked_reason", "sync_frequency",
+        "url_template", "url_strip_prefix",
+    }
     return Source(
         id=raw["id"],
         project=raw["project"],
@@ -80,6 +85,8 @@ def _one(raw: dict[str, Any]) -> Source:
         locale=raw["locale"],
         base_url=raw["base_url"],
         paths=tuple(raw["paths"]),
+        url_template=raw.get("url_template"),
+        url_strip_prefix=raw.get("url_strip_prefix"),
         ingest=ingest,
         ingest_blocked_reason=raw.get("ingest_blocked_reason"),
         sync_frequency=raw.get("sync_frequency", "monthly"),
