@@ -1,0 +1,63 @@
+# ---- AI 开发文档（按 scope.md 要求不入库）----
+AGENTS.md
+scope.md
+architecture.md
+development.md
+plan.md
+progress.md
+
+# ---- 模型、索引、语料、音频 ----
+/models/
+/data/
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+*.mlpackage
+knowledge/corpus/
+knowledge/cache/
+*.sqlite
+*.sqlite3
+*.db
+*.faiss
+
+# ---- 运行时产物 ----
+/logs/
+*.log
+bench/reports/*.json
+bench/reports/*.md
+!bench/reports/.gitkeep
+.audio/
+*.wav
+*.pcm
+*.m4a
+
+# ---- 凭据 ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!infra/config/*.example.*
+secrets/
+
+# ---- 语言与工具链 ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+.coverage
+htmlcov/
+
+# ---- macOS / 编辑器 ----
+.DS_Store
+.idea/
+.vscode/
