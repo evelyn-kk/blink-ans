@@ -68,12 +68,15 @@ sources:
     project: postgresql
     technology: postgresql
     repo: https://github.com/postgres/postgres
-    ref: master
+    # 锁定发布分支而非 master：master 是未发布的开发版，
+    # 其内容在 /docs/current/ 上不存在，会产生大量 404，
+    # 且"版本准确"是本产品的核心卖点，版本与链接必须对齐。
+    ref: REL_17_STABLE
     license: PostgreSQL
     license_file: COPYRIGHT
     format: docbook
     locale: en
-    base_url: https://www.postgresql.org/docs/current/
+    base_url: https://www.postgresql.org/docs/17/
     paths:
       - doc/src/sgml
     ingest: true

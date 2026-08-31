@@ -107,10 +107,21 @@ def test_url_markdown_hugo_layout():
     assert u == "https://kubernetes.io/docs/concepts/workloads/pods/#lifecycle"
 
 
-def test_url_docbook_uses_section_id_as_page():
-    s = src(format="docbook", base_url="https://www.postgresql.org/docs/current/")
-    u = build_url(s, Path("doc/src/sgml/config.sgml"), "runtime-config-query")
-    assert u == "https://www.postgresql.org/docs/current/runtime-config-query.html"
+def test_url_docbook_sect1_becomes_page():
+    s = src(format="docbook", base_url="https://www.postgresql.org/docs/17/")
+    u = build_url(s, Path("doc/src/sgml/config.sgml"), "runtime-config-query", "runtime-config-query")
+    assert u == "https://www.postgresql.org/docs/17/runtime-config-query.html"
+
+
+def test_url_docbook_deep_sect_becomes_anchor_not_page():
+    """PostgreSQL 只在 chapter/sect1 级别分页；深层 sect 当页名会 404。
+
+    实测: /docs/current/collation-managing-create-libc.html 返回 404，
+    而 /docs/17/collation.html 返回 200。
+    """
+    s = src(format="docbook", base_url="https://www.postgresql.org/docs/17/")
+    u = build_url(s, Path("doc/src/sgml/charset.sgml"), "collation-managing-create-libc", "collation")
+    assert u == "https://www.postgresql.org/docs/17/collation.html#collation-managing-create-libc"
 
 
 def test_url_without_anchor_has_no_fragment():

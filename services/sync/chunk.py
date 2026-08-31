@@ -26,7 +26,7 @@ _CODE_FENCE = re.compile(r"^```", re.M)
 _ADOC_ANCHOR = re.compile(r"^\[\[([\w.-]+)\]\]\s*$", re.M)
 
 
-def build_url(src: Source, rel_path: Path, anchor: str | None) -> str:
+def build_url(src: Source, rel_path: Path, anchor: str | None, page_id: str | None = None) -> str:
     """由仓库内路径还原官方站点的可点击地址。
 
     引用必须回链到 source_url 并显示版本或抓取日期（architecture.md 5.2），
@@ -62,9 +62,11 @@ def build_url(src: Source, rel_path: Path, anchor: str | None) -> str:
         return f"{src.base_url.rstrip('/')}/{p}/{frag}"
 
     if src.format == "docbook":
-        # PostgreSQL 的 HTML 页名即 sect 的 id
-        name = anchor or Path(p).stem
-        return f"{src.base_url.rstrip('/')}/{name}.html"
+        # PostgreSQL 的 HTML 只在 chapter / sect1 级别分页；
+        # 更深的 sect 是页内锚点，直接当页名会产生 404。
+        page = page_id or anchor or Path(p).stem
+        tail = f"#{anchor}" if anchor and anchor != page else ""
+        return f"{src.base_url.rstrip('/')}/{page}.html{tail}"
 
     # html: 保留原文件名
     return f"{src.base_url.rstrip('/')}/{Path(p).name}{frag}"
@@ -143,7 +145,7 @@ def sections_to_chunks(
                 continue
             chunks.append(
                 Chunk(
-                    source_url=build_url(src, rel_path, sec.anchor),
+                    source_url=build_url(src, rel_path, sec.anchor, getattr(sec, "page_id", None)),
                     source_project=src.project,
                     version_or_commit=commit,
                     license=src.license,
