@@ -159,3 +159,30 @@ def test_dictionary_mismatch_refuses_to_open(store, monkeypatch):
     monkeypatch.setattr(store_mod, "dictionary_version", lambda: "deadbeef0000")
     with pytest.raises(store_mod.IndexError_, match="词典"):
         ChunkStore(store.path, check_dictionary=True)
+
+
+# ---------- 向量复用的安全性 ----------
+
+def test_embedding_cache_rejects_different_model(store):
+    """换嵌入模型后必须拒绝复用：校验和只覆盖正文，向量语义已变。
+
+    不比对模型名会静默复用错向量——不报错，只是检索悄悄变差，
+    是最难排查的一类问题。
+    """
+    from services.retrieval.store import EmbeddingCache
+
+    c = EmbeddingCache(store.path, embedding_model="some-other-model")
+    assert not c.available
+    assert c.rejected_reason and "不可复用" in c.rejected_reason
+
+
+def test_embedding_cache_reuses_when_model_matches(store):
+    from services.retrieval.store import EmbeddingCache
+
+    c = EmbeddingCache(store.path, embedding_model="synthetic")
+    assert c.available
+    row = store.db.execute("SELECT checksum FROM chunks LIMIT 1").fetchone()
+    v = c.get(row["checksum"])
+    assert v is not None and len(v) == DIM
+    assert c.hits == 1
+    c.close()

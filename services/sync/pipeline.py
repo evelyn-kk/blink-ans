@@ -146,9 +146,15 @@ def sync(
     log(f"同步 {len(sources)} 个来源")
     builder = IndexBuilder()
     embedder = Embedder()
-    cache = EmbeddingCache() if reuse_embeddings else EmbeddingCache(Path("/nonexistent"))
+    cache = (
+        EmbeddingCache(embedding_model=DEFAULT_MODEL)
+        if reuse_embeddings
+        else EmbeddingCache(Path("/nonexistent"))
+    )
     if cache.available:
         log("  复用当前索引中未变更正文的向量")
+    elif cache.rejected_reason:
+        log(f"  {cache.rejected_reason}")
     versions: dict[str, str] = {}
 
     try:

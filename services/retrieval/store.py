@@ -170,16 +170,31 @@ class EmbeddingCache:
     没有理由重算——这也是 development.md 第 4 节要求的增量同步的基础。
     """
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, embedding_model: str | None = None) -> None:
         self.path = path or CURRENT
         self._db: sqlite3.Connection | None = None
         self.hits = 0
         self.misses = 0
-        if self.path.exists():
-            try:
-                self._db = _connect(self.path)
-            except Exception:
-                self._db = None
+        self.rejected_reason: str | None = None
+        if not self.path.exists():
+            return
+        try:
+            db = _connect(self.path)
+        except Exception:
+            return
+
+        # 校验和只覆盖正文，换了嵌入模型后同一正文的向量语义完全不同。
+        # 不比对模型名就会静默复用错的向量——报错都没有，只是检索悄悄变差。
+        if embedding_model is not None:
+            row = db.execute("SELECT value FROM meta WHERE key = 'embedding_model'").fetchone()
+            built = row["value"] if row else None
+            if built != embedding_model:
+                self.rejected_reason = (
+                    f"索引由 {built} 建成，当前为 {embedding_model}，向量不可复用，将全部重算"
+                )
+                db.close()
+                return
+        self._db = db
 
     @property
     def available(self) -> bool:
