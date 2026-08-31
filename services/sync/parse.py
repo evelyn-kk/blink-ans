@@ -19,6 +19,9 @@ class Section:
     body: str
     anchor: str | None = None
     content_type: str = "prose"
+    # DocBook 专用：HTML 分页依据的 sect1/chapter id。
+    # 深层 sect 不是独立页面，只能作为该页的锚点。
+    page_id: str | None = None
 
 
 # 这些文件是导航、索引或贡献指南，不含技术结论
@@ -135,18 +138,32 @@ def parse_docbook(text: str, doc_title: str) -> list[Section]:
     """
     sections: list[Section] = []
     marks = list(_DB_SECT.finditer(text))
+    page_id: str | None = None      # 最近的 sect1/chapter id —— PostgreSQL 的 HTML 按此分页
+    stack: list[str] = []
+
     for i, m in enumerate(marks):
+        tag, sect_id = m.group(1).lower(), m.group(2)
+        # chapter 与 sect1 各自成页；sect2 及更深只是页内锚点
+        level = 1 if tag == "chapter" else int(tag[-1]) + 1
+        if level <= 2:
+            page_id = sect_id
+
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         block = text[m.end():end]
         title_m = _DB_TITLE.search(block)
-        title = _clean_html(title_m.group(1)) if title_m else m.group(2)
+        title = _clean_html(title_m.group(1)) if title_m else sect_id
+        stack = stack[: level - 1] + [""] * max(0, level - 1 - len(stack)) + [title]
+
         body = _DB_TITLE.sub("", block, count=1)
         body = re.sub(r"<programlisting[^>]*>(.*?)</programlisting>",
                       lambda x: "\n```\n" + _TAG.sub("", x.group(1)) + "\n```\n",
                       body, flags=re.S | re.I)
         cleaned = _clean_html(body)
         if cleaned.strip():
-            sections.append(Section([doc_title, title], cleaned, m.group(2)))
+            sec = Section([doc_title, *[t for t in stack if t]], cleaned, sect_id)
+            # 页面 id 与锚点分开存放，供 build_url 还原 <page>.html#<anchor>
+            sec.page_id = page_id or sect_id
+            sections.append(sec)
     return sections
 
 
