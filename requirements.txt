@@ -1,0 +1,10 @@
+# 本地推理与检索栈。Python 3.13（mlx 在 3.14 上生态尚不完整）。
+# 安装: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+mlx-lm==0.31.3
+mlx-whisper
+mlx-embeddings
+sqlite-vec==0.1.9
+jieba==0.42.1
+fastapi
+uvicorn[standard]
+pytest
