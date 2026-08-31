@@ -24,6 +24,19 @@ from common import Timer, peak_memory_gb, repeat, reset_peak_memory, write_repor
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
 # 中英混杂的技术口语，贴近真实提问方式
+# 技术术语词表偏置：whisper 的 initial_prompt 会影响解码时的先验。
+# 中英混杂的技术口语里，Kafka / PostgreSQL 这类词一旦识别错，检索必然失败，
+# 因此词表偏置的收益直接体现在检索命中率上，而不只是转写准确率。
+GLOSSARY = (
+    "以下是一段关于 Java 后端技术的讨论，涉及这些术语："
+    "Kafka、RabbitMQ、Redis、PostgreSQL、MySQL、Oracle、Elasticsearch、"
+    "Spring Boot、Spring Cloud、Hibernate、MyBatis、JPA、"
+    "Kubernetes、Docker、Helm、Istio、OpenTelemetry、Prometheus、Grafana、"
+    "Outbox、DLQ、offset、rebalance、幂等、预扣、超卖、扣减、对账、"
+    "慢查询、执行计划、索引、事务、回滚、连接池、"
+    "P95、P99、QPS、TPS、GC、JVM、OOM、CPU、liveness probe、readiness probe。"
+)
+
 UTTERANCES = {
     "short": "我们线上的 Kafka 消费者一直重复消费，offset 提交好像有问题，怎么排查？",
     "medium": (
@@ -76,6 +89,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument(
+        "--compare-glossary",
+        action="store_true",
+        help="对比开启/关闭技术术语词表偏置的转写差异",
+    )
     args = ap.parse_args()
 
     import mlx_whisper
@@ -93,7 +111,10 @@ def main() -> None:
         def once() -> dict[str, float]:
             t0 = time.perf_counter()
             out = mlx_whisper.transcribe(
-                str(wav), path_or_hf_repo=args.model, language="zh"
+                str(wav),
+                path_or_hf_repo=args.model,
+                language="zh",
+                initial_prompt=GLOSSARY if args.compare_glossary else None,
             )
             elapsed = time.perf_counter() - t0
             once.text = out["text"]
@@ -105,6 +126,7 @@ def main() -> None:
             "clip": name,
             "audio_seconds": round(dur, 2),
             "peak_memory_gb": peak_memory_gb(),
+            "glossary_biased": args.compare_glossary,
             "reference_text": reference,
             "transcribed_text": getattr(once, "text", ""),
             **stats,
