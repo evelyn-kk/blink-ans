@@ -1,0 +1,19 @@
+# 索引切换前的固定回归查询（development.md 第 4 节第 6 条）
+#
+# 这些不是评测题，只是"索引没坏"的烟雾测试：
+# 每条必须在指定来源里检索到结果，否则新索引不得激活。
+# 真正的答案质量评测在 I3 的 100 道场景题里做。
+
+queries:
+  - text: Kafka 消费者重复消费 offset 提交
+    expect_project: kafka
+  - text: Kubernetes liveness probe 配置
+    expect_project: kubernetes
+  - text: RedisTemplate 序列化配置
+    expect_project: spring-data-redis
+  - text: Spring Boot 自动配置 条件注解
+    expect_project: spring-boot
+  - text: PostgreSQL 执行计划 慢查询
+    expect_project: postgresql
+  - text: 连接池 配置
+    expect_project: null      # 任意来源命中即可，验证中文检索整体可用

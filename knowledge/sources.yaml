@@ -1,0 +1,110 @@
+# 知识来源注册表
+#
+# 规则（见 development.md 第 4 节、architecture.md 5.1）：
+# - 每个来源必须登记项目名、官方仓库、许可、分支或 tag、同步范围。
+# - 许可在同步时**从仓库内的许可文件实测校验**，不以本文件的声明为准；
+#   声明与实测不符时同步失败，不得入库。
+# - ingest: false 的来源只做实时链接检索（I6），正文不进核心语料。
+#
+# 校验记录：所有 license 与 paths 均于 2026-08-31 经 GitHub API 核实。
+
+version: 1
+
+sources:
+  - id: spring-boot
+    project: spring-boot
+    technology: spring
+    repo: https://github.com/spring-projects/spring-boot
+    ref: main
+    license: Apache-2.0
+    license_file: LICENSE.txt
+    format: asciidoc
+    locale: en
+    base_url: https://docs.spring.io/spring-boot/
+    paths:
+      - documentation/spring-boot-docs/src/docs/antora/modules
+    ingest: true
+    sync_frequency: monthly
+
+  - id: kafka
+    project: kafka
+    technology: kafka
+    repo: https://github.com/apache/kafka
+    ref: trunk
+    license: Apache-2.0
+    license_file: LICENSE
+    format: html
+    locale: en
+    base_url: https://kafka.apache.org/documentation/
+    paths:
+      - docs
+    ingest: true
+    sync_frequency: monthly
+
+  - id: kubernetes
+    project: kubernetes
+    technology: kubernetes
+    repo: https://github.com/kubernetes/website
+    ref: main
+    license: CC-BY-4.0
+    license_file: LICENSE
+    format: markdown
+    locale: en
+    base_url: https://kubernetes.io/docs/
+    # 仓库 550MB，首期只取与生产问题最相关的两个子域
+    paths:
+      - content/en/docs/concepts
+      - content/en/docs/tasks
+    ingest: true
+    sync_frequency: monthly
+
+  - id: postgresql
+    project: postgresql
+    technology: postgresql
+    repo: https://github.com/postgres/postgres
+    ref: master
+    license: PostgreSQL
+    license_file: COPYRIGHT
+    format: docbook
+    locale: en
+    base_url: https://www.postgresql.org/docs/current/
+    paths:
+      - doc/src/sgml
+    ingest: true
+    sync_frequency: quarterly
+
+  - id: spring-data-redis
+    project: spring-data-redis
+    technology: redis
+    repo: https://github.com/spring-projects/spring-data-redis
+    ref: main
+    license: Apache-2.0
+    license_file: LICENSE.txt
+    format: asciidoc
+    locale: en
+    base_url: https://docs.spring.io/spring-data-redis/reference/
+    paths:
+      - src/main/antora/modules
+    ingest: true
+    sync_frequency: monthly
+
+  # ---- 仅实时链接检索，正文不入库 ----
+
+  - id: redis-official
+    project: redis
+    technology: redis
+    repo: https://github.com/redis/docs
+    ref: main
+    license: CC-BY-NC-SA-4.0
+    license_file: LICENSE
+    format: markdown
+    locale: en
+    base_url: https://redis.io/docs/latest/
+    paths:
+      - content
+    ingest: false
+    ingest_blocked_reason: >-
+      官方文档为 CC-BY-NC-SA-4.0（禁止商用），属 architecture.md 5.1 所指"限制更强"的资料，
+      不进核心语料库；Redis 相关问题由 spring-data-redis 覆盖使用侧，
+      官方细节走 I6 实时链接检索。
+    sync_frequency: never

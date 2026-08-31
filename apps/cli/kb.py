@@ -1,0 +1,115 @@
+"""kb —— 知识库命令行。
+
+    kb sources                     列出注册表中的来源与许可状态
+    kb sync [--only id,...]        同步、建索引、回归、激活
+    kb search "问题"                检索当前索引
+    kb stats                       当前索引概况
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from services.sync.registry import load_registry  # noqa: E402
+
+
+def cmd_sources(args) -> int:
+    for s in load_registry():
+        mark = "入库" if s.ingest else "仅链接"
+        print(f"{s.id:<20} {s.license:<18} {s.format:<9} {mark:<7} {s.repo}")
+        if not s.ingest:
+            print(f"  └─ {' '.join(s.ingest_blocked_reason.split())}")
+    return 0
+
+
+def cmd_sync(args) -> int:
+    from services.sync.pipeline import sync
+
+    only = [x.strip() for x in args.only.split(",")] if args.only else None
+    t0 = time.perf_counter()
+    report = sync(only, activate=not args.no_activate)
+    print(f"\n共 {report.total_chunks} 块，耗时 {time.perf_counter() - t0:.1f}s")
+    if not report.regression_passed:
+        print("回归未通过，索引未激活", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_search(args) -> int:
+    from services.retrieval.embed import Embedder
+    from services.retrieval.search import hybrid_search
+    from services.retrieval.store import ChunkStore
+
+    store = ChunkStore()
+    t0 = time.perf_counter()
+    vec = Embedder().encode_one(args.query) if not args.keyword_only else None
+    hits = hybrid_search(
+        store, args.query, vec,
+        limit=args.limit, token_budget=args.token_budget,
+        technology=args.technology, project=args.project,
+    )
+    elapsed = (time.perf_counter() - t0) * 1000
+
+    if not hits:
+        print("无结果")
+        return 1
+
+    total = sum(h.token_estimate for h in hits)
+    print(f"{len(hits)} 条结果，合计 {total} token，耗时 {elapsed:.0f} ms\n")
+    for i, h in enumerate(hits, 1):
+        ranks = f"kw#{h.keyword_rank or '-'} vec#{h.vector_rank or '-'}"
+        print(f"[{i}] {h.citation}")
+        print(f"    {h.source_url}")
+        print(f"    融合分 {h.score:.4f} ({ranks}) | {h.token_estimate} tok | {h.content_type}")
+        body = " ".join(h.text.split())
+        print(f"    {body[:180]}{'...' if len(body) > 180 else ''}\n")
+    return 0
+
+
+def cmd_stats(args) -> int:
+    from services.retrieval.store import ChunkStore
+
+    store = ChunkStore(check_dictionary=False)
+    print(f"索引: {store.path}")
+    print(f"切块总数: {store.count()}")
+    for k in ("embedding_model", "embedding_dim", "dictionary_version"):
+        print(f"{k}: {store.meta.get(k)}")
+    print("\n按来源:")
+    for p, n in store.stats().items():
+        print(f"  {p:<22} {n}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="kb", description="知识库管理")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("sources", help="列出来源").set_defaults(fn=cmd_sources)
+
+    p = sub.add_parser("sync", help="同步并重建索引")
+    p.add_argument("--only", help="只同步指定来源，逗号分隔")
+    p.add_argument("--no-activate", action="store_true", help="只建暂存索引，不激活")
+    p.set_defaults(fn=cmd_sync)
+
+    p = sub.add_parser("search", help="检索")
+    p.add_argument("query")
+    p.add_argument("-n", "--limit", type=int, default=5)
+    p.add_argument("--token-budget", type=int, help="按 token 预算截断，模拟真实上下文约束")
+    p.add_argument("--technology")
+    p.add_argument("--project")
+    p.add_argument("--keyword-only", action="store_true", help="跳过向量检索")
+    p.set_defaults(fn=cmd_search)
+
+    sub.add_parser("stats", help="索引概况").set_defaults(fn=cmd_stats)
+
+    args = ap.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,196 @@
+"""索引存储 —— SQLite + sqlite-vec + FTS5。
+
+两个关键设计：
+
+1. **双缓冲**：新索引建在临时文件里，回归检索通过后才原子替换当前索引
+   （development.md 第 4 节第 5 条：索引失败不得覆盖当前可用索引）。
+
+2. **词典版本绑定**：中文分词依赖 knowledge/tech_terms.txt，索引侧与查询侧
+   词典不一致会让召回静默劣化。因此词典哈希写进 meta 表，打开索引时校验。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import struct
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from packages.schemas.chunk import Chunk  # noqa: E402
+
+from .embed import DIM  # noqa: E402
+from .tokenize import dictionary_version, to_fts_document  # noqa: E402
+
+INDEX_DIR = Path(__file__).resolve().parents[2] / "data" / "index"
+CURRENT = INDEX_DIR / "current.db"
+
+_SCHEMA = f"""
+CREATE TABLE chunks (
+    id                INTEGER PRIMARY KEY,
+    checksum          TEXT NOT NULL UNIQUE,
+    source_url        TEXT NOT NULL,
+    source_project    TEXT NOT NULL,
+    version_or_commit TEXT NOT NULL,
+    license           TEXT NOT NULL,
+    retrieved_at      TEXT NOT NULL,
+    title_path        TEXT NOT NULL,
+    technology        TEXT NOT NULL,
+    content_type      TEXT NOT NULL,
+    locale            TEXT NOT NULL,
+    token_estimate    INTEGER NOT NULL,
+    anchor            TEXT,
+    source_path       TEXT,
+    text              TEXT NOT NULL
+);
+CREATE INDEX idx_chunks_tech ON chunks(technology);
+CREATE INDEX idx_chunks_project ON chunks(source_project);
+
+-- 中文必须预分词后写入；FTS5 默认分词器对中文完全失效（I0 实测命中 0）
+CREATE VIRTUAL TABLE chunks_fts USING fts5(tokenized, content='');
+
+CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[{DIM}]);
+
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    db.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(db)
+    db.enable_load_extension(False)
+    return db
+
+
+def _pack(vec: Sequence[float]) -> bytes:
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+class IndexError_(RuntimeError):
+    pass
+
+
+@dataclass
+class IndexStats:
+    chunks: int
+    projects: dict[str, int]
+    path: Path
+
+
+class IndexBuilder:
+    """把切块写入一个**新的**索引文件，不触碰当前索引。"""
+
+    def __init__(self, name: str = "current") -> None:
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        self.target = INDEX_DIR / f"{name}.db"
+        self.staging = INDEX_DIR / f"{name}.building.db"
+        self.staging.unlink(missing_ok=True)
+        self.db = _connect(self.staging)
+        self.db.executescript(_SCHEMA)
+        self._n = 0
+
+    def add(self, chunks: list[Chunk], vectors: list[Sequence[float]]) -> int:
+        """写入一批切块。调用方须保证每块已通过 validate()。"""
+        if len(chunks) != len(vectors):
+            raise IndexError_(f"切块数 {len(chunks)} 与向量数 {len(vectors)} 不一致")
+
+        added = 0
+        for c, v in zip(chunks, vectors):
+            row = c.to_row()
+            try:
+                cur = self.db.execute(
+                    """INSERT INTO chunks
+                       (checksum, source_url, source_project, version_or_commit, license,
+                        retrieved_at, title_path, technology, content_type, locale,
+                        token_estimate, anchor, source_path, text)
+                       VALUES (:checksum, :source_url, :source_project, :version_or_commit,
+                               :license, :retrieved_at, :title_path, :technology,
+                               :content_type, :locale, :token_estimate, :anchor,
+                               :source_path, :text)""",
+                    row,
+                )
+            except sqlite3.IntegrityError:
+                continue  # checksum 重复：同一段正文在多处出现，只留一份
+            rid = cur.lastrowid
+            # 标题路径一并进全文索引：用户常用章节名而非正文原词提问
+            doc = to_fts_document(" ".join(c.title_path) + "\n" + c.text)
+            self.db.execute("INSERT INTO chunks_fts(rowid, tokenized) VALUES (?, ?)", (rid, doc))
+            self.db.execute("INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)", (rid, _pack(v)))
+            added += 1
+        self._n += added
+        self.db.commit()
+        return added
+
+    def finalize(self, sources: dict[str, str], embedding_model: str) -> IndexStats:
+        meta = {
+            "dictionary_version": dictionary_version(),
+            "embedding_model": embedding_model,
+            "embedding_dim": str(DIM),
+            "chunk_count": str(self._n),
+            "sources": json.dumps(sources, ensure_ascii=False),
+        }
+        self.db.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", meta.items())
+        self.db.commit()
+        projects = {
+            r["source_project"]: r["n"]
+            for r in self.db.execute(
+                "SELECT source_project, COUNT(*) n FROM chunks GROUP BY 1 ORDER BY 2 DESC"
+            )
+        }
+        self.db.close()
+        return IndexStats(chunks=self._n, projects=projects, path=self.staging)
+
+    def activate(self) -> Path:
+        """原子替换当前索引。仅在回归检索通过后调用。"""
+        if not self.staging.exists():
+            raise IndexError_("暂存索引不存在，无法激活")
+        backup = self.target.with_suffix(".previous.db")
+        if self.target.exists():
+            os.replace(self.target, backup)
+        os.replace(self.staging, self.target)
+        return self.target
+
+    def discard(self) -> None:
+        self.staging.unlink(missing_ok=True)
+
+
+class ChunkStore:
+    """只读索引访问。"""
+
+    def __init__(self, path: Path | None = None, *, check_dictionary: bool = True) -> None:
+        self.path = path or CURRENT
+        if not self.path.exists():
+            raise IndexError_(f"索引不存在: {self.path}，请先运行 kb sync")
+        self.db = _connect(self.path)
+        self.meta = {r["key"]: r["value"] for r in self.db.execute("SELECT key, value FROM meta")}
+
+        if check_dictionary:
+            built = self.meta.get("dictionary_version")
+            now = dictionary_version()
+            if built != now:
+                raise IndexError_(
+                    f"分词词典已变更（索引 {built} vs 当前 {now}）。"
+                    f"查询侧与索引侧词典不一致会让召回静默劣化，请重建索引"
+                )
+
+    def count(self) -> int:
+        return self.db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
+
+    def stats(self) -> dict[str, int]:
+        return {
+            r["source_project"]: r["n"]
+            for r in self.db.execute(
+                "SELECT source_project, COUNT(*) n FROM chunks GROUP BY 1 ORDER BY 2 DESC"
+            )
+        }
+
+    def close(self) -> None:
+        self.db.close()
