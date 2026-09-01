@@ -109,9 +109,10 @@ def cmd_verify_links(args) -> int:
     from services.retrieval.store import ChunkStore
     from services.retrieval.verify_links import verify
 
-    store = ChunkStore(check_dictionary=False)
-    print(f"每个来源抽样 {args.sample} 条链接...")
-    rep = verify(store, args.sample, args.timeout)
+    store = ChunkStore(Path(args.index) if args.index else None, check_dictionary=False)
+    what = "带锚点的链接并核对锚点是否存在" if args.check_anchors else "链接"
+    print(f"每个来源抽样 {args.sample} 条{what}...")
+    rep = verify(store, args.sample, args.timeout, check_anchors=args.check_anchors)
 
     for proj, buckets in sorted(rep.by_project.items()):
         total = sum(buckets.values())
@@ -173,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("verify-links", help="抽样验证引用链接可达性")
     p.add_argument("--sample", type=int, default=5, help="每个来源抽样条数")
     p.add_argument("--timeout", type=float, default=10.0)
+    p.add_argument("--check-anchors", action="store_true",
+                   help="取回页面核对锚点是否真的存在——页面 200 不代表锚点对")
+    p.add_argument("--index", help="改查指定索引文件")
     p.set_defaults(fn=cmd_verify_links)
 
     sub.add_parser("stats", help="索引概况").set_defaults(fn=cmd_stats)

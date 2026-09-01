@@ -7,6 +7,8 @@
 # - ingest: false 的来源只做实时链接检索（I6），正文不进核心语料。
 #
 # 校验记录：所有 license 与 paths 均于 2026-08-31 经 GitHub API 核实。
+# 2026-09-01：五个入库来源全部固定到发布版本，base_url 与 ref 同版本（CR-005）；
+#            锚点与链接以 `kb verify-links --check-anchors` 实测核对。
 
 version: 1
 
@@ -15,12 +17,15 @@ sources:
     project: spring-boot
     technology: spring
     repo: https://github.com/spring-projects/spring-boot
-    ref: main
+    # 固定发布 tag（CR-005）。main 是未发布的开发版，其章节 id 与官网
+    # 当前文档对不上；而"版本准确"是本产品的核心卖点，ref 与 base_url 必须同版本。
+    # 官网按 minor 线分目录：/4.1.1/ 会 301 到 /4.1/，因此 base_url 用 minor。
+    ref: v4.1.1
     license: Apache-2.0
     license_file: LICENSE.txt
     format: asciidoc
     locale: en
-    base_url: https://docs.spring.io/spring-boot/
+    base_url: https://docs.spring.io/spring-boot/4.1/
     paths:
       - documentation/spring-boot-docs/src/docs/antora/modules
     ingest: true
@@ -30,18 +35,20 @@ sources:
     project: kafka
     technology: kafka
     repo: https://github.com/apache/kafka
-    ref: trunk
+    # 固定发布 tag（CR-005）。官网新站按版本分目录，且**不接受无版本路径**：
+    # /getting-started/introduction 返回 404，/43/getting-started/introduction 才是 200。
+    ref: 4.3.1
     license: Apache-2.0
     license_file: LICENSE
     # 上游已从单页 HTML 迁移到 Hugo Markdown（2026-08-31 核实，112 个 .md 文件）
     format: markdown
     locale: en
-    base_url: https://kafka.apache.org/documentation/
+    # 2026-09-01 复核：官网**已经切换到新站**（Docsy 主题），I1 记录的"官网尚未切换"
+    # 已过时。旧的 /documentation/ 现在只是一个 JS 跳转桩，会把访问者送到
+    # /{版本}/getting-started/introduction。新结构与仓库 docs/ 目录一一对应，
+    # 因此去掉 url_template，改走通用的 Hugo 布局映射。
+    base_url: https://kafka.apache.org/43/
     url_strip_prefix: "docs/"
-    # 仓库已迁移但官网尚未切换，仍是单页锚点形式：
-    # /documentation/design/ 返回 404，只有 /documentation/#design 可达。
-    # 因此链接只能定位到文档页与锚点，不能定位到独立子页。上游发布新站后需复核。
-    url_template: "{base}/#{anchor}"
     paths:
       - docs
     ingest: true
@@ -51,12 +58,15 @@ sources:
     project: kubernetes
     technology: kubernetes
     repo: https://github.com/kubernetes/website
-    ref: main
+    # 固定发布分支（CR-005）。main 随时在改，且 kubernetes.io/docs/ 是滚动的
+    # latest；版本化站点 v1-36.docs.kubernetes.io 与 release-1.36 分支同版本。
+    # 2026-09-01 复核：v1-36 是当前最新的版本化站点，v1-37 尚不存在。
+    ref: release-1.36
     license: CC-BY-4.0
     license_file: LICENSE
     format: markdown
     locale: en
-    base_url: https://kubernetes.io/docs/
+    base_url: https://v1-36.docs.kubernetes.io/docs/
     # 仓库 550MB，首期只取与生产问题最相关的两个子域
     paths:
       - content/en/docs/concepts
@@ -86,12 +96,16 @@ sources:
     project: spring-data-redis
     technology: redis
     repo: https://github.com/spring-projects/spring-data-redis
-    ref: main
+    # 固定发布 tag（CR-005）。版本化文档在 docs.spring.io/spring-data/redis/
+    # 这个路径下（注意不是 spring-data-redis），/4.0/ 直接 200、/3.3/ 与 /9.9/ 404，
+    # 说明版本段是真的在生效；当前版本 /4.1/ 会 302 到无版本地址，
+    # 等 4.2 发布后 /4.1/ 会直接提供 4.1 的内容，正是需要的防漂移行为。
+    ref: 4.1.1
     license: Apache-2.0
     license_file: LICENSE.txt
     format: asciidoc
     locale: en
-    base_url: https://docs.spring.io/spring-data-redis/reference/
+    base_url: https://docs.spring.io/spring-data/redis/reference/4.1/
     paths:
       - src/main/antora/modules
     ingest: true
