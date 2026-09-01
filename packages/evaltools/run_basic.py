@@ -53,6 +53,7 @@ class Case:
     total_s: float = 0.0
     prompt_tokens: int = 0
     urls: list[str] = field(default_factory=list)
+    projects: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     declined: bool = False        # 模型明说证据未涵盖
     retrieval_miss: bool = False  # 检索给错证据，模型正确拒绝编造
@@ -89,6 +90,7 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
         elif t == "sources":
             c.sources = len(ev["items"])
             c.urls = [i["url"] for i in ev["items"]]
+            c.projects = [_project_of(i["citation"]) for i in ev["items"]]
         elif t == "done":
             c.cited = len(ev["cited_evidence"])
             c.ttft_s, c.total_s = ev["ttft_s"], ev["total_s"]
@@ -101,8 +103,9 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
     if c.expect == "answered":
         if c.sources == 0 and not c.declined:
             c.failures.append("未返回任何来源")
-        if c.project and c.urls and not any(_belongs(u, c.project) for u in c.urls):
-            c.failures.append(f"来源均不属于预期项目 {c.project}")
+        if c.project and c.projects and c.project not in c.projects:
+            got = ", ".join(sorted(set(c.projects))) or "无"
+            c.failures.append(f"来源均不属于预期项目 {c.project}（实际 {got}）")
 
         if c.declined:
             # 模型明说"证据未涵盖"是**正确行为**——检索给错了证据，它拒绝编造。
@@ -124,15 +127,16 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
     return c
 
 
-_HOST_HINT = {
-    "kafka": "kafka.apache.org", "kubernetes": "kubernetes.io",
-    "postgresql": "postgresql.org", "spring-boot": "docs.spring.io/spring-boot",
-    "spring-data-redis": "spring-data-redis",
-}
+def _project_of(citation: str) -> str:
+    """从引用串取来源项目名。
 
-
-def _belongs(url: str, project: str) -> bool:
-    return _HOST_HINT.get(project, project) in url
+    引用格式是 `<project> <version> · <标题路径> · 抓取于 <日期>`，项目名就是第一段。
+    这里**不能**改回"看 URL 里有没有项目名"那种猜法：官方站点的路径与项目名
+    并不总是一致——spring-data-redis 的文档发布在 docs.spring.io/spring-data/redis/ 下，
+    URL 里根本没有 `spring-data-redis` 这个串。按 URL 猜会把正确的来源判成不匹配，
+    看起来像检索退步，实际是判据自己坏了（2026-09-01 实际发生过一次）。
+    """
+    return citation.split(" ", 1)[0] if citation else ""
 
 
 def main() -> int:
