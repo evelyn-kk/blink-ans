@@ -33,7 +33,7 @@ CURRENT = INDEX_DIR / "current.db"
 _SCHEMA = f"""
 CREATE TABLE chunks (
     id                INTEGER PRIMARY KEY,
-    checksum          TEXT NOT NULL UNIQUE,
+    checksum          TEXT NOT NULL,
     source_url        TEXT NOT NULL,
     source_project    TEXT NOT NULL,
     version_or_commit TEXT NOT NULL,
@@ -46,10 +46,17 @@ CREATE TABLE chunks (
     token_estimate    INTEGER NOT NULL,
     anchor            TEXT,
     source_path       TEXT,
-    text              TEXT NOT NULL
+    text              TEXT NOT NULL,
+
+    -- 唯一键必须带上来源身份。只按 checksum 去重会让"同一段说明出现在两个页面"
+    -- 中的一个被静默丢弃，那个来源就再也引用不到（CR-003）。
+    UNIQUE(source_url, checksum)
 );
 CREATE INDEX idx_chunks_tech ON chunks(technology);
 CREATE INDEX idx_chunks_project ON chunks(source_project);
+-- 向量复用按 checksum 单独查（EmbeddingCache.get），
+-- 复合唯一键以 source_url 打头用不上，缺这条索引会退化成逐块全表扫描。
+CREATE INDEX idx_chunks_checksum ON chunks(checksum);
 
 -- 中文必须预分词后写入；FTS5 默认分词器对中文完全失效（I0 实测命中 0）
 CREATE VIRTUAL TABLE chunks_fts USING fts5(tokenized, content='');
@@ -122,7 +129,7 @@ class IndexBuilder:
                     row,
                 )
             except sqlite3.IntegrityError:
-                continue  # checksum 重复：同一段正文在多处出现，只留一份
+                continue  # 同一来源页内的完全重复正文，只留一份
             rid = cur.lastrowid
             # 标题路径一并进全文索引：用户常用章节名而非正文原词提问
             doc = to_fts_document(" ".join(c.title_path) + "\n" + c.text)
@@ -217,7 +224,7 @@ class EmbeddingCache:
         row = self._db.execute(
             """SELECT v.embedding AS e FROM chunks c
                JOIN chunks_vec v ON v.rowid = c.id
-               WHERE c.checksum = ?""",
+               WHERE c.checksum = ? LIMIT 1""",
             (checksum,),
         ).fetchone()
         if row is None or row["e"] is None:

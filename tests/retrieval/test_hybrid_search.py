@@ -186,3 +186,80 @@ def test_embedding_cache_reuses_when_model_matches(store):
     assert v is not None and len(v) == DIM
     assert c.hits == 1
     c.close()
+
+
+# ---------- 唯一键必须带来源身份（CR-003）----------
+
+def _same_text_chunks(url_a: str, url_b: str) -> list[Chunk]:
+    """同一段正文出现在两个页面上——官方文档里很常见（共用的注意事项、
+    同一段说明被两章引用）。两条都必须留下，否则其中一个来源就引用不到。"""
+    text = "Set spring.datasource.hikari.maximum-pool-size to bound connection usage."
+    out = []
+    for url, proj in ((url_a, "spring-boot"), (url_b, "spring-data-redis")):
+        out.append(Chunk(
+            source_url=url, source_project=proj, version_or_commit="abc123",
+            license="Apache-2.0", retrieved_at=utc_now(), title_path=["Pool", "Sizing"],
+            technology="spring", content_type="prose", locale="en", text=text,
+        ))
+    return out
+
+
+def test_same_text_from_different_urls_both_kept(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    b = IndexBuilder("dup")
+    chunks = _same_text_chunks("https://example.com/a.html#p", "https://example.com/b.html#p")
+    for c in chunks:
+        c.validate()
+    assert chunks[0].checksum == chunks[1].checksum, "前提：正文相同则校验和相同"
+    assert b.add(chunks, [_vec(0), _vec(1)]) == 2
+
+    b.finalize({"t": "abc123"}, "synthetic")
+    b.activate()
+    s = ChunkStore(tmp_path / "dup.db")
+    try:
+        rows = s.execute("SELECT source_url, source_project FROM chunks ORDER BY source_url")
+        assert [r["source_url"] for r in rows] == [
+            "https://example.com/a.html#p", "https://example.com/b.html#p",
+        ]
+        assert {r["source_project"] for r in rows} == {"spring-boot", "spring-data-redis"}
+    finally:
+        s.close()
+
+
+def test_same_text_same_url_is_deduplicated(tmp_path, monkeypatch):
+    """同一页内的完全重复仍然只留一条——去重本身没有被取消，只是加了来源维度。"""
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    b = IndexBuilder("dup2")
+    chunks = _same_text_chunks("https://example.com/a.html#p", "https://example.com/a.html#p")
+    for c in chunks:
+        c.validate()
+    assert b.add(chunks, [_vec(0), _vec(1)]) == 1
+
+    b.finalize({"t": "abc123"}, "synthetic")
+    b.activate()
+    s = ChunkStore(tmp_path / "dup2.db")
+    try:
+        assert s.count() == 1
+    finally:
+        s.close()
+
+
+def test_embedding_cache_serves_shared_checksum_once_per_lookup(tmp_path, monkeypatch):
+    """同一 checksum 现在对应多行，复用查询必须仍返回单个向量而不是报错。"""
+    from services.retrieval.store import EmbeddingCache
+
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    b = IndexBuilder("dup3")
+    chunks = _same_text_chunks("https://example.com/a.html#p", "https://example.com/b.html#p")
+    for c in chunks:
+        c.validate()
+    b.add(chunks, [_vec(0), _vec(0)])
+    b.finalize({"t": "abc123"}, "synthetic")
+    b.activate()
+
+    c = EmbeddingCache(tmp_path / "dup3.db", embedding_model="synthetic")
+    try:
+        v = c.get(chunks[0].checksum)
+        assert v is not None and len(v) == DIM
+    finally:
+        c.close()
