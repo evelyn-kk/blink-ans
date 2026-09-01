@@ -127,3 +127,18 @@ def test_citation_coverage_empty_when_no_evidence():
 def test_uncited_answer_reports_zero():
     """无引用的技术论断无法追溯，对本产品等同于不可用，必须能被观测到。"""
     assert citation_coverage("结论：应当调大线程池。", 3) == []
+
+
+# ---------- CR-002: 未加载时的错误路径不依赖 MLX ----------
+
+def test_stream_before_load_raises_runtime_error_without_mlx():
+    """未加载模型时必须抛 RuntimeError，而不是导入 MLX 失败。
+
+    代码评审 CR-002：错误路径若先导入 mlx_lm，在没有 Metal 的环境
+    （如 CI）会抛 ImportError，纯逻辑测试就无法作为门禁运行。
+    """
+    from services.inference.engine import InferenceEngine
+
+    eng = InferenceEngine()
+    with pytest.raises(RuntimeError, match="尚未加载"):
+        next(eng.stream("测试"))

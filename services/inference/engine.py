@@ -165,11 +165,14 @@ class InferenceEngine:
         传入的是**用户内容**（证据 + 问题），chat template 由引擎内部套用。
         use_prefix=True 时复用常驻的系统前缀 KV，只 prefill 变化部分。
         """
-        from mlx_lm import stream_generate
-        from mlx_lm.models.cache import make_prompt_cache
-
+        # 先判状态再导入：未加载时的错误路径不应依赖 Metal/MLX，
+        # 否则在没有 GPU 的环境里这条路径会抛 ImportError 而非 RuntimeError，
+        # 纯逻辑测试也就无法在 CI 上作为门禁运行。
         if not self.status.loaded:
             raise RuntimeError("模型尚未加载")
+
+        from mlx_lm import stream_generate
+        from mlx_lm.models.cache import make_prompt_cache
 
         # 覆盖系统提示词时前缀必然不匹配，直接放弃复用。
         # 证据不足分支用的是另一套短提示词，占比很小，不值得为它再驻留一份 KV。
