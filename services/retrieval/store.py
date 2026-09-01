@@ -33,7 +33,7 @@ CURRENT = INDEX_DIR / "current.db"
 _SCHEMA = f"""
 CREATE TABLE chunks (
     id                INTEGER PRIMARY KEY,
-    checksum          TEXT NOT NULL UNIQUE,
+    checksum          TEXT NOT NULL,
     source_url        TEXT NOT NULL,
     source_project    TEXT NOT NULL,
     version_or_commit TEXT NOT NULL,
@@ -46,10 +46,17 @@ CREATE TABLE chunks (
     token_estimate    INTEGER NOT NULL,
     anchor            TEXT,
     source_path       TEXT,
-    text              TEXT NOT NULL
+    text              TEXT NOT NULL,
+
+    -- 唯一键必须带上来源身份。只按 checksum 去重会让"同一段说明出现在两个页面"
+    -- 中的一个被静默丢弃，那个来源就再也引用不到（CR-003）。
+    UNIQUE(source_url, checksum)
 );
 CREATE INDEX idx_chunks_tech ON chunks(technology);
 CREATE INDEX idx_chunks_project ON chunks(source_project);
+-- 向量复用按 checksum 单独查（EmbeddingCache.get），
+-- 复合唯一键以 source_url 打头用不上，缺这条索引会退化成逐块全表扫描。
+CREATE INDEX idx_chunks_checksum ON chunks(checksum);
 
 -- 中文必须预分词后写入；FTS5 默认分词器对中文完全失效（I0 实测命中 0）
 CREATE VIRTUAL TABLE chunks_fts USING fts5(tokenized, content='');
@@ -84,9 +91,11 @@ class IndexError_(RuntimeError):
 
 @dataclass
 class IndexStats:
-    chunks: int
+    chunks: int                 # 索引内实际行数
     projects: dict[str, int]
     path: Path
+    added: int = 0              # 本次同步新写入
+    carried: int = 0            # 合并更新时从底座搬运
 
 
 class IndexBuilder:
@@ -100,6 +109,7 @@ class IndexBuilder:
         self.db = _connect(self.staging)
         self.db.executescript(_SCHEMA)
         self._n = 0
+        self.carried = 0
 
     def add(self, chunks: list[Chunk], vectors: list[Sequence[float]]) -> int:
         """写入一批切块。调用方须保证每块已通过 validate()。"""
@@ -122,7 +132,7 @@ class IndexBuilder:
                     row,
                 )
             except sqlite3.IntegrityError:
-                continue  # checksum 重复：同一段正文在多处出现，只留一份
+                continue  # 同一来源页内的完全重复正文，只留一份
             rid = cur.lastrowid
             # 标题路径一并进全文索引：用户常用章节名而非正文原词提问
             doc = to_fts_document(" ".join(c.title_path) + "\n" + c.text)
@@ -133,12 +143,87 @@ class IndexBuilder:
         self.db.commit()
         return added
 
+    def carry_over(self, source_index: Path, exclude_projects: set[str], embedding_model: str) -> int:
+        """从既有索引里搬运**不参与本次同步**的来源，用于合并更新（CR-004）。
+
+        不用 DELETE 从副本里剔除，而是反过来把要保留的搬进空索引：
+        `chunks_fts` 是 contentless 表，删除需要原始分词文本，
+        而搬运时正文就在手边，按当前词典重算反而更正确——
+        词典改了，被搬运来源的分词也随之更新，不会留下按旧词典切的残余。
+
+        向量不能重算（太慢），因此嵌入模型必须一致，否则拒绝合并。
+        """
+        if not source_index.exists():
+            raise IndexError_(f"合并更新需要一个已有索引作为底座，但 {source_index} 不存在")
+        src = _connect(source_index)
+        try:
+            built = src.execute(
+                "SELECT value FROM meta WHERE key = 'embedding_model'"
+            ).fetchone()
+            built = built["value"] if built else None
+            if built != embedding_model:
+                raise IndexError_(
+                    f"底座索引由 {built} 建成，当前嵌入模型为 {embedding_model}；"
+                    f"向量语义不同不能混用，请改用全量重建"
+                )
+
+            moved = 0
+            rows = src.execute(
+                """SELECT c.*, v.embedding AS embedding FROM chunks c
+                   JOIN chunks_vec v ON v.rowid = c.id
+                   ORDER BY c.id"""
+            )
+            for r in rows:
+                if r["source_project"] in exclude_projects:
+                    continue
+                cur = self.db.execute(
+                    """INSERT INTO chunks
+                       (checksum, source_url, source_project, version_or_commit, license,
+                        retrieved_at, title_path, technology, content_type, locale,
+                        token_estimate, anchor, source_path, text)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tuple(r[k] for k in (
+                        "checksum", "source_url", "source_project", "version_or_commit",
+                        "license", "retrieved_at", "title_path", "technology",
+                        "content_type", "locale", "token_estimate", "anchor",
+                        "source_path", "text")),
+                )
+                rid = cur.lastrowid
+                doc = to_fts_document(r["title_path"].replace(" › ", " ") + "\n" + r["text"])
+                self.db.execute(
+                    "INSERT INTO chunks_fts(rowid, tokenized) VALUES (?, ?)", (rid, doc)
+                )
+                self.db.execute(
+                    "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                    (rid, r["embedding"]),
+                )
+                moved += 1
+        finally:
+            src.close()
+        self.db.commit()
+        self.carried = moved
+        return moved
+
+    def existing_versions(self, source_index: Path) -> dict[str, str]:
+        """读出底座索引记录的来源版本，合并时只覆盖本次同步的那几个。"""
+        if not source_index.exists():
+            return {}
+        db = _connect(source_index)
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key = 'sources'").fetchone()
+        except Exception:
+            return {}
+        finally:
+            db.close()
+        return json.loads(row["value"]) if row else {}
+
     def finalize(self, sources: dict[str, str], embedding_model: str) -> IndexStats:
+        total = self.db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
         meta = {
             "dictionary_version": dictionary_version(),
             "embedding_model": embedding_model,
             "embedding_dim": str(DIM),
-            "chunk_count": str(self._n),
+            "chunk_count": str(total),
             "sources": json.dumps(sources, ensure_ascii=False),
         }
         self.db.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", meta.items())
@@ -150,7 +235,7 @@ class IndexBuilder:
             )
         }
         self.db.close()
-        return IndexStats(chunks=self._n, projects=projects, path=self.staging)
+        return IndexStats(chunks=total, added=self._n, carried=self.carried, projects=projects, path=self.staging)
 
     def activate(self) -> Path:
         """原子替换当前索引。仅在回归检索通过后调用。"""
@@ -217,7 +302,7 @@ class EmbeddingCache:
         row = self._db.execute(
             """SELECT v.embedding AS e FROM chunks c
                JOIN chunks_vec v ON v.rowid = c.id
-               WHERE c.checksum = ?""",
+               WHERE c.checksum = ? LIMIT 1""",
             (checksum,),
         ).fetchone()
         if row is None or row["e"] is None:

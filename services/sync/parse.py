@@ -118,13 +118,30 @@ def parse_markdown(text: str, doc_title: str) -> list[Section]:
         text = text[m.end():]
 
     text = _MD_COMMENT.sub("", _MD_SHORTCODE.sub("", text))
-    return _split_by_headings(text, _MD_HEADING, [title],
-                             lambda m: (len(m.group(1)), m.group(2)))
+    return _split_by_headings(text, _MD_HEADING, [title], _md_heading_parts)
+
+
+# Hugo 的显式锚点写在标题末尾：`## Increase the load {#increase-load}`。
+# 它既不是标题文字，也不能靠 slug 推出来——Kubernetes 语料里 650 处标题这么写，
+# 按标题文字生成的锚点与官网实际 id 对不上，链接会落到页面顶部。
+_MD_EXPLICIT_ID = re.compile(r"\s*\{#([^}\s]+)\}\s*$")
+
+
+def _md_heading_parts(m) -> tuple[int, str, str | None]:
+    title = m.group(2)
+    if e := _MD_EXPLICIT_ID.search(title):
+        return len(m.group(1)), title[: e.start()].rstrip(), e.group(1)
+    return len(m.group(1)), title, _anchor(title)
 
 
 # ---------- AsciiDoc ----------
 
-_ADOC_HEADING = re.compile(r"^(={1,6})[ \t]+(.+?)[ \t]*$", re.M)
+# 标题前一行的 [[id]] 是 AsciiDoc 的显式锚点，Antora 原样发布为 <h2 id="...">。
+# Spring 的文档几乎每个标题都写了（spring-boot 1028 个标题对 1032 个锚点），
+# 而它们是 `documentation.first-steps` 这种点号命名，slug 化标题文字永远推不出来。
+_ADOC_HEADING = re.compile(
+    r"^(?:\[\[([\w.:$-]+)\]\][ \t]*\r?\n(?:[ \t]*\r?\n)*)?(={1,6})[ \t]+(.+?)[ \t]*$", re.M
+)
 _ADOC_ATTR = re.compile(r"^:[\w-]+:.*$", re.M)
 # 块属性行（[source,java] / [NOTE] 等）不是正文，但要保留语言信息给代码块
 _ADOC_SRC_ATTR = re.compile(r"^\[source[^\]]*\]\s*$", re.M)
@@ -144,8 +161,28 @@ def parse_asciidoc(text: str, doc_title: str) -> list[Section]:
         parts[i] = _ADOC_SRC_ATTR.sub("", parts[i])
         parts[i] = _ADOC_BLOCK_ATTR.sub("", parts[i])
     text = "```".join(parts)
-    return _split_by_headings(text, _ADOC_HEADING, [doc_title],
-                              lambda m: (len(m.group(1)), m.group(2)))
+    def parts(m) -> tuple[int, str, str | None]:
+        level, title = len(m.group(2)), m.group(3)
+        # 一级 `=` 是页标题，Antora 渲染成 <h1 id="page-title">：
+        # 源里写的 [[using.build-systems]] 也好、标题 slug 也好，页面上都不存在。
+        # 带锚点的链接照样 200，只是停在页面顶部——正确的引用就是不带锚点的页地址。
+        if level == 1:
+            return level, title, None
+        return level, title, m.group(1) or _adoc_auto_id(title)
+
+    return _split_by_headings(text, _ADOC_HEADING, [doc_title], parts)
+
+
+def _adoc_auto_id(title: str) -> str:
+    """标题没写显式锚点时，Asciidoctor 自动生成的 id。
+
+    规则与通用 slug 不同：非字母数字一律换成 `_`（不是 `-`）、合并连续分隔符、
+    去掉首尾分隔符，再冠以 `_` 前缀（Asciidoctor 的 idprefix/idseparator 默认值）。
+    `== Why Spring Data Redis?` 生成的是 `_why_spring_data_redis`，
+    按通用 slug 猜成 `why-spring-data-redis` 就对不上。
+    """
+    body = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9]", "_", title)).strip("_").lower()
+    return f"_{body}"
 
 
 # ---------- HTML ----------
@@ -216,7 +253,10 @@ def parse_docbook(text: str, doc_title: str) -> list[Section]:
                       body, flags=re.S | re.I)
         cleaned = _clean_html(body)
         if cleaned.strip():
-            sec = Section([doc_title, *[t for t in stack if t]], cleaned, sect_id)
+            # PostgreSQL 发布的 HTML 把 SGML 源里的小写 id 全部转成大写
+            # （源 runtime-config-query-constants → 页面 RUNTIME-CONFIG-QUERY-CONSTANTS）。
+            # 片段标识符区分大小写，照抄源 id 的链接点开只会停在页面顶部。
+            sec = Section([doc_title, *[t for t in stack if t]], cleaned, sect_id.upper())
             # 页面 id 与锚点分开存放，供 build_url 还原 <page>.html#<anchor>
             sec.page_id = page_id or sect_id
             sections.append(sec)
@@ -227,6 +267,9 @@ def parse_docbook(text: str, doc_title: str) -> list[Section]:
 
 def _split_by_headings(text, pattern, root_path, extract) -> list[Section]:
     """按标题层级切分，并维护标题栈以还原完整定位路径。
+
+    `extract(m)` 返回 (层级, 标题, 锚点)；锚点为 None 表示该标题在发布页面上
+    没有对应的 id，引用应当只给页地址。
 
     title_path 是引用可读性的关键——回答里显示 "Spring Boot › Web › Servlet › 嵌入式容器"
     远比只给一个 URL 有用，用户能立刻判断这条证据是否对得上自己的问题。
@@ -241,7 +284,7 @@ def _split_by_headings(text, pattern, root_path, extract) -> list[Section]:
 
     stack: list[str] = []
     for i, m in enumerate(marks):
-        level, title = extract(m)
+        level, title, anchor = extract(m)
         title = title.strip()
         # 标题栈：level 1 位于栈底。跳级（如 h1 直接到 h3）时用空位补齐，
         # 避免把不相关的上级标题拼进路径。
@@ -255,7 +298,10 @@ def _split_by_headings(text, pattern, root_path, extract) -> list[Section]:
             continue
 
         path = list(root_path) + [t for t in stack if t]
-        sections.append(Section(path, body, _anchor(title), _classify(body)))
+        # 锚点由 extract 决定：显式锚点优先、没写时回退 slug，
+        # 而"这个标题在发布页面上根本没有 id"必须能表达为 None——
+        # 在这里统一兜底会把它又变回一个不存在的 slug。
+        sections.append(Section(path, body, anchor, _classify(body)))
 
     return sections
 
