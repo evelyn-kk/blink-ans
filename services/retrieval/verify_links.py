@@ -55,13 +55,13 @@ def verify(
     report = LinkReport()
     rng = random.Random(seed)
 
-    projects = [r["source_project"] for r in store.db.execute(
+    projects = [r["source_project"] for r in store.execute(
         "SELECT DISTINCT source_project FROM chunks"
     )]
 
     for proj in projects:
         urls = sorted({
-            r["source_url"] for r in store.db.execute(
+            r["source_url"] for r in store.execute(
                 "SELECT DISTINCT source_url FROM chunks WHERE source_project = ?", (proj,)
             )
         })

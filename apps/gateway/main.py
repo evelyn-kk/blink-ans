@@ -1,9 +1,11 @@
-"""API 网关 —— I0 最小运行示例。
+"""API 网关。
 
-目的不是实现问答，而是验证架构主线成立：
-FastAPI 单进程 + 常驻 MLX 模型 + KV cache 跨请求驻留 + SSE 流式输出。
+I2 交付文本问答闭环：`POST /v1/answers` 建立会话，
+`GET /v1/answers/{id}/stream` 以 SSE 推送检索状态、答案增量与来源。
 
-当前 /healthz 中转写、索引、外部检索三项为占位，将在 I1/I4/I6 逐步接入。
+事件类型在此定死，后续迭代（语音、实时检索）只增加事件，不改已有语义：
+    retrieval / status / answer_delta / sources / done / error
+I4 会补上 transcript 事件。
 """
 
 from __future__ import annotations
@@ -11,30 +13,57 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from packages.prompts.answer import SYSTEM_PROMPT, template_version  # noqa: E402
 from services.inference.engine import DEFAULT_MODEL, InferenceEngine  # noqa: E402
-
-# 固定不变的系统前缀。KV cache 只能复用前缀，因此这里的内容
-# 绝不能包含随请求变化的信息（时间戳、用户名、检索结果）。
-SYSTEM_PREFIX = """你是一名 Java / Spring 云原生方向的资深后端工程师，负责回答生产环境问题。
-回答必须依据给定证据，不得编造配置项名称、方法签名或指标名。
-证据不足时明确说明"现有证据不足以确定"，并指出还需核实什么。"""
+from services.orchestrator.answering import (  # noqa: E402
+    AnswerRequest, Orchestrator,
+)
+from services.retrieval.embed import Embedder  # noqa: E402
+from services.retrieval.store import ChunkStore  # noqa: E402
 
 engine = InferenceEngine(DEFAULT_MODEL)
+embedder = Embedder()
+_store: ChunkStore | None = None
+_store_error: str | None = None
+_orchestrator: Orchestrator | None = None
+
+# 待取的问答会话。单用户本地服务，用内存字典即可；
+# 未被消费的会话在下次创建时按容量上限淘汰，避免长时间运行后无限增长。
+_pending: dict[str, AnswerRequest] = {}
+_MAX_PENDING = 64
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 冷加载 62s + 预热，必须在启动阶段完成，不能让第一个用户承担。
-    await asyncio.to_thread(engine.load, SYSTEM_PREFIX)
+    global _store, _store_error, _orchestrator
+
+    def boot():
+        global _store, _store_error, _orchestrator
+        # 模型冷加载与索引打开都放在启动阶段：I0 实测冷启动 TTFT 是热态的两倍，
+        # 不能让第一个真实用户承担这个代价。
+        engine.load(SYSTEM_PROMPT)
+        embedder.load()
+        try:
+            _store = ChunkStore()
+        except Exception as exc:
+            _store_error = f"{type(exc).__name__}: {exc}"
+            return
+        if engine.status.loaded:
+            _orchestrator = Orchestrator(_store, embedder, engine)
+
+    await asyncio.to_thread(boot)
     yield
+    if _store is not None:
+        _store.close()
 
 
 app = FastAPI(title="blink-ans gateway", lifespan=lifespan)
@@ -43,54 +72,90 @@ app = FastAPI(title="blink-ans gateway", lifespan=lifespan)
 @app.get("/healthz")
 async def healthz():
     s = engine.status
+    index_ready = _store is not None
+    ready = s.loaded and index_ready
     return {
-        "status": "ok" if s.loaded else ("error" if s.error else "loading"),
+        "status": "ok" if ready else ("error" if (s.error or _store_error) else "loading"),
         "components": {
             "inference": {
-                "ready": s.loaded,
-                "model": s.model_id,
-                "load_seconds": s.load_seconds,
-                "warmup_seconds": s.warmup_seconds,
+                "ready": s.loaded, "model": s.model_id,
+                "load_seconds": s.load_seconds, "warmup_seconds": s.warmup_seconds,
                 "resident_prefix_tokens": s.prefix_tokens,
+                "template_version": template_version(),
                 "error": s.error,
             },
-            # 以下为占位，分别在 I4 / I1 / I6 接入
+            "index": {
+                "ready": index_ready,
+                "chunks": _store.count() if _store else None,
+                "embedding_model": _store.meta.get("embedding_model") if _store else None,
+                "dictionary_version": _store.meta.get("dictionary_version") if _store else None,
+                "error": _store_error,
+            },
             "transcription": {"ready": False, "note": "I4 接入 mlx-whisper"},
-            "index": {"ready": False, "note": "I1 接入 sqlite-vec + FTS5"},
             "external_search": {"ready": False, "note": "I6 接入官方来源白名单"},
         },
     }
 
 
-class DebugAsk(BaseModel):
-    question: str
-    max_tokens: int = 256
-    use_prefix: bool = True
+class AskBody(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    technology: str | None = None
+    project: str | None = None
+    max_tokens: int | None = Field(default=None, ge=32, le=2048)
 
 
-@app.post("/v1/debug/stream")
-async def debug_stream(body: DebugAsk):
-    """I0 验证用端点：证明 SSE 流式与前缀 KV 复用在服务端可用。
+@app.post("/v1/answers", status_code=201)
+async def create_answer(body: AskBody):
+    if _orchestrator is None:
+        raise HTTPException(503, "服务尚未就绪，请查看 /healthz")
 
-    这不是最终的问答接口——真正的 /v1/answers 在 I2 实现，
-    届时会加入检索、证据构建与来源引用。
-    """
+    if len(_pending) >= _MAX_PENDING:
+        for k in list(_pending)[: len(_pending) - _MAX_PENDING + 1]:
+            _pending.pop(k, None)
+
+    aid = uuid.uuid4().hex[:16]
+    _pending[aid] = AnswerRequest(
+        question=body.question, technology=body.technology,
+        project=body.project, max_tokens=body.max_tokens,
+    )
+    return {"answer_id": aid, "stream_url": f"/v1/answers/{aid}/stream"}
+
+
+@app.get("/v1/answers/{answer_id}/stream")
+async def stream_answer(answer_id: str):
+    req = _pending.pop(answer_id, None)
+    if req is None:
+        raise HTTPException(404, "会话不存在或已被消费")
+    if _orchestrator is None:
+        raise HTTPException(503, "服务尚未就绪")
 
     async def gen():
         q: asyncio.Queue = asyncio.Queue()
 
         def produce():
             try:
-                for ev in engine.stream(body.question, body.max_tokens, body.use_prefix):
+                for ev in _orchestrator.answer(req):
                     q.put_nowait(ev)
             except Exception as exc:
-                q.put_nowait({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+                q.put_nowait({"type": "error", "stage": "orchestrator",
+                              "message": f"{type(exc).__name__}: {exc}"})
             finally:
                 q.put_nowait(None)
 
         task = asyncio.create_task(asyncio.to_thread(produce))
-        while (ev := await q.get()) is not None:
-            yield f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
-        await task
+        try:
+            while (ev := await q.get()) is not None:
+                yield f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        finally:
+            await task
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return (Path(__file__).resolve().parents[1] / "pwa" / "index.html").read_text(encoding="utf-8")

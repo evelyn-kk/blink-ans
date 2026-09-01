@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import struct
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -59,8 +60,11 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
-def _connect(path: Path) -> sqlite3.Connection:
-    db = sqlite3.connect(path)
+def _connect(path: Path, cross_thread: bool = False) -> sqlite3.Connection:
+    # 网关在启动线程里打开索引，却从事件循环线程和多个工作线程读取。
+    # sqlite3 默认禁止跨线程使用同一连接，因此这里放开检查，
+    # 并由 ChunkStore.execute 的锁保证串行访问。
+    db = sqlite3.connect(path, check_same_thread=not cross_thread)
     db.row_factory = sqlite3.Row
     db.enable_load_extension(True)
     import sqlite_vec
@@ -236,7 +240,8 @@ class ChunkStore:
         self.path = path or CURRENT
         if not self.path.exists():
             raise IndexError_(f"索引不存在: {self.path}，请先运行 kb sync")
-        self.db = _connect(self.path)
+        self.db = _connect(self.path, cross_thread=True)
+        self._lock = threading.Lock()
         self.meta = {r["key"]: r["value"] for r in self.db.execute("SELECT key, value FROM meta")}
 
         if check_dictionary:
@@ -248,16 +253,26 @@ class ChunkStore:
                     f"查询侧与索引侧词典不一致会让召回静默劣化，请重建索引"
                 )
 
+    def execute(self, sql: str, params: Sequence = ()) -> list[sqlite3.Row]:
+        """串行化的只读查询入口。
+
+        连接允许跨线程使用，因此所有访问必须经过这把锁——
+        同一连接上的并发游标会互相干扰，症状是偶发的结果错乱而非报错。
+        """
+        with self._lock:
+            return self.db.execute(sql, params).fetchall()
+
     def count(self) -> int:
-        return self.db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
+        return self.execute("SELECT COUNT(*) c FROM chunks")[0]["c"]
 
     def stats(self) -> dict[str, int]:
         return {
             r["source_project"]: r["n"]
-            for r in self.db.execute(
+            for r in self.execute(
                 "SELECT source_project, COUNT(*) n FROM chunks GROUP BY 1 ORDER BY 2 DESC"
             )
         }
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            self.db.close()

@@ -1,0 +1,76 @@
+# I2 基础题回归集
+#
+# 完成定义（plan.md I2）：50 道基础题可得到可访问的来源链接；
+# 无来源的技术结论不会伪装为确定答案。
+#
+# 因此题目分两类：
+#   expect: answered     —— 语料应当覆盖，须返回来源且答案带引用标注
+#   expect: refused      —— 语料不覆盖，须判为证据不足，不得给出确定的技术结论
+#
+# 这不是 I3 的场景评测集：这里只验证管线可用与引用可追溯，
+# 不评判答案的技术正确性。I3 的 100 道场景题才做正确性评分。
+
+version: 1
+
+questions:
+  # ---- Kafka ----
+  - {q: "Kafka 消费者重复消费怎么排查", expect: answered, project: kafka}
+  - {q: "Kafka 的 offset 是怎么提交的", expect: answered, project: kafka}
+  - {q: "Kafka 消费者组重平衡会发生什么", expect: answered, project: kafka}
+  - {q: "Kafka 事务型生产者怎么保证精确一次", expect: answered, project: kafka}
+  - {q: "Kafka 的幂等生产者是怎么实现的", expect: answered, project: kafka}
+  - {q: "Kafka 分区副本的同步机制是什么", expect: answered, project: kafka}
+  - {q: "Kafka 的消息投递语义有哪几种", expect: answered, project: kafka}
+  - {q: "Kafka 日志压缩 compaction 是怎么工作的", expect: answered, project: kafka}
+  - {q: "Kafka 生产者的 acks 参数怎么设置", expect: answered, project: kafka}
+  - {q: "Kafka 消费者的心跳和会话超时怎么配置", expect: answered, project: kafka}
+
+  # ---- Kubernetes ----
+  - {q: "Kubernetes liveness probe 配置参数有哪些", expect: answered, project: kubernetes}
+  - {q: "readiness probe 和 liveness probe 的区别", expect: answered, project: kubernetes}
+  - {q: "Pod 因为内存超限被 OOMKilled 怎么办", expect: answered, project: kubernetes}
+  - {q: "Kubernetes 的资源 requests 和 limits 有什么区别", expect: answered, project: kubernetes}
+  - {q: "Pod 的 QoS 等级是怎么划分的", expect: answered, project: kubernetes}
+  - {q: "Deployment 滚动更新的策略参数怎么配", expect: answered, project: kubernetes}
+  - {q: "Kubernetes 中 ConfigMap 怎么挂载到容器", expect: answered, project: kubernetes}
+  - {q: "Pod 被驱逐 eviction 的触发条件是什么", expect: answered, project: kubernetes}
+  - {q: "Kubernetes 的 HPA 水平扩缩是怎么算的", expect: answered, project: kubernetes}
+  - {q: "Pod 的生命周期有哪些阶段", expect: answered, project: kubernetes}
+
+  # ---- PostgreSQL ----
+  - {q: "PostgreSQL 执行计划里出现 Seq Scan 怎么优化", expect: answered, project: postgresql}
+  - {q: "EXPLAIN ANALYZE 的输出怎么读", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 的 autovacuum 是做什么的", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 事务隔离级别有哪几种", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 怎么查看当前的锁等待", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 的连接数上限怎么配置", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 表膨胀 bloat 怎么处理", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 的 B-tree 索引什么时候会失效", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 分区表怎么创建和使用", expect: answered, project: postgresql}
+  - {q: "PostgreSQL 的统计信息怎么更新", expect: answered, project: postgresql}
+
+  # ---- Spring Boot ----
+  - {q: "Spring Boot 怎么暴露 Prometheus 指标", expect: answered, project: spring-boot}
+  - {q: "Spring Boot actuator 的健康检查端点怎么配置", expect: answered, project: spring-boot}
+  - {q: "Spring Boot 的自动配置是怎么生效的", expect: answered, project: spring-boot}
+  - {q: "Spring Boot 怎么配置日志级别", expect: answered, project: spring-boot}
+  - {q: "Spring Boot 的配置文件优先级是怎样的", expect: answered, project: spring-boot}
+  - {q: "Spring Boot 怎么做优雅停机", expect: answered, project: spring-boot}
+  - {q: "Spring Boot 的分布式追踪怎么接入", expect: answered, project: spring-boot}
+  - {q: "Spring Boot 打包成可执行 jar 的结构是什么", expect: answered, project: spring-boot}
+
+  # ---- Spring Data Redis ----
+  - {q: "RedisTemplate 的序列化怎么配置", expect: answered, project: spring-data-redis}
+  - {q: "Spring Data Redis 怎么连接 Redis Cluster", expect: answered, project: spring-data-redis}
+  - {q: "Spring Data Redis 的缓存注解怎么用", expect: answered, project: spring-data-redis}
+  - {q: "RedisTemplate 和 StringRedisTemplate 有什么区别", expect: answered, project: spring-data-redis}
+  - {q: "Spring Data Redis 怎么用 Lua 脚本", expect: answered, project: spring-data-redis}
+  - {q: "Spring Data Redis 的连接池怎么配置", expect: answered, project: spring-data-redis}
+
+  # ---- 应当拒答：超出语料范围 ----
+  - {q: "今天北京的天气怎么样", expect: refused}
+  - {q: "推荐几部值得看的科幻电影", expect: refused}
+  - {q: "iOS SwiftUI 的状态管理最佳实践是什么", expect: refused}
+  - {q: "怎么用 Rust 写一个词法分析器", expect: refused}
+  - {q: "公司的年终奖一般怎么计算", expect: refused}
+  - {q: "React 的 useEffect 依赖数组怎么写", expect: refused}
