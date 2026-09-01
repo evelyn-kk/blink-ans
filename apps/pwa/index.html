@@ -1,0 +1,144 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>blink-ans</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --dim:#666; --line:#ddd; --bg:#fff; --card:#f6f6f6; --warn:#8a5a00; --err:#a11; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e8e8e8; --dim:#999; --line:#333; --bg:#161616; --card:#1f1f1f; --warn:#d4a017; --err:#e66; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:1.5rem 1rem 4rem; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;
+         max-width:44rem; margin-inline:auto; }
+  h1 { font-size:1.05rem; margin:0 0 1rem; font-weight:600; }
+  h1 small { color:var(--dim); font-weight:400; margin-left:.5rem; }
+  form { display:flex; gap:.5rem; }
+  input { flex:1; padding:.6rem .75rem; border:1px solid var(--line); border-radius:6px;
+          background:var(--bg); color:var(--fg); font:inherit; }
+  button { padding:.6rem 1.1rem; border:0; border-radius:6px; background:#2f6fdb; color:#fff;
+           font:inherit; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { color:var(--dim); font-size:.85rem; margin:.9rem 0 0; min-height:1.2em; }
+  #status.warn { color:var(--warn); }
+  #status.err { color:var(--err); }
+  #answer { white-space:pre-wrap; margin-top:.9rem; }
+  #answer:empty { display:none; }
+  #sources { margin-top:1.4rem; padding:0; list-style:none; }
+  #sources li { background:var(--card); border-radius:6px; padding:.6rem .75rem; margin-bottom:.5rem;
+                font-size:.85rem; }
+  #sources a { color:#2f6fdb; text-decoration:none; word-break:break-all; }
+  #sources a:hover { text-decoration:underline; }
+  .idx { display:inline-block; min-width:1.5rem; color:var(--dim); }
+  #meta { margin-top:1rem; color:var(--dim); font-size:.78rem; font-family:ui-monospace,Menlo,monospace; }
+</style>
+
+<h1>blink-ans <small>Java / Spring 云原生问答</small></h1>
+
+<form id="f">
+  <input id="q" placeholder="例如：Kafka 消费者重复消费怎么排查" autocomplete="off" autofocus>
+  <button id="go">提问</button>
+</form>
+
+<p id="status"></p>
+<div id="answer"></div>
+<ul id="sources"></ul>
+<div id="meta"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const statusEl = $('#status'), answerEl = $('#answer'), srcEl = $('#sources'), metaEl = $('#meta');
+
+// 证据充分性直接影响用户该多信任这个回答，必须显式呈现而不是藏起来。
+const SUFFICIENCY = {
+  sufficient:   ['', ''],
+  limited:      ['warn', '证据相关性一般，回答可能不完整'],
+  insufficient: ['warn', '本地知识库未覆盖该问题，以下不是确定结论'],
+};
+
+$('#f').addEventListener('submit', async e => {
+  e.preventDefault();
+  const question = $('#q').value.trim();
+  if (!question) return;
+
+  $('#go').disabled = true;
+  answerEl.textContent = ''; srcEl.innerHTML = ''; metaEl.textContent = '';
+  statusEl.className = ''; statusEl.textContent = '检索中…';
+
+  try {
+    const r = await fetch('/v1/answers', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ question }),
+    });
+    if (!r.ok) throw new Error(`创建会话失败 (${r.status})`);
+    const { stream_url } = await r.json();
+    await consume(stream_url);
+  } catch (err) {
+    statusEl.className = 'err';
+    statusEl.textContent = err.message;
+  } finally {
+    $('#go').disabled = false;
+  }
+});
+
+// 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，
+// 后续 I4 的音频分片上传需要 POST，统一走 fetch 便于复用同一套解析。
+async function consume(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`流不可用 (${res.status})`);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+
+    let i;
+    while ((i = buf.indexOf('\n\n')) !== -1) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      const line = block.split('\n').find(l => l.startsWith('data:'));
+      if (line) handle(JSON.parse(line.slice(5)));
+    }
+  }
+}
+
+function handle(ev) {
+  switch (ev.type) {
+    case 'retrieval': {
+      const [cls, note] = SUFFICIENCY[ev.sufficiency] || ['', ''];
+      statusEl.className = cls;
+      statusEl.textContent = note || `命中 ${ev.hits} 条证据 · ${ev.elapsed_ms} ms`;
+      break;
+    }
+    case 'status':
+      if (!statusEl.className) statusEl.textContent = ev.message;
+      break;
+    case 'answer_delta':
+      answerEl.textContent += ev.text;
+      break;
+    case 'sources':
+      for (const s of ev.items) {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="idx">[${s.index}]</span>${escapeHtml(s.citation)}<br>`;
+        const a = document.createElement('a');
+        a.href = s.url; a.textContent = s.url; a.target = '_blank'; a.rel = 'noopener';
+        li.appendChild(a);
+        srcEl.appendChild(li);
+      }
+      break;
+    case 'done':
+      metaEl.textContent =
+        `首字 ${ev.ttft_s}s · 总计 ${ev.total_s}s · ${ev.decode_tps} tok/s · ` +
+        `上下文 ${ev.prompt_tokens} tok（实际 prefill ${ev.prefilled_tokens}） · 模板 ${ev.template_version}`;
+      break;
+    case 'error':
+      statusEl.className = 'err';
+      statusEl.textContent = `${ev.stage}: ${ev.message}`;
+      break;
+  }
+}
+
+const escapeHtml = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+</script>

@@ -66,6 +66,29 @@ def dictionary_version() -> str:
 
 _PUNCT = re.compile(r"[^\w一-鿿]+")
 
+# 这些词在对应语料里几乎每块都出现，作为检索词毫无区分度，
+# 却会让 bm25 奖励"重复提到 kafka"的文档，把真正有信息量的词淹没。
+# 实测: 查询「幂等生产者」时，ACL 文档因反复出现 producer 而排在首位。
+# 正确用法是把它们当作元数据过滤条件（technology / project），而非检索词。
+PROJECT_TERMS = {
+    "kafka": "kafka",
+    "kubernetes": "kubernetes", "k8s": "kubernetes",
+    "postgresql": "postgresql", "postgres": "postgresql", "pg": "postgresql",
+    "redis": "redis",
+    "spring": "spring", "springboot": "spring",
+}
+
+
+def detect_technology(text: str) -> str | None:
+    """从提问中识别技术域，用于检索过滤。
+
+    返回第一个匹配到的技术域；匹配到多个时返回 None，
+    因为跨技术域的问题（如"Spring Boot 连 Kafka"）不应被单域过滤掉。
+    """
+    low = text.lower()
+    found = {tech for term, tech in PROJECT_TERMS.items() if term in low}
+    return found.pop() if len(found) == 1 else None
+
 
 def tokenize(text: str) -> list[str]:
     """切词并去掉标点。英文与数字原样保留，中文按词典切分。"""
@@ -118,7 +141,8 @@ def to_fts_query(text: str, expand: bool = True) -> str:
     seen, uniq = set(), []
     for t in toks:
         t = t.strip().replace('"', "")
-        if t and t not in seen:
+        # 项目名不参与打分：它们的区分度为零，只会稀释真正的信号
+        if t and t not in seen and t not in PROJECT_TERMS:
             seen.add(t)
             uniq.append(t)
     return " OR ".join(f'"{t}"' for t in uniq) if uniq else '""'

@@ -18,6 +18,13 @@ from .store import ChunkStore
 # 使两路检索都能对最终排序产生影响。
 RRF_K = 60
 
+# 两路权重不等。语料为英文而提问为中文时，关键词路的可靠性明显低于向量路：
+# 实测「Kafka 消息投递语义」的向量路第 5 名即为 Design › Message Delivery Semantics，
+# 而关键词路返回 KRaft Metrics 等无关内容，等权融合会把噪声顶到前面。
+# 关键词路仍保留权重，因为它对精确的配置项名、方法名和错误码不可替代。
+KEYWORD_WEIGHT = 0.5
+VECTOR_WEIGHT = 1.0
+
 
 @dataclass
 class Hit:
@@ -34,6 +41,9 @@ class Hit:
     score: float
     keyword_rank: int | None = None
     vector_rank: int | None = None
+    # 向量距离是判定"证据是否充分"的主要信号（见 orchestrator/answering.py）。
+    # RRF 分数只反映名次，无法区分"最相关的一条"和"矮子里拔将军"。
+    vector_distance: float | None = None
 
     @property
     def citation(self) -> str:
@@ -74,7 +84,7 @@ def keyword_search(
         LIMIT ?
     """
     try:
-        rows = store.db.execute(sql, [to_fts_query(query), *params, limit]).fetchall()
+        rows = store.execute(sql, [to_fts_query(query), *params, limit])
     except sqlite3.OperationalError as exc:
         # FTS5 的 MATCH 语法错误按"无关键词命中"处理是合理的；
         # 但其他故障（表缺失、索引损坏）必须抛出——
@@ -93,10 +103,10 @@ def vector_search(
 ) -> list[tuple[int, float]]:
     # vec0 的 KNN 不支持与业务表 JOIN 后再过滤，因此先取更多候选再在外层过滤
     over = limit * 4 if (technology or project) else limit
-    rows = store.db.execute(
+    rows = store.execute(
         "SELECT rowid, distance FROM chunks_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
         (_pack(vector), over),
-    ).fetchall()
+    )
     if not rows:
         return []
 
@@ -104,7 +114,7 @@ def vector_search(
         cond, params = _where(technology, project)
         ids = [r["rowid"] for r in rows]
         keep = {
-            r["id"] for r in store.db.execute(
+            r["id"] for r in store.execute(
                 f"SELECT c.id FROM chunks c WHERE c.id IN ({','.join('?' * len(ids))}){cond}",
                 [*ids, *params],
             )
@@ -115,7 +125,11 @@ def vector_search(
 
 
 def rrf_fuse(
-    keyword: list[tuple[int, float]], vector: list[tuple[int, float]], k: int = RRF_K
+    keyword: list[tuple[int, float]],
+    vector: list[tuple[int, float]],
+    k: int = RRF_K,
+    keyword_weight: float = KEYWORD_WEIGHT,
+    vector_weight: float = VECTOR_WEIGHT,
 ) -> dict[int, tuple[float, int | None, int | None]]:
     """倒数排名融合。
 
@@ -125,11 +139,11 @@ def rrf_fuse(
     scores: dict[int, list] = {}
     for rank, (rid, _) in enumerate(keyword, 1):
         scores.setdefault(rid, [0.0, None, None])
-        scores[rid][0] += 1.0 / (k + rank)
+        scores[rid][0] += keyword_weight / (k + rank)
         scores[rid][1] = rank
     for rank, (rid, _) in enumerate(vector, 1):
         scores.setdefault(rid, [0.0, None, None])
-        scores[rid][0] += 1.0 / (k + rank)
+        scores[rid][0] += vector_weight / (k + rank)
         scores[rid][2] = rank
     return {rid: tuple(v) for rid, v in scores.items()}
 
@@ -152,6 +166,7 @@ def hybrid_search(
     """
     kw = keyword_search(store, query, candidates, technology, project)
     vec = vector_search(store, query_vector, candidates, technology, project) if query_vector else []
+    distances = dict(vec)
     fused = rrf_fuse(kw, vec)
     if not fused:
         return []
@@ -159,7 +174,7 @@ def hybrid_search(
     ordered = sorted(fused.items(), key=lambda kv: -kv[1][0])
     ids = [rid for rid, _ in ordered]
     rows = {
-        r["id"]: r for r in store.db.execute(
+        r["id"]: r for r in store.execute(
             f"SELECT * FROM chunks WHERE id IN ({','.join('?' * len(ids))})", ids
         )
     }
@@ -182,6 +197,7 @@ def hybrid_search(
                 technology=r["technology"], content_type=r["content_type"],
                 token_estimate=r["token_estimate"], score=score,
                 keyword_rank=krank, vector_rank=vrank,
+                vector_distance=distances.get(rid),
             )
         )
         if len(hits) >= limit:

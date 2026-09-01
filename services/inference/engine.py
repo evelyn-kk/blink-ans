@@ -124,7 +124,11 @@ class InferenceEngine:
     # ---------- 生成 ----------
 
     def stream(
-        self, user_content: str, max_tokens: int = 512, use_prefix: bool = True
+        self,
+        user_content: str,
+        max_tokens: int = 512,
+        use_prefix: bool = True,
+        system_override: str | None = None,
     ) -> Iterator[dict]:
         """流式生成。产出 {"type": "delta"|"done", ...}。
 
@@ -137,9 +141,13 @@ class InferenceEngine:
         if not self.status.loaded:
             raise RuntimeError("模型尚未加载")
 
-        full = self._tokenizer.encode(self._render(self._system_prompt, user_content))
+        # 覆盖系统提示词时前缀必然不匹配，直接放弃复用。
+        # 证据不足分支用的是另一套短提示词，占比很小，不值得为它再驻留一份 KV。
+        system = system_override if system_override is not None else self._system_prompt
+        full = self._tokenizer.encode(self._render(system, user_content))
         reuse = (
             use_prefix
+            and system_override is None
             and self._prefix_cache is not None
             and full[: len(self._prefix_tokens)] == self._prefix_tokens
         )
