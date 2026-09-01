@@ -114,3 +114,45 @@ def test_stream_before_load_raises():
     eng = InferenceEngine()
     with pytest.raises(RuntimeError, match="尚未加载"):
         next(eng.stream("测试"))
+
+
+# ---------- 裁剪复用（替代 deepcopy）的正确性 ----------
+
+def test_cache_restored_between_requests(engine: InferenceEngine):
+    """每次生成后缓存必须还原为纯前缀。
+
+    改用"直接复用常驻缓存 + 用完裁剪"是为了省掉每请求约 47MB 的 KV 拷贝
+    （实测占 2.5 秒首 token 预算的 8%）。代价是缓存有状态：
+    还原不干净会让上一次请求的证据与答案泄漏进下一次，产生串话。
+    """
+    n = len(engine._prefix_tokens)
+    for _ in range(3):
+        list(engine.stream(QUESTION, max_tokens=16))
+        assert engine._prefix_cache[0].offset == n, "缓存未还原为纯前缀"
+
+
+def test_prefill_count_stable_across_requests(engine: InferenceEngine):
+    """连续请求的 prefill token 数必须一致；递增说明缓存在累积。"""
+    counts = []
+    for _ in range(3):
+        done = [e for e in engine.stream(QUESTION, max_tokens=8) if e["type"] == "done"][0]
+        counts.append(done["prefilled_tokens"])
+    assert len(set(counts)) == 1, f"prefill 数在漂移: {counts}"
+
+
+def test_cache_restored_after_early_break(engine: InferenceEngine):
+    """调用方提前中断（客户端断流）时同样必须还原。"""
+    n = len(engine._prefix_tokens)
+    gen = engine.stream(QUESTION, max_tokens=64)
+    next(gen)
+    gen.close()
+    assert engine._prefix_cache[0].offset == n, "中途断流后缓存未还原"
+
+
+def test_different_questions_do_not_contaminate(engine: InferenceEngine):
+    """前一个问题的内容不得影响后一个问题的 prompt 长度。"""
+    a = [e for e in engine.stream("Kafka 的 offset 是什么？", max_tokens=8) if e["type"] == "done"][0]
+    list(engine.stream("完全不同的另一个很长的问题" * 20, max_tokens=8))
+    b = [e for e in engine.stream("Kafka 的 offset 是什么？", max_tokens=8) if e["type"] == "done"][0]
+    assert a["prompt_tokens"] == b["prompt_tokens"]
+    assert a["prefilled_tokens"] == b["prefilled_tokens"]

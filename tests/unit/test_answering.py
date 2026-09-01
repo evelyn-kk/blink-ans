@@ -50,13 +50,20 @@ def test_far_evidence_is_insufficient():
     assert assess([hit(dist=0.83, kw=0)], CFG).level is Sufficiency.INSUFFICIENT
 
 
-def test_middle_distance_with_keyword_is_limited():
-    assert assess([hit(dist=0.75, kw=1)], CFG).level is Sufficiency.LIMITED
+def test_middle_distance_is_limited_regardless_of_keyword():
+    """中间档不依赖关键词命中。
+
+    技术名词被剔除出检索词后（tokenize.PROJECT_TERMS），中文提问打英文语料
+    关键词命中常为 0。若中间档要求 kw>0，该档永不生效，边缘的有效问题会被一律误拒——
+    50 题回归中「Spring Boot 怎么配置日志级别」（实测 0.7241）就因此被错判为超范围。
+    """
+    assert assess([hit(dist=0.74, kw=1)], CFG).level is Sufficiency.LIMITED
+    assert assess([hit(dist=0.74, kw=None)], CFG).level is Sufficiency.LIMITED
 
 
-def test_middle_distance_without_keyword_is_insufficient():
-    """两路都不沾边时，基本可以确定问题不在语料范围内。"""
-    assert assess([hit(dist=0.75, kw=None)], CFG).level is Sufficiency.INSUFFICIENT
+def test_borderline_valid_question_is_not_refused():
+    """实测值回归：0.7241 属有效问题，不得判为证据不足。"""
+    assert assess([hit(dist=0.7241, kw=None)], CFG).level is not Sufficiency.INSUFFICIENT
 
 
 def test_assessment_uses_closest_not_first():
