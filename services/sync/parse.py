@@ -25,7 +25,10 @@ class Section:
 
 
 # 这些文件是导航、索引或贡献指南，不含技术结论
-_SKIP_NAMES = {"nav.adoc", "_index.md", "index.adoc", "toc.html", "OWNERS"}
+_SKIP_NAMES = {"_index.md", "index.adoc", "toc.html", "OWNERS"}
+# Antora 的导航文件不止 nav.adoc，还有 nav-reference.adoc 等变体；
+# 它们在站点上没有对应页面，入库只会产生 404 引用。
+_SKIP_NAME_PATTERNS = (re.compile(r"^nav[-_.].*\.(adoc|md)$", re.I), re.compile(r"^nav\.(adoc|md)$", re.I))
 _SKIP_PATTERNS = (
     re.compile(r"^\s*$"),
     re.compile(r"^(TODO|WIP)\b", re.I),
@@ -267,7 +270,7 @@ _PARSERS = {
 
 def parse_file(path: Path, src: Source) -> list[Section]:
     """解析单个文件。无法识别或全是导航内容时返回空列表。"""
-    if path.name in _SKIP_NAMES:
+    if path.name in _SKIP_NAMES or any(p.match(path.name) for p in _SKIP_NAME_PATTERNS):
         return []
     text = path.read_text(encoding="utf-8", errors="replace")
     if not text.strip():

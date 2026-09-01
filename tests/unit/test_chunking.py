@@ -224,3 +224,17 @@ def test_navigation_page_is_dropped():
     assert _is_navigation("Redirect", nav)
     assert _is_navigation("Acknowledgments", "Abhijit Menon-Sen Adnan Dautovic " * 20)
     assert not _is_navigation("Using EXPLAIN", "EXPLAIN ANALYZE shows the actual run time. " * 10)
+
+
+def test_navigation_files_are_skipped():
+    """Antora 的导航文件在站点上没有对应页面，入库只会产生 404 引用。
+
+    实测残留: https://docs.spring.io/spring-boot/nav-reference.html 返回 404。
+    """
+    from services.sync.parse import parse_file
+
+    for name in ("nav.adoc", "nav-reference.adoc", "nav_extra.md"):
+        p = Path("/tmp") / name
+        p.write_text("= 导航\n\n* xref:a.adoc[A]\n", encoding="utf-8")
+        assert parse_file(p, src()) == [], f"{name} 未被跳过"
+        p.unlink()
