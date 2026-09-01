@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import struct
 from dataclasses import dataclass
 from typing import Sequence
@@ -74,8 +75,14 @@ def keyword_search(
     """
     try:
         rows = store.db.execute(sql, [to_fts_query(query), *params, limit]).fetchall()
-    except Exception:
-        return []
+    except sqlite3.OperationalError as exc:
+        # FTS5 的 MATCH 语法错误按"无关键词命中"处理是合理的；
+        # 但其他故障（表缺失、索引损坏）必须抛出——
+        # 一律吞掉会让中文关键词整路失效却与"确实没命中"无法区分，
+        # 索引照样通过回归并被激活。
+        if "fts5" in str(exc).lower() or "malformed MATCH" in str(exc):
+            return []
+        raise
     # bm25 返回负值，越小越相关
     return [(r["rowid"], r["score"]) for r in rows]
 

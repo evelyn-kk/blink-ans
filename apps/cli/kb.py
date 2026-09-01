@@ -34,10 +34,18 @@ def cmd_sync(args) -> int:
     t0 = time.perf_counter()
     report = sync(only, activate=not args.no_activate, reuse_embeddings=not args.no_reuse)
     print(f"\n共 {report.total_chunks} 块，耗时 {time.perf_counter() - t0:.1f}s")
+
+    skipped = [r for r in report.sources if r.error]
+    if skipped:
+        # 静默跳过意味着某个技术域整个从语料里消失，而回归可能仍然通过。
+        # 这类失败必须有非零退出码，否则自动化流程发现不了。
+        print(f"\n{len(skipped)} 个来源未能同步:", file=sys.stderr)
+        for r in skipped:
+            print(f"  {r.source_id}: {r.error}", file=sys.stderr)
     if not report.regression_passed:
         print("回归未通过，索引未激活", file=sys.stderr)
         return 1
-    return 0
+    return 1 if skipped else 0
 
 
 def cmd_search(args) -> int:
