@@ -38,6 +38,17 @@ from services.retrieval.tokenize import detect_technology  # noqa: E402
 
 
 _CITATION = re.compile(r"\[(\d{1,2})\]")
+# 模型明确表示证据不支撑作答的措辞
+_DECLINED = re.compile(r"证据未涵盖|现有证据不足|证据不足以")
+
+
+def declined(answer: str) -> bool:
+    """模型是否明确表示证据不支撑作答。
+
+    检索给错证据时，模型说"证据未涵盖"是正确行为。此时展示来源会误导用户——
+    界面上一边写着"没有依据"，一边列出五条链接，读者会以为那些就是依据。
+    """
+    return bool(_DECLINED.search(answer)) and len(answer.strip()) < 120
 
 
 def citation_coverage(answer: str, evidence_count: int) -> list[int]:
@@ -63,19 +74,31 @@ class Sufficiency(str, Enum):
 class AnswerConfig:
     """默认值来自实测，不是经验取值。
 
-    距离阈值由 10 条对照查询测得：语料覆盖的问题 top1 距离 0.60–0.70，
-    不覆盖的 0.75–0.83，最近一对为 0.6995 与 0.7480。
-    **样本量小，属暂定值，应由 I3 评测集重新标定。**
+    距离阈值经两轮标定：初版用 10 条跨领域对照（覆盖 0.60–0.70 / 不覆盖 0.75–0.83），
+    50 题回归暴露出边界过紧——「Spring Boot 怎么配置日志级别」实测 0.7241 被误判为超范围。
+    因此把中间档放宽到 0.76，并使其真正生效（见 assess）。
+
+    代价是极少数超范围问题会落入中间档、带警示作答而非直接拒答
+    （实测「怎么用 Rust 写词法分析器」为 0.7463）。这是有意的取舍：
+    **误拒有效问题的代价高于多答一句带警示的话**，且模型自身的"证据未涵盖"
+    是第二道防线——50 题回归中它 6 次正确拒绝了基于错误证据编造。
+
+    **样本量仍小，属暂定值，应由 I3 评测集重新标定。**
     """
 
-    evidence_budget: int = 700
+    # 预算以**真实 token** 计（见 select_evidence）。
+    # 复用前缀后实测 prefill 约 342 tok/s，2.5 秒对应 855 token；
+    # 扣除问题与模板收尾约 60 token，证据预算取 680 并留出余量。
+    evidence_budget: int = 680
     max_evidence: int = 5
     sufficient_distance: float = 0.72
-    limited_distance: float = 0.78
+    limited_distance: float = 0.76
     max_tokens: int = 700
     candidates: int = 30
-    # 首 token 时延超过此值即记录告警，用于发现预算漂移
-    ttft_budget_s: float = 2.5
+    # 首 token 时延超过此值即记录告警，用于发现预算漂移。
+    # 3.0 秒来自 architecture.md 第 6.2 节按实测重新分配后的生成预算：
+    # 检索实测 0.15 秒（原预算 0.8 秒），富余的时间划给了生成阶段。
+    ttft_budget_s: float = 3.0
 
 
 @dataclass
@@ -105,7 +128,10 @@ def assess(hits: list[Hit], cfg: AnswerConfig) -> Assessment:
 
     if top <= cfg.sufficient_distance:
         return Assessment(Sufficiency.SUFFICIENT, top, kw, f"最相关证据距离 {top:.3f}")
-    if top <= cfg.limited_distance and kw > 0:
+    if top <= cfg.limited_distance:
+        # 不再要求关键词命中：技术名词被剔除后（见 tokenize.PROJECT_TERMS），
+        # 中文提问打英文语料时关键词命中常为 0，该条件会让中间档永不生效，
+        # 把边缘的有效问题一律误拒。
         return Assessment(
             Sufficiency.LIMITED, top, kw,
             f"最相关证据距离 {top:.3f}，相关但不紧密",
@@ -116,20 +142,26 @@ def assess(hits: list[Hit], cfg: AnswerConfig) -> Assessment:
     )
 
 
-def select_evidence(hits: list[Hit], cfg: AnswerConfig) -> list[Evidence]:
+def select_evidence(
+    hits: list[Hit], cfg: AnswerConfig, count_tokens=None
+) -> list[Evidence]:
     """在 token 预算内挑选证据。
 
     按融合得分依次取，放不下的跳过继续找更小的——
     宁可多带一条短证据，也不要让预算空着。
+
+    count_tokens 传入真实分词器时按真实 token 计数；缺省退回切块自带的估算值。
+    估算对英文 P90 低估约 16%，只用估算会让首 token 时延的尾部失控。
     """
     out: list[Evidence] = []
     used = 0
     for h in hits:
         if len(out) >= cfg.max_evidence:
             break
-        if used + h.token_estimate > cfg.evidence_budget:
+        cost = count_tokens(h.text) if count_tokens else h.token_estimate
+        if used + cost > cfg.evidence_budget:
             continue
-        used += h.token_estimate
+        used += cost
         out.append(
             Evidence(
                 index=len(out) + 1,
@@ -203,7 +235,7 @@ class Orchestrator:
             yield {"type": "sources", "items": []}
             return
 
-        evidence = select_evidence(hits, self.cfg)
+        evidence = select_evidence(hits, self.cfg, self.engine.count_tokens)
         if not evidence:
             # 命中了但每一条都超出预算——属于切块异常，不应静默降级为无证据作答
             yield {"type": "error", "stage": "context",
@@ -218,10 +250,20 @@ class Orchestrator:
         }
 
         user_msg = render_user_message(req.question, evidence)
-        yield from self._generate(
+        answer = ""
+        for ev in self._generate(
             user_msg, max_tokens=req.max_tokens or self.cfg.max_tokens,
             started=t0, sufficiency=verdict.level, evidence_count=len(evidence),
-        )
+        ):
+            if ev["type"] == "answer_delta":
+                answer += ev["text"]
+            yield ev
+
+        if declined(answer):
+            # 模型判定这些证据支撑不了结论，就不该把它们当作来源展示
+            yield {"type": "status", "message": "检索到的资料未涵盖该问题，未采纳为来源"}
+            yield {"type": "sources", "items": []}
+            return
 
         yield {
             "type": "sources",
