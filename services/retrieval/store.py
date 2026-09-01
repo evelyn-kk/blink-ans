@@ -186,7 +186,14 @@ class EmbeddingCache:
         # 校验和只覆盖正文，换了嵌入模型后同一正文的向量语义完全不同。
         # 不比对模型名就会静默复用错的向量——报错都没有，只是检索悄悄变差。
         if embedding_model is not None:
-            row = db.execute("SELECT value FROM meta WHERE key = 'embedding_model'").fetchone()
+            try:
+                # sqlite3 会把损坏文件的错误推迟到首次查询，因此 _connect 成功
+                # 不代表库可用。这里失败应回退为全量重算，而不是让整次同步崩掉。
+                row = db.execute("SELECT value FROM meta WHERE key = 'embedding_model'").fetchone()
+            except Exception as exc:
+                self.rejected_reason = f"当前索引不可读（{type(exc).__name__}），向量将全部重算"
+                db.close()
+                return
             built = row["value"] if row else None
             if built != embedding_model:
                 self.rejected_reason = (

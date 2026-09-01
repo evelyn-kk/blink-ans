@@ -31,6 +31,53 @@ _SKIP_PATTERNS = (
     re.compile(r"^(TODO|WIP)\b", re.I),
 )
 
+# 纯导航页与致谢名单没有技术结论，只会挤占索引和上下文预算。
+# 实测最大的一块是 70203 token 的 Antora 重定向页，全是 xref 链接。
+_NAV_TITLES = re.compile(
+    r"^(redirect|acknowledg\w*|contributors?|index|table of contents|nav|附录目录)$", re.I
+)
+_LINK_MARKUP = re.compile(r"xref:[^\[]*\[[^\]]*\]|link:\S+\[[^\]]*\]|https?://\S+")
+
+
+def _is_navigation(title: str, body: str) -> bool:
+    if _NAV_TITLES.match(title.strip()):
+        return True
+    if len(body) < 200:
+        return False
+    # 链接标记占正文一半以上时，这是目录页而非技术正文
+    return len(_LINK_MARKUP.findall(body)) * 20 > len(body) * 0.5
+
+
+_FENCE_LINE = re.compile(r"^(```|~~~)", re.M)
+
+
+def _mask_fenced(text: str) -> str:
+    """把围栏代码块内的字符替换为占位符，仅用于标题匹配。
+
+    换行保留，长度不变，因此匹配到的偏移量在原文里依然有效。
+
+    存在的理由：Markdown 代码块里的 `# 下载 tarball` 是 shell 注释，不是标题。
+    不遮罩会把一个 bash 块切成三段，并伪造出 `下载-tarball` 这类锚点写进 source_url——
+    引用会指向一个官方页面上根本不存在的位置。
+    """
+    out = list(text)
+    inside = False
+    for m in _FENCE_LINE.finditer(text):
+        line_end = text.find("\n", m.start())
+        line_end = len(text) if line_end == -1 else line_end
+        if inside:
+            inside = False
+            continue
+        inside = True
+        # 找到配对的收尾围栏
+        nxt = _FENCE_LINE.search(text, line_end)
+        stop = nxt.end() if nxt else len(text)
+        for i in range(m.start(), stop):
+            if out[i] != "\n":
+                out[i] = "\x00"
+        inside = False
+    return "".join(out)
+
 
 def _anchor(title: str) -> str:
     """由标题生成 URL 锚点，与主流静态站点生成器的规则保持一致。"""
@@ -83,11 +130,17 @@ _ADOC_FENCE = re.compile(r"^----+\s*$", re.M)
 
 
 def parse_asciidoc(text: str, doc_title: str) -> list[Section]:
-    text = _ADOC_ATTR.sub("", text)
-    text = _ADOC_SRC_ATTR.sub("", text)
-    text = _ADOC_BLOCK_ATTR.sub("", text)
-    # 统一代码块标记，让下游的代码块检测只需认一种围栏
+    # 先统一围栏，再逐段清理——属性行清理必须跳过代码块内部。
+    # `[main]`、`:mode: fast` 在正文里是 AsciiDoc 标记，在 listing 块里却是
+    # 配置文件的真实内容；一律删除会静默损坏被当作证据引用的配置示例。
     text = _ADOC_FENCE.sub("```", text)
+
+    parts = text.split("```")
+    for i in range(0, len(parts), 2):      # 偶数段在代码块之外
+        parts[i] = _ADOC_ATTR.sub("", parts[i])
+        parts[i] = _ADOC_SRC_ATTR.sub("", parts[i])
+        parts[i] = _ADOC_BLOCK_ATTR.sub("", parts[i])
+    text = "```".join(parts)
     return _split_by_headings(text, _ADOC_HEADING, [doc_title],
                               lambda m: (len(m.group(1)), m.group(2)))
 
@@ -176,7 +229,8 @@ def _split_by_headings(text, pattern, root_path, extract) -> list[Section]:
     远比只给一个 URL 有用，用户能立刻判断这条证据是否对得上自己的问题。
     """
     sections: list[Section] = []
-    marks = list(pattern.finditer(text))
+    # 标题只在代码块之外匹配；正文仍从原文切取
+    marks = list(pattern.finditer(_mask_fenced(text)))
 
     lead = text[: marks[0].start()] if marks else text
     if lead.strip():
@@ -193,6 +247,8 @@ def _split_by_headings(text, pattern, root_path, extract) -> list[Section]:
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         body = text[m.end():end].strip()
         if not body or any(p.match(body) for p in _SKIP_PATTERNS):
+            continue
+        if _is_navigation(title, body):
             continue
 
         path = list(root_path) + [t for t in stack if t]

@@ -75,6 +75,9 @@ def clone_or_update(src: Source, root: Path | None = None) -> Path:
         try:
             _git("fetch", "--depth", "1", "origin", src.ref, cwd=root)
             _git("checkout", "-f", "FETCH_HEAD", cwd=root)
+            # 注册表里的 paths 可能已变更，缓存仓库也必须重设稀疏范围，
+            # 否则新增路径永远不会出现在工作树里，表现为"路径不存在"
+            _git("sparse-checkout", "set", "--no-cone", *sparse, cwd=root)
             return root
         except FetchError:
             # 缓存损坏或 ref 变更时重新克隆，而不是留下半坏的工作树

@@ -86,12 +86,56 @@ def test_dedupe_adjacent_titles():
     assert _dedupe_path(["Web", "Servlet"]) == ["Web", "Servlet"]
 
 
-def test_tiny_section_merged_not_dropped():
-    """过短的小节并入相邻块，而不是丢弃——丢弃会让锚点断链。"""
+def _chunks(secs, s=None):
+    return sections_to_chunks(
+        secs, s or src(), Path("src/main/antora/modules/ROOT/pages/x.adoc"),
+        "abc123", "2026-08-31T00:00:00+00:00",
+    )
+
+
+def test_stub_section_dropped_not_merged_forward():
+    """整节内容不足下限时直接丢弃，绝不并入下一小节。
+
+    代码评审发现的缺陷：早期实现把上一小节的尾巴并进下一小节的首块，
+    产出了正文来自 A 节、却标注 #sec-b 的块。
+    对一个以可追溯引用为卖点的产品，引用错位比丢一小段内容严重得多。
+    """
     secs = [Section(["Doc", "A"], "[[anchor]]"), Section(["Doc", "B"], "这是一段足够长的正文内容。" * 6)]
-    chunks = sections_to_chunks(secs, src(), Path("src/main/antora/modules/ROOT/pages/x.adoc"), "abc123", "2026-08-31T00:00:00+00:00")
-    assert len(chunks) >= 1
+    chunks = _chunks(secs)
+    assert chunks
     assert all(c.token_estimate >= 20 for c in chunks)
+
+
+def test_chunk_text_never_spans_two_sections():
+    """不变量：每个块的正文完整来自单一小节，引用才不会张冠李戴。"""
+    secs = [
+        Section(["Doc", "A 节"], "A 节独有的尾巴内容。" * 3, anchor="sec-a"),
+        Section(["Doc", "B 节"], "B 节独有的正文内容。" * 8, anchor="sec-b"),
+    ]
+    for c in _chunks(secs):
+        if "#sec-b" in c.source_url:
+            assert "A 节独有" not in c.text, "B 节的引用里混进了 A 节的正文"
+        if "#sec-a" in c.source_url:
+            assert "B 节独有" not in c.text
+
+
+def test_trailing_short_content_not_silently_dropped():
+    """小节末尾的短片段应并入同节前一块，而不是消失。"""
+    body = "第一段足够长的正文内容用于形成独立块。" * 12 + "\n\n收尾。"
+    chunks = _chunks([Section(["Doc", "A"], body, anchor="a")])
+    assert any("收尾。" in c.text for c in chunks), "尾部内容被丢弃"
+
+
+def test_oversized_prose_is_split_to_cap():
+    """超上限的散文必须继续下切，否则永远进不了上下文预算。
+
+    实测索引里曾出现 70203 token 的单块，而 2.5 秒预算只有约 879 token，
+    这类块无论如何都不可能被检索选中。
+    """
+    body = "\n".join(f"* 第 {i} 条变更说明，描述某个配置项的行为调整。" for i in range(400))
+    chunks = _chunks([Section(["Doc", "Notable changes"], body, anchor="nc")])
+    assert len(chunks) > 1
+    assert max(c.token_estimate for c in chunks) <= MAX_TOKENS * 1.5
 
 
 # ---------- URL 回链 ----------
@@ -141,3 +185,42 @@ def test_url_docbook_deep_sect_becomes_anchor_not_page():
 
 def test_url_without_anchor_has_no_fragment():
     assert "#" not in build_url(src(), Path("src/main/antora/modules/ROOT/pages/x.adoc"), None)
+
+
+# ---------- 代码评审发现的解析缺陷 ----------
+
+def test_markdown_hash_comment_in_code_block_is_not_heading():
+    """代码块内的 `# 注释` 是 shell 注释，不是标题。
+
+    评审发现：不遮罩围栏会把一个 bash 块切成三段，
+    并伪造出 `下载-tarball` 这类锚点写进 source_url——
+    引用会指向官方页面上根本不存在的位置。影响 kubernetes 与 kafka。
+    """
+    md = "# 安装\n\n说明。\n\n```bash\n# 下载 tarball\ncurl -LO x\n# 解压\ntar xzf x\n```\n\n后续。\n"
+    secs = parse_markdown(md, "Doc")
+    assert len(secs) == 1
+    assert secs[0].title_path[-1] == "安装"
+    assert "下载 tarball" in secs[0].body
+
+
+def test_asciidoc_attributes_inside_listing_are_preserved():
+    """`[main]`、`:mode: fast` 在正文里是标记，在 listing 块里是配置内容。
+
+    一律删除会静默损坏被当作证据引用的配置示例。
+    """
+    adoc = "== 配置\n\n说明文字。\n\n----\n[main]\n:mode: fast\nkey=value\n----\n\n结尾。\n"
+    body = parse_asciidoc(adoc, "Doc")[-1].body
+    assert "[main]" in body and ":mode: fast" in body
+
+
+def test_navigation_page_is_dropped():
+    """纯 xref 导航页没有技术结论，只会挤占索引与上下文预算。
+
+    实测索引中最大的一块是 70203 token 的 Antora 重定向页。
+    """
+    from services.sync.parse import _is_navigation
+
+    nav = " ".join(f"xref:ROOT:page{i}.adoc#a{i}[Page {i}]" for i in range(40))
+    assert _is_navigation("Redirect", nav)
+    assert _is_navigation("Acknowledgments", "Abhijit Menon-Sen Adnan Dautovic " * 20)
+    assert not _is_navigation("Using EXPLAIN", "EXPLAIN ANALYZE shows the actual run time. " * 10)

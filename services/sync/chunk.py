@@ -94,6 +94,35 @@ def _dedupe_path(path: list[str]) -> list[str]:
     return out
 
 
+_SENT_END = re.compile(r"(?<=[。！？.!?])\s+")
+
+
+def _force_split(block: str) -> list[str]:
+    """把超过硬上限的非代码块继续切小。
+
+    先按行切（列表型内容，如 Kafka 的 Notable changes 常常整段没有空行），
+    行仍过长时再按句号切。代码块不走这里——切断的代码既不能执行也无法理解。
+    """
+    if estimate_tokens(block) <= MAX_TOKENS:
+        return [block]
+
+    units = block.split("\n")
+    if len(units) == 1:
+        units = _SENT_END.split(block)
+
+    out, buf, n = [], [], 0
+    for u in units:
+        t = estimate_tokens(u)
+        if buf and n + t > MAX_TOKENS:
+            out.append("\n".join(buf) if "\n" in block else " ".join(buf))
+            buf, n = [], 0
+        buf.append(u)
+        n += t
+    if buf:
+        out.append("\n".join(buf) if "\n" in block else " ".join(buf))
+    return [o for o in out if o.strip()]
+
+
 def _split_body(body: str) -> list[str]:
     """按段落切分长正文，且不切开代码块。
 
@@ -128,34 +157,63 @@ def _split_body(body: str) -> list[str]:
 
     if buf:
         out.append("\n\n".join(buf))
+
+    # 代码块整体保留；其余超上限的继续下切，否则这些块永远进不了上下文预算
+    final: list[str] = []
+    for piece in out:
+        if _CODE_FENCE.search(piece):
+            final.append(piece)
+        else:
+            final.extend(_force_split(piece))
+    return final
+
+
+def _merge_small(pieces: list[str]) -> list[str]:
+    """把过短的片段并入同一小节的相邻片段。
+
+    只在小节**内部**合并。跨小节合并会让引用张冠李戴——
+    早期实现把上一小节的尾巴并进下一小节的首块，于是出现了
+    正文来自 A 节、却标注 #sec-b 的块。对一个以可追溯引用为卖点的产品，
+    这比丢一小段内容严重得多。
+    """
+    out: list[str] = []
+    for p in pieces:
+        if out and estimate_tokens(p) < MIN_TOKENS:
+            out[-1] = f"{out[-1]}\n\n{p}"
+        else:
+            out.append(p)
+    # 首片过短时向后并
+    while len(out) > 1 and estimate_tokens(out[0]) < MIN_TOKENS:
+        out[1] = f"{out[0]}\n\n{out[1]}"
+        out.pop(0)
     return out
 
 
 def sections_to_chunks(
     sections: list[Section], src: Source, rel_path: Path, commit: str, retrieved_at: str
 ) -> list[Chunk]:
+    """把小节切成块。
+
+    不变量：**每个块的正文完整来自单一小节**，因此其 source_url、锚点和
+    标题路径必然与正文对应。整节内容不足 MIN_TOKENS 时直接丢弃——
+    十来个 token 的残片作为证据没有价值，不值得为它牺牲引用正确性。
+    """
     chunks: list[Chunk] = []
-    carry: str = ""          # 过短的小节并入下一块，而不是直接丢弃
 
     for sec in sections:
         body = _ADOC_ANCHOR.sub("", sec.body).strip()
         if not body:
             continue
-        if carry:
-            body = f"{carry}\n\n{body}"
-            carry = ""
-        if estimate_tokens(body) < MIN_TOKENS:
-            carry = body
-            continue
 
         path = _dedupe_path(sec.title_path)
-        for piece in _split_body(body):
+        url = build_url(src, rel_path, sec.anchor, getattr(sec, "page_id", None))
+
+        for piece in _merge_small(_split_body(body)):
             if estimate_tokens(piece) < MIN_TOKENS:
-                carry = piece
                 continue
             chunks.append(
                 Chunk(
-                    source_url=build_url(src, rel_path, sec.anchor, getattr(sec, "page_id", None)),
+                    source_url=url,
                     source_project=src.project,
                     version_or_commit=commit,
                     license=src.license,

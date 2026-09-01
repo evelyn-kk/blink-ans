@@ -62,7 +62,13 @@ def collect_chunks(src: Source, log: Callable[[str], None]) -> tuple[list[Chunk]
         return [], res
 
     res.commit = fetched.commit
-    files = collect_files(src, fetched.root)
+    try:
+        files = collect_files(src, fetched.root)
+    except Exception as exc:
+        # 必须留在 try 内：整个流程按来源隔离设计，
+        # 上游改一个目录名不应让其余四个来源的索引一起作废。
+        res.error = f"{type(exc).__name__}: {exc}"
+        return [], res
     res.files = len(files)
     now = utc_now()
 
@@ -166,8 +172,10 @@ def sync(
                 continue
             versions[src.id] = res.commit
 
-            builder.add(chunks, _embed_with_cache(chunks, embedder, cache))
-            report.total_chunks += len(chunks)
+            # 以 add() 的实际写入数为准：checksum 重复的块会被跳过，
+            # 用 len(chunks) 会让同一条命令打印出两个不一致的总数。
+            res.chunks = builder.add(chunks, _embed_with_cache(chunks, embedder, cache))
+            report.total_chunks += res.chunks
 
         if cache.available:
             log(f"  向量复用 {cache.hits} 条，新算 {cache.misses} 条")
