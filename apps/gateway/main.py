@@ -131,16 +131,24 @@ async def stream_answer(answer_id: str):
 
     async def gen():
         q: asyncio.Queue = asyncio.Queue()
+        # asyncio.Queue 不是线程安全的：从工作线程直接 put_nowait 会在
+        # 唤醒等待中的消费协程时走 Future.set_result -> loop.call_soon，
+        # 而 call_soon 不会唤醒事件循环的 selector，流可能就此卡住。
+        # 必须经 call_soon_threadsafe 把写入调度回事件循环线程。
+        loop = asyncio.get_running_loop()
+
+        def emit(item):
+            loop.call_soon_threadsafe(q.put_nowait, item)
 
         def produce():
             try:
                 for ev in _orchestrator.answer(req):
-                    q.put_nowait(ev)
+                    emit(ev)
             except Exception as exc:
-                q.put_nowait({"type": "error", "stage": "orchestrator",
-                              "message": f"{type(exc).__name__}: {exc}"})
+                emit({"type": "error", "stage": "orchestrator",
+                      "message": f"{type(exc).__name__}: {exc}"})
             finally:
-                q.put_nowait(None)
+                emit(None)
 
         task = asyncio.create_task(asyncio.to_thread(produce))
         try:
