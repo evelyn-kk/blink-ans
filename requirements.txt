@@ -1,10 +1,26 @@
-# 本地推理与检索栈。Python 3.13（mlx 在 3.14 上生态尚不完整）。
-# 安装: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt
-mlx-lm==0.31.3
-mlx-whisper
-mlx-embeddings
-sqlite-vec==0.1.9
-jieba==0.42.1
-fastapi
-uvicorn[standard]
-pytest
+# 直接依赖，全部锁定版本。Python 3.13（mlx 在 3.14 上生态尚不完整）。
+#
+# 安装:
+#   uv venv --python 3.13 .venv
+#   uv pip install --python .venv/bin/python -r requirements.txt
+#
+# 完整环境（含全部传递依赖）见 requirements.lock.txt，由 infra/scripts/freeze.sh 生成。
+# 换机复现请装 lock 文件；日常开发装本文件即可。
+
+# ---- 推理与模型（仅 Apple Silicon）----
+mlx==0.32.2                 # mlx-lm 的传递依赖，但它是运行时本身，必须锁死
+mlx-lm==0.31.3              # 生成：Qwen3-4B-Instruct-2507-4bit
+mlx-whisper==0.4.3          # 转写：whisper-large-v3-turbo
+mlx-embeddings==0.1.0       # 嵌入：bge-m3-mlx-8bit（1024 维）
+
+# ---- 检索 ----
+sqlite-vec==0.1.9           # 向量虚表；需要 Python 能 enable_load_extension
+jieba==0.42.1               # 中文分词；FTS5 默认分词器对中文完全失效（I0 实测命中 0）
+
+# ---- 服务 ----
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+PyYAML==6.0.3               # 来源注册表与回归查询集；此前一直在用却未登记
+
+# ---- 测试 ----
+pytest==9.1.1

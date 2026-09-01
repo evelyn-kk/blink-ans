@@ -69,7 +69,13 @@ def build_url(src: Source, rel_path: Path, anchor: str | None, page_id: str | No
                 p = p[len(prefix):]
                 break
         p = p[:-3] if p.endswith(".md") else p
-        return f"{src.base_url.rstrip('/')}/{p}/{frag}"
+        # Hugo 的 _index.md 是所在目录的首页，URL 里不出现该文件名
+        if p.endswith("/_index"):
+            p = p[: -len("/_index")]
+        elif p == "_index":
+            p = ""
+        base = f"{src.base_url.rstrip('/')}/{p}".rstrip("/")
+        return f"{base}/{frag}"
 
     if src.format == "docbook":
         # PostgreSQL 的 HTML 只在 chapter / sect1 级别分页；
