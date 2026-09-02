@@ -56,13 +56,17 @@ def _load() -> None:
                 jieba.add_word(parts[0], freq=int(parts[1]))
             else:
                 jieba.add_word(line)
-        _ready = True
 
-    # 词典就绪后才能切词，故放在锁外、_ready 置位之后
-    for zh in _term_map:
-        parts = _split_key(zh)
-        if parts:
-            _KEY_PARTS[zh] = parts
+        # 组成词必须在**置 _ready 之前、且仍持锁时**算完。
+        # 放到锁外会让另一个线程看见 _ready=True 却读到半空的 _KEY_PARTS——
+        # 症状是部分提问静默少展开几个检索词，不报错、只是召回变差（CR-001 同一类问题）。
+        # 这里走 _cut 而非 tokenize：后者会再调 _load，撞上这把不可重入的锁。
+        for zh in _term_map:
+            parts = _split_key(zh, _cut(zh))
+            if parts:
+                _KEY_PARTS[zh] = parts
+
+        _ready = True
 
 
 def dictionary_version() -> str:
@@ -123,13 +127,8 @@ def _split_camel(tok: str) -> list[str]:
     return [p.lower() for p in parts if len(p) > 1]
 
 
-def tokenize(text: str) -> list[str]:
-    """切词并去掉标点。英文与数字原样保留，中文按词典切分。
-
-    驼峰标识符额外拆出组成词（`livenessProbe` → `livenessprobe`、`liveness`、`probe`），
-    索引侧与查询侧共用本函数，因此两边的拆分口径天然一致。
-    """
-    _load()
+def _cut(text: str) -> list[str]:
+    """纯切词，**不触发 _load**。供 _load 自身在持锁期间使用。"""
     import jieba
 
     out: list[str] = []
@@ -140,6 +139,16 @@ def tokenize(text: str) -> list[str]:
         out.append(tok.lower())
         out.extend(_split_camel(tok))
     return out
+
+
+def tokenize(text: str) -> list[str]:
+    """切词并去掉标点。英文与数字原样保留，中文按词典切分。
+
+    驼峰标识符额外拆出组成词（`livenessProbe` → `livenessprobe`、`liveness`、`probe`），
+    索引侧与查询侧共用本函数，因此两边的拆分口径天然一致。
+    """
+    _load()
+    return _cut(text)
 
 
 def to_fts_document(text: str) -> str:
@@ -162,19 +171,22 @@ EXPANSION_STOPWORDS = {
 }
 
 
-def _split_key(key: str) -> list[str] | None:
+def _split_key(key: str, toks: list[str]) -> list[str] | None:
     """把映射键切成一组**不重叠且完整覆盖它**的组成词；覆盖不全时返回 None。
 
-    用途见 expand_terms：`索引失效` → `["索引", "失效"]`，于是
+    用途见 matched_terms：`索引失效` → `["索引", "失效"]`，于是
     `B-tree 索引什么时候会失效` 这种中间插了词的提问也能命中。
 
     **必须要求完整覆盖**。`慢查询` 经 jieba 只切出 `["查询"]`（单字子词被丢掉），
     若允许部分覆盖，任何含"查询"的提问都会被展开成慢查询的检索词。
     覆盖不全的键退回原来的子串匹配，宁可漏也不要错。
+
+    `toks` 由调用方传入而非在此切词：本函数在 _load 持锁期间被调用，
+    调 tokenize 会重入那把锁。
     """
     low = key.lower()
     parts = sorted(
-        {t for t in tokenize(key) if t != low and t in low},
+        {t for t in toks if t != low and t in low},
         key=len, reverse=True,
     )
     out, i = [], 0
