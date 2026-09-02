@@ -61,6 +61,28 @@ def _matches_gold(hit: Hit, gold: str, project: str | None) -> bool:
     return hit.title_path == gold or hit.title_path.startswith(gold + " › ")
 
 
+def evaluate(results: list[ProbeResult], top_k: int) -> tuple[list[ProbeResult], list[ProbeResult]]:
+    """把结果分成"退步"与"未达标"两类，并决定命令是否失败。
+
+    纯函数，不碰索引与模型，因此可以单测——门禁自身也需要回归保护（CR-015）。
+
+    两条判据缺一不可：
+
+    - **退步**：名次比记录的基线更差。`known_open` 的既有缺口也适用，
+      只是它们的基线本来就不是第 1 名。
+    - **未达标**：非 `known_open` 却没进前 `top_k`。
+      只看退步是不够的——`baseline is null` 的题（新加入、或修复前根本没进候选）
+      从第 1 名跌到未进候选时 `r.baseline is None`，退步判据整个跳过它，
+      于是**刚修好的题恰好失去门禁**。CR-015 指出的正是这个洞。
+    """
+    regressed = [
+        r for r in results
+        if r.baseline is not None and (r.rank is None or r.rank > r.baseline)
+    ]
+    below = [r for r in results if not r.passed and not r.known_open]
+    return regressed, below
+
+
 def run(spec: dict, store: ChunkStore, embedder: Embedder,
         *, limit: int = 20) -> list[ProbeResult]:
     top_k = int(spec.get("top_k", 5))
@@ -105,13 +127,7 @@ def main() -> int:
     elapsed = time.perf_counter() - t0
 
     passed = sum(r.passed for r in results)
-    # 退步 = 名次比记录的基线更差。既有缺口（known_open）只要不再变差就不算退步——
-    # 判据要能区分"这次改坏了"和"本来就没解决"，否则每次改动都会被同一批红叉淹没。
-    regressed = [
-        r for r in results
-        if r.baseline is not None
-        and (r.rank is None or r.rank > r.baseline)
-    ]
+    regressed, below = evaluate(results, top_k)
     for r in results:
         mark = "✓" if r.passed else ("○" if r.known_open else "✗")
         pos = f"第 {r.rank} 名" if r.rank else "未进候选"
@@ -129,9 +145,14 @@ def main() -> int:
           f"（其中 {known} 条为已知缺口 ○，见 ranking_probe.yaml 的 note）"
           f"    ({elapsed:.2f}s)")
     if regressed:
-        print("退步:")
+        print("退步（比基线更差）:")
         for r in regressed:
             print(f"  {r.question}: 基线第 {r.baseline} 名 -> "
+                  + (f"第 {r.rank} 名" if r.rank else "未进候选"))
+    if below:
+        print(f"未达标（非已知缺口，正确块没进前 {top_k}）:")
+        for r in below:
+            print(f"  {r.question}: "
                   + (f"第 {r.rank} 名" if r.rank else "未进候选"))
 
     if args.json:
@@ -144,8 +165,8 @@ def main() -> int:
         print(f"已写入 {args.json}")
 
     store.close()
-    # 只有真退步才失败：既有缺口不阻塞，但一旦变得更差立刻报出来
-    return 1 if regressed else 0
+    # 退步或未达标都失败。既有缺口（known_open）不阻塞，但一旦比基线更差立刻报出来。
+    return 1 if (regressed or below) else 0
 
 
 if __name__ == "__main__":

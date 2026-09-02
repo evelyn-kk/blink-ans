@@ -22,5 +22,12 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.4
 PyYAML==6.0.3               # 来源注册表与回归查询集；此前一直在用却未登记
 
+# ---- 远端模型基准（仅 bench/bench_llm_remote.py 用，运行时不依赖）----
+# T-026 要把本地生成与商用 API 放在同一把尺子上量。两家各用各的官方 SDK：
+# Kimi 以 OpenAI 兼容协议对外，故用 openai 客户端指向月之暗面的 base_url，
+# 这不是给 Claude 套兼容层——Claude 走 anthropic 官方 SDK。
+anthropic==1.3.0            # Claude；1.x 基于 httpx2
+openai==3.7.0               # 仅用于 Kimi（月之暗面）的 OpenAI 兼容端点
+
 # ---- 测试 ----
 pytest==9.1.1
