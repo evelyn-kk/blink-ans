@@ -51,7 +51,9 @@ def _is_navigation(title: str, body: str) -> bool:
     return len(_LINK_MARKUP.findall(body)) * 20 > len(body) * 0.5
 
 
-_FENCE_LINE = re.compile(r"^(```|~~~)", re.M)
+# 按 CommonMark 取围栏行：最多 3 个前导空格、3 个以上的 ` 或 ~，其后是信息串。
+# 捕获整条标记而不只是前三个字符——收尾围栏不得短于开围栏，长度必须可比。
+_FENCE_LINE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*([^\n]*)$", re.M)
 
 
 def _mask_fenced(text: str) -> str:
@@ -62,23 +64,36 @@ def _mask_fenced(text: str) -> str:
     存在的理由：Markdown 代码块里的 `# 下载 tarball` 是 shell 注释，不是标题。
     不遮罩会把一个 bash 块切成三段，并伪造出 `下载-tarball` 这类锚点写进 source_url——
     引用会指向一个官方页面上根本不存在的位置。
+
+    围栏必须**成对**匹配：开与闭之间是代码，闭与下一个开之间是正文。
+    旧实现每轮都把状态复位，于是把收尾围栏又当成下一段的开围栏，
+    从第一个代码块起一路遮到文件末尾——代码块之后的标题全部消失，
+    正文还会被并进上一节，引用因此张冠李戴（CR-009）。
     """
     out = list(text)
-    inside = False
-    for m in _FENCE_LINE.finditer(text):
-        line_end = text.find("\n", m.start())
-        line_end = len(text) if line_end == -1 else line_end
-        if inside:
-            inside = False
-            continue
-        inside = True
-        # 找到配对的收尾围栏
-        nxt = _FENCE_LINE.search(text, line_end)
-        stop = nxt.end() if nxt else len(text)
-        for i in range(m.start(), stop):
+    opened: re.Match | None = None      # 当前尚未闭合的开围栏
+
+    def blank(start: int, stop: int) -> None:
+        for i in range(start, stop):
             if out[i] != "\n":
                 out[i] = "\x00"
-        inside = False
+
+    for m in _FENCE_LINE.finditer(text):
+        marker, info = m.group(1), m.group(2)
+        if opened is None:
+            opened = m
+            continue
+        # 收尾围栏须与开围栏同字符、不短于它，且不带信息串（CommonMark 规定）。
+        # 不满足的行仍在代码块内部，继续等待真正的收尾。
+        if marker[0] != opened.group(1)[0] or len(marker) < len(opened.group(1)) or info.strip():
+            continue
+        blank(opened.start(), m.end())
+        opened = None
+
+    if opened is not None:
+        # 未闭合的围栏按 CommonMark 一直延伸到文档结尾，发布出来的页面也是这样渲染的；
+        # 把它当作正文会让代码里的 `# 注释` 变成伪造标题。
+        blank(opened.start(), len(text))
     return "".join(out)
 
 
