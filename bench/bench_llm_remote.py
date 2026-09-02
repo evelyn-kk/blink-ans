@@ -97,9 +97,9 @@ DEFAULT_MODELS = {
     # 默认只测 Opus 5。想要延迟档位的对照，显式传
     # --models claude-haiku-4-5 claude-sonnet-5
     "claude": ["claude-opus-5"],
-    # Kimi 的模型 ID 迭代较快，这里给的默认值不保证长期有效；
-    # 报错时直接用 --models 传当前可用的 ID，脚本会把服务端原文打出来。
-    "kimi": ["kimi-k2-0905-preview"],
+    # 2026-09-02 以 models.list 实测可用。模型 ID 会迭代，若再次变动可用
+    # --models 覆盖；脚本会保留服务端原文，避免把“模型下线”误判为时延失败。
+    "kimi": ["kimi-k3"],
 }
 
 
