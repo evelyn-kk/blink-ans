@@ -90,8 +90,37 @@ def detect_technology(text: str) -> str | None:
     return found.pop() if len(found) == 1 else None
 
 
+# 驼峰标识符：livenessProbe、RedisCacheManager、httpGet。
+# 分词器把它们当成单个 token（`livenessprobe`），于是查询里的
+# `liveness OR probe` 永远匹配不上——Kubernetes 的 YAML 字段名和 Java 类名
+# 几乎全是这个形式，对自然语言提问等于不可达。
+# 点号形式（session.timeout.ms）会被标点规则切开，不受影响。
+# 连续大写要整体成段，否则 PostgreSQL 会被切成 Postgre + S + Q + L
+_CAMEL = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
+
+
+def _split_camel(tok: str) -> list[str]:
+    """把驼峰标识符拆成组成词。整词一并保留——精确查 `livenessProbe` 时它仍要能命中。"""
+    if not (tok[:1].isascii() and tok.isalnum()):
+        return []
+    low = tok.lower()
+    # 产品名不拆：PostgreSQL 拆出的 `postgre` 出现在每个 PG 块里，
+    # 零区分度却会被 bm25 奖励，正是 PROJECT_TERMS 要消除的那种噪声。
+    if low in PROJECT_TERMS:
+        return []
+    parts = _CAMEL.findall(tok)
+    # 至少两段、且确实含大写才算驼峰；全小写或全大写词拆出来的还是它自己
+    if len(parts) < 2 or tok.islower() or tok.isupper():
+        return []
+    return [p.lower() for p in parts if len(p) > 1]
+
+
 def tokenize(text: str) -> list[str]:
-    """切词并去掉标点。英文与数字原样保留，中文按词典切分。"""
+    """切词并去掉标点。英文与数字原样保留，中文按词典切分。
+
+    驼峰标识符额外拆出组成词（`livenessProbe` → `livenessprobe`、`liveness`、`probe`），
+    索引侧与查询侧共用本函数，因此两边的拆分口径天然一致。
+    """
     _load()
     import jieba
 
@@ -101,6 +130,7 @@ def tokenize(text: str) -> list[str]:
         if not tok or _PUNCT.fullmatch(tok):
             continue
         out.append(tok.lower())
+        out.extend(_split_camel(tok))
     return out
 
 
