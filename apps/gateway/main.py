@@ -11,7 +11,6 @@ I4 会补上 transcript 事件。
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -29,6 +28,8 @@ from services.orchestrator.answering import (  # noqa: E402
 )
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
+
+from apps.gateway.sse import sse_stream  # noqa: E402
 
 engine = InferenceEngine(DEFAULT_MODEL)
 embedder = Embedder()
@@ -129,36 +130,8 @@ async def stream_answer(answer_id: str):
     if _orchestrator is None:
         raise HTTPException(503, "服务尚未就绪")
 
-    async def gen():
-        q: asyncio.Queue = asyncio.Queue()
-        # asyncio.Queue 不是线程安全的：从工作线程直接 put_nowait 会在
-        # 唤醒等待中的消费协程时走 Future.set_result -> loop.call_soon，
-        # 而 call_soon 不会唤醒事件循环的 selector，流可能就此卡住。
-        # 必须经 call_soon_threadsafe 把写入调度回事件循环线程。
-        loop = asyncio.get_running_loop()
-
-        def emit(item):
-            loop.call_soon_threadsafe(q.put_nowait, item)
-
-        def produce():
-            try:
-                for ev in _orchestrator.answer(req):
-                    emit(ev)
-            except Exception as exc:
-                emit({"type": "error", "stage": "orchestrator",
-                      "message": f"{type(exc).__name__}: {exc}"})
-            finally:
-                emit(None)
-
-        task = asyncio.create_task(asyncio.to_thread(produce))
-        try:
-            while (ev := await q.get()) is not None:
-                yield f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
-        finally:
-            await task
-
     return StreamingResponse(
-        gen(),
+        sse_stream(_orchestrator.answer(req)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
