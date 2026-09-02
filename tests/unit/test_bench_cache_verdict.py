@@ -56,6 +56,20 @@ def test_absent_field_is_unverified_not_miss():
     assert "未在 usage 中报告" in v["reason"]
 
 
+def test_missing_first_write_is_unverified_even_if_later_read_is_positive():
+    """后续读到缓存不等于本轮确实创建过缓存，不能跳过首阶段。"""
+    v = cache_verdict([sample(write=None, read=0), sample(write=0, read=900)])
+    assert v["status"] == "unverified"
+    assert "首轮" in v["reason"]
+
+
+def test_zero_first_write_is_a_miss_even_if_later_read_is_positive():
+    """0 是供应商明确报告的“未创建”，与字段缺失的未验证不同。"""
+    v = cache_verdict([sample(write=0, read=0), sample(write=0, read=900)])
+    assert v["status"] == "miss"
+    assert "未创建" in v["reason"]
+
+
 def test_single_run_cannot_prove_a_hit():
     """一轮跑不出「后续读取」这件事，不能算验证通过。"""
     v = cache_verdict([sample(write=900, read=0)])

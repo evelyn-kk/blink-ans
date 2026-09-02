@@ -197,7 +197,7 @@ def measure_kimi(model: str, evidence: str, max_tokens: int, effort: str) -> dic
     first_event = first_text = None
     text_chars = thinking_chars = 0
     prompt_tokens = output_tokens = None
-    cache_read = None
+    cache_read = cache_write = None
 
     stream = client.chat.completions.create(
         model=model,
@@ -223,6 +223,7 @@ def measure_kimi(model: str, evidence: str, max_tokens: int, effort: str) -> dic
             details = getattr(chunk.usage, "prompt_tokens_details", None)
             if details is not None:
                 cache_read = getattr(details, "cached_tokens", None)
+                cache_write = getattr(details, "cache_write_tokens", None)
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -239,8 +240,8 @@ def measure_kimi(model: str, evidence: str, max_tokens: int, effort: str) -> dic
     return _pack(
         first_event, first_text, total, text_chars, thinking_chars,
         prompt_tokens=prompt_tokens, output_tokens=output_tokens,
-        # 兼容协议不报写入量，只报读取量；写入留 None，别拿 0 冒充"没写入"。
-        cache_write_tokens=None, cache_read_tokens=cache_read,
+        # 兼容协议未必会报任一缓存字段。缺失留 None，别拿 0 冒充"没写入"。
+        cache_write_tokens=cache_write, cache_read_tokens=cache_read,
     )
 
 
@@ -341,11 +342,22 @@ def cache_verdict(samples: list[dict[str, Any]]) -> dict[str, Any]:
         return {"status": "unverified",
                 "reason": "供应商未在 usage 中报告缓存读取量，无法验证"}
 
+    first_write = writes[0]
+    if first_write is None:
+        return {"status": "unverified",
+                "reason": "首轮未在 usage 中报告缓存写入量，无法验证两阶段命中"}
+    if first_write <= 0:
+        return {
+            "status": "miss",
+            "reason": "首轮缓存写入量为 0，未创建可供后续读取的缓存",
+            "first_write_tokens": first_write,
+        }
+
     later_reads = [r for r in reads[1:] if r]
     if later_reads:
         return {
             "status": "hit",
-            "first_write_tokens": writes[0],
+            "first_write_tokens": first_write,
             "later_read_tokens_max": max(later_reads),
             "later_runs_hit": f"{len(later_reads)}/{len(reads) - 1}",
         }
@@ -353,7 +365,7 @@ def cache_verdict(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "status": "miss",
         "reason": "后续轮次缓存读取量均为 0；常见原因是稳定前缀短于该模型的"
                   "最小可缓存长度（512–4096 token，随模型而变）",
-        "first_write_tokens": writes[0],
+        "first_write_tokens": first_write,
     }
 
 
