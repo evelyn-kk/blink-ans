@@ -11,6 +11,9 @@
 
 version: 1
 
+# 2026-09-02（T-017）：补入 20 条。原 74 条对 I2 遗留失败题的
+# 14 个中文概念只覆盖 3 个，关键词路等于没上场。
+
 terms:
   # ---- 数据库 ----
   慢查询: [slow query, slow queries, query performance, EXPLAIN]
@@ -31,6 +34,11 @@ terms:
   膨胀: [bloat, table bloat]
 
   # ---- 消息与流 ----
+  投递语义: [message delivery semantics, delivery semantics, at-least-once, exactly-once]
+  幂等生产者: [idempotent producer, idempotent delivery, enable.idempotence, sequence number]
+  心跳: [heartbeat, heartbeat.interval.ms]
+  会话超时: [session timeout, session.timeout.ms]
+  拉取: [poll, fetch, max.poll.records]
   事务: [transaction, transactional]
   生产者: [producer]
   消费者: [consumer]
@@ -48,8 +56,13 @@ terms:
   事务生产者: [transactional producer, transactional.id]
   分区: [partition, partitioning]
   副本: [replica, replication]
+  副本同步: [in-sync replica, ISR, replication, leader follower]
+  同步机制: [in-sync replica, ISR, replication protocol]
 
   # ---- 缓存 ----
+  缓存注解: [Cacheable, CacheEvict, cache annotation, cache manager]
+  缓存管理器: [RedisCacheManager, CacheManager, cache configuration]
+  连接工厂: [connection factory, LettuceConnectionFactory, JedisConnectionFactory]
   序列化: [serializer, serialization, RedisSerializer]
   反序列化: [deserializer, deserialization]
   预扣库存: [stock reservation, inventory decrement, atomic decrement]
@@ -61,6 +74,13 @@ terms:
   分布式锁: [distributed lock, redlock, SETNX]
 
   # ---- Spring / Java ----
+  配置文件: [application properties, application.yaml, externalized configuration]
+  配置优先级: [externalized configuration, property source order, configuration precedence]
+  外部化配置: [externalized configuration, property source]
+  日志级别: [logging.level, log level, logger level]
+  优雅停机: [graceful shutdown, shutdown grace period, lifecycle timeout]
+  端点: [endpoint, management endpoint, actuator endpoint]
+  启动失败: [failure analyzer, startup failure, application failed to start]
   自动配置: [auto-configuration, autoconfigure, conditional]
   声明式事务: [declarative transaction, Transactional]
   自调用: [self-invocation, proxy, AOP proxy]
@@ -75,6 +95,9 @@ terms:
   链路追踪: [tracing, distributed tracing, span]
 
   # ---- Kubernetes ----
+  探针: [probe, livenessProbe, readinessProbe, health check]
+  内存溢出: [OOMKilled, out of memory, memory limit]
+  重启: [restart, restartPolicy, CrashLoopBackOff]
   存活探针: [liveness probe]
   就绪探针: [readiness probe]
   启动探针: [startup probe]
@@ -89,6 +112,8 @@ terms:
   持久卷: [persistent volume, PVC]
 
   # ---- 通用故障 ----
+  失效: [not used, ignored, disabled, invalid]
+  优先级: [precedence, priority, order]
   超时: [timeout, timed out]
   重试: [retry, retries, backoff]
   背压: [backpressure]
