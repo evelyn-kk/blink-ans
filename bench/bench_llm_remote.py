@@ -54,11 +54,18 @@ from __future__ import annotations
 import argparse
 import os
 import statistics
+import sys
 import time
+from pathlib import Path
 from typing import Any, Callable
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from bench_llm import FILLER  # 语料必须与本地基准同源，否则两组数字不可比
 from common import write_report
+from packages.config.env import load_dotenv, missing_credential_message
 
 TOKENIZER_ID = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
@@ -446,13 +453,14 @@ def main() -> None:
     ap.add_argument("--rtt-only", action="store_true",
                     help="只测网络往返与最小请求，不跑分档。用于先确认链路与凭据")
     args = ap.parse_args()
+    dotenv_state = load_dotenv(ROOT / ".env")
 
     active = []
     for p in args.providers:
         if os.environ.get(CREDENTIALS[p]):
             active.append(p)
         else:
-            print(f"跳过 {p}：环境变量 {CREDENTIALS[p]} 未设置")
+            print(f"跳过 {p}：{missing_credential_message(CREDENTIALS[p], dotenv_state)}")
     if not active:
         print("没有可用的凭据，未测量任何供应商。")
         return
