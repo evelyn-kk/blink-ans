@@ -24,6 +24,8 @@ _lock = threading.Lock()
 _ready = False
 _version: str | None = None
 _term_map: dict[str, list[str]] = {}
+# 每个映射键的组成词，用于"中间插了别的词也能命中"（见 _split_key）
+_KEY_PARTS: dict[str, list[str]] = {}
 
 
 def _load() -> None:
@@ -54,6 +56,16 @@ def _load() -> None:
                 jieba.add_word(parts[0], freq=int(parts[1]))
             else:
                 jieba.add_word(line)
+
+        # 组成词必须在**置 _ready 之前、且仍持锁时**算完。
+        # 放到锁外会让另一个线程看见 _ready=True 却读到半空的 _KEY_PARTS——
+        # 症状是部分提问静默少展开几个检索词，不报错、只是召回变差（CR-001 同一类问题）。
+        # 这里走 _cut 而非 tokenize：后者会再调 _load，撞上这把不可重入的锁。
+        for zh in _term_map:
+            parts = _split_key(zh, _cut(zh))
+            if parts:
+                _KEY_PARTS[zh] = parts
+
         _ready = True
 
 
@@ -115,13 +127,8 @@ def _split_camel(tok: str) -> list[str]:
     return [p.lower() for p in parts if len(p) > 1]
 
 
-def tokenize(text: str) -> list[str]:
-    """切词并去掉标点。英文与数字原样保留，中文按词典切分。
-
-    驼峰标识符额外拆出组成词（`livenessProbe` → `livenessprobe`、`liveness`、`probe`），
-    索引侧与查询侧共用本函数，因此两边的拆分口径天然一致。
-    """
-    _load()
+def _cut(text: str) -> list[str]:
+    """纯切词，**不触发 _load**。供 _load 自身在持锁期间使用。"""
     import jieba
 
     out: list[str] = []
@@ -134,9 +141,92 @@ def tokenize(text: str) -> list[str]:
     return out
 
 
+def tokenize(text: str) -> list[str]:
+    """切词并去掉标点。英文与数字原样保留，中文按词典切分。
+
+    驼峰标识符额外拆出组成词（`livenessProbe` → `livenessprobe`、`liveness`、`probe`），
+    索引侧与查询侧共用本函数，因此两边的拆分口径天然一致。
+    """
+    _load()
+    return _cut(text)
+
+
 def to_fts_document(text: str) -> str:
     """索引侧：写入 FTS5 的空格分隔文档。"""
     return " ".join(tokenize(text))
+
+
+# 展开出的英文里的功能词。它们在英文语料里几乎每块都出现，单独入 OR 查询
+# 只会稀释信号——和 PROJECT_TERMS 是同一类问题，只是来源不同（CR-013）。
+#
+# 实测（T-025）：`失效 → not used / ignored / disabled / invalid` 让
+# `not`、`used` 进入查询后，`PostgreSQL 索引失效` 的正确块掉到关键词路第 109 名。
+#
+# **只过滤单个 token，多词短语整体保留**：`"not used"` 作为短语仍有区分度，
+# 拆出来的 `not`、`used` 没有。
+EXPANSION_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "by", "can", "do", "does",
+    "for", "from", "in", "is", "it", "its", "not", "of", "on", "or", "that",
+    "out", "the", "this", "to", "use", "used", "using", "when", "with",
+}
+
+
+def _split_key(key: str, toks: list[str]) -> list[str] | None:
+    """把映射键切成一组**不重叠且完整覆盖它**的组成词；覆盖不全时返回 None。
+
+    用途见 matched_terms：`索引失效` → `["索引", "失效"]`，于是
+    `B-tree 索引什么时候会失效` 这种中间插了词的提问也能命中。
+
+    **必须要求完整覆盖**。`慢查询` 经 jieba 只切出 `["查询"]`（单字子词被丢掉），
+    若允许部分覆盖，任何含"查询"的提问都会被展开成慢查询的检索词。
+    覆盖不全的键退回原来的子串匹配，宁可漏也不要错。
+
+    `toks` 由调用方传入而非在此切词：本函数在 _load 持锁期间被调用，
+    调 tokenize 会重入那把锁。
+    """
+    low = key.lower()
+    parts = sorted(
+        {t for t in toks if t != low and t in low},
+        key=len, reverse=True,
+    )
+    out, i = [], 0
+    while i < len(low):
+        for p in parts:
+            if low.startswith(p, i):
+                out.append(p)
+                i += len(p)
+                break
+        else:
+            return None
+    # 只有一段等于键本身，子串匹配已经覆盖，无需额外规则
+    return out if len(out) >= 2 else None
+
+
+def matched_terms(text: str) -> list[str]:
+    """本次提问命中了哪些映射键。展开逻辑与调试、测试共用这一个入口。
+
+    两条匹配规则：
+    1. 子串命中（原有行为）。
+    2. **组成词全部命中**——`索引失效` 的 `索引` 与 `失效` 都在提问里就算命中，
+       哪怕中间隔着"什么时候会"。CR-013 指出的第二例正是败在这里：
+       子串匹配不上具体映射，却仍触发了通用的 `失效`，结果只剩纯噪声词。
+
+    命中后做**最具体者胜**：`索引失效` 命中时丢掉 `失效`。
+    通用键的英文展开必然更泛，与具体键叠加只会稀释信号。
+    """
+    _load()
+    lowered = text.lower()
+    qtoks = set(tokenize(text))
+    hit = set()
+    for zh in _term_map:
+        if zh in text or zh.lower() in lowered:
+            hit.add(zh)
+            continue
+        parts = _KEY_PARTS.get(zh)
+        if parts and all(p in qtoks for p in parts):
+            hit.add(zh)
+    # 被更具体的命中键包含的，一律丢弃
+    return sorted(z for z in hit if not any(z != o and z in o for o in hit))
 
 
 def expand_terms(text: str) -> list[str]:
@@ -146,12 +236,9 @@ def expand_terms(text: str) -> list[str]:
     关键词检索退化为按 "postgresql" 这类 ASCII 词排序的噪声。
     展开后关键词路才能真正参与排序。
     """
-    _load()
     out: list[str] = []
-    lowered = text.lower()
-    for zh, ens in _term_map.items():
-        if zh in text or zh.lower() in lowered:
-            out.extend(ens)
+    for zh in matched_terms(text):
+        out.extend(_term_map[zh])
     return out
 
 
@@ -160,19 +247,29 @@ def to_fts_query(text: str, expand: bool = True) -> str:
 
     用 OR 而非 AND：语音转写会写错技术名词（I0 实测 Kafka→CAFCA），
     要求全部词命中会让一个错字毁掉整次检索。相关性由 bm25 与 RRF 融合决定。
+
+    OR 查询对噪声词没有抵抗力：多一个 `not` 就多一批高分无关块。
+    因此展开出的功能词单独出现时要滤掉（EXPANSION_STOPWORDS），短语整体保留。
     """
     toks = [t.replace('"', "") for t in tokenize(text)]
+    expanded: list[str] = []
     if expand:
         for phrase in expand_terms(text):
             # 英文映射词按空白切开后各自入查询，短语整体也保留
-            toks.extend(p.lower() for p in phrase.split())
+            expanded.extend(p.lower() for p in phrase.split())
             if " " in phrase:
-                toks.append(phrase.lower())
+                expanded.append(phrase.lower())
     seen, uniq = set(), []
-    for t in toks:
+    for t in toks + expanded:
         t = t.strip().replace('"', "")
+        if not t or t in seen:
+            continue
         # 项目名不参与打分：它们的区分度为零，只会稀释真正的信号
-        if t and t not in seen and t not in PROJECT_TERMS:
-            seen.add(t)
-            uniq.append(t)
+        if t in PROJECT_TERMS:
+            continue
+        # 功能词同理；短语（含空格）不受影响
+        if " " not in t and t in EXPANSION_STOPWORDS:
+            continue
+        seen.add(t)
+        uniq.append(t)
     return " OR ".join(f'"{t}"' for t in uniq) if uniq else '""'
