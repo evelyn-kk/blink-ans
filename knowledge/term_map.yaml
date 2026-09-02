@@ -19,7 +19,12 @@ terms:
   慢查询: [slow query, slow queries, query performance, EXPLAIN]
   执行计划: [execution plan, query plan, EXPLAIN, planner]
   全表扫描: [sequential scan, Seq Scan, full table scan]
-  索引失效: [index not used, unused index, index scan]
+  # 2026-09-02（T-025）：原值 [index not used, unused index, index scan] 对不上语料。
+  # PG 讲这件事的小节是 Indices › Indexes › Examining Index Usage，
+  # 正文用词是 examining/forcing index usage、planner、cost estimate、ANALYZE，
+  # 不含 "unused index"。实测该小节在关键词路从第 109 名升到第 1 名。
+  索引失效: [index usage, examining index usage, forcing index usage,
+           sequential scan, enable_seqscan, planner, cost estimate, EXPLAIN ANALYZE]
   统计信息: [statistics, ANALYZE, pg_statistic]
   连接池: [connection pool, pooling, max_connections]
   事务隔离级别: [transaction isolation level, isolation level]
@@ -112,8 +117,14 @@ terms:
   持久卷: [persistent volume, PVC]
 
   # ---- 通用故障 ----
+  # 这两条是**通用**中文词，展开出的英文也通用。保留它们是因为
+  # 「探针失效」这类没有专属映射的提问仍需要一点信号，但要靠两道闸限制伤害（T-025）：
+  #   1. 最具体者胜——`索引失效` 命中时 `失效` 自动丢弃（见 tokenize.matched_terms）；
+  #   2. `not` / `used` 这类功能词单独出现时被 EXPANSION_STOPWORDS 滤掉，短语保留。
+  # `优先级` 去掉了 `order`：它在数据库语料里指 ORDER BY，与「优先级」无关，
+  # 而 `配置优先级` 的 `property source order` 是短语，不受影响。
   失效: [not used, ignored, disabled, invalid]
-  优先级: [precedence, priority, order]
+  优先级: [precedence, priority]
   超时: [timeout, timed out]
   重试: [retry, retries, backoff]
   背压: [backpressure]
