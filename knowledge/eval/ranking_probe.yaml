@@ -21,20 +21,28 @@ version: 1
 # top_k：正确块必须进入前几名才算通过。5 对齐 AnswerConfig.max_evidence。
 top_k: 5
 
+# baseline 的维护规则（CR-015）：
+#   - 它记录**上次验收通过时**的名次，改动被接受后要就地更新，否则门禁会逐渐失真。
+#   - `null` 只用于「从未测过」，**不要**用它表示「当前没进候选」——
+#     退步判据会跳过 baseline 为 null 的题，等于给它开了个后门。
+#   - 门禁有两条：比基线更差算退步；非 known_open 却没进 top_k 算未达标。两者都会让命令失败。
+
 probes:
   # ---- CR-013 直接针对的两道（T-025 新增）----
   - q: PostgreSQL 索引失效
     project: postgresql
     gold: "Indices › Indexes › Examining Index Usage"
-    baseline: null          # T-025 修复前：未进候选（关键词路第 109 名）
+    baseline: 1             # T-025 修复前未进候选（关键词路第 109 名），修复后第 1 名
     note: PG 官方讲「索引为什么没被用上」的正是这一节
 
   - q: PostgreSQL 的 B-tree 索引什么时候会失效
     project: postgresql
     gold: "Indices › Indexes › Examining Index Usage"
+    baseline: 1             # T-025 修复前未进候选，修复后第 1 名
     note: |
       同一概念，中间插了「什么时候会」。T-017 记录把它判为「语料没有覆盖」，
       T-025 实测推翻：覆盖存在，是通用词映射把纯噪声送进 OR 查询导致的排序问题。
+      注意：检索到第 1 名≠端到端能作答——模型仍拒答，成因见 T-030。
 
   - q: Spring Boot 配置优先级是怎样的
     project: spring-boot
@@ -56,6 +64,7 @@ probes:
   - q: Kafka 分区副本的同步机制是什么
     project: kafka
     gold: "Design › Replication"
+    baseline: 1
     note: 问的是 ISR 机制；`Increasing replication factor` 讲的是怎么加副本数，不算对
 
   - q: Kubernetes liveness probe 配置参数有哪些
