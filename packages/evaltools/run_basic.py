@@ -55,8 +55,12 @@ class Case:
     urls: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    evidence_count: int = 0       # 送进 prompt 的证据条数
     declined: bool = False        # 模型明说证据未涵盖
-    retrieval_miss: bool = False  # 检索给错证据，模型正确拒绝编造
+    # 拒答分两种，成因完全不同，不能混为一谈（2026-09-02 / T-025 发现）：
+    retrieval_miss: bool = False       # 检索本身没给到合格证据 → 检索问题
+    declined_with_evidence: bool = False  # 证据判为充分且已送进 prompt，模型仍拒答
+                                          # → 证据答非所问、或问题超出证据能回答的范围
 
     @property
     def ok(self) -> bool:
@@ -95,6 +99,7 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
             c.cited = len(ev["cited_evidence"])
             c.ttft_s, c.total_s = ev["ttft_s"], ev["total_s"]
             c.prompt_tokens = ev["prompt_tokens"]
+            c.evidence_count = ev.get("evidence_count", 0)
         elif t == "error":
             c.failures.append(f"错误 {ev['stage']}: {ev['message']}")
 
@@ -108,10 +113,19 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
             c.failures.append(f"来源均不属于预期项目 {c.project}（实际 {got}）")
 
         if c.declined:
-            # 模型明说"证据未涵盖"是**正确行为**——检索给错了证据，它拒绝编造。
-            # 这是检索质量问题，不是安全问题，必须与"编造"区分统计，
-            # 否则会误导后续优化方向（I3 的评测集才是解决检索质量的地方）。
-            c.retrieval_miss = True
+            # 模型明说"证据未涵盖"是**正确行为**：它拒绝基于手上的证据编造。
+            # 但成因有两种，必须分开统计——
+            #
+            # 2026-09-02（T-025）实测反例：「PostgreSQL 的 B-tree 索引什么时候会失效」
+            # 的正确块检索到第 1 名、`sufficiency=sufficient`、且确实作为证据 [1]
+            # 送进了 prompt，模型仍然逐段回"证据未涵盖"。
+            # 此前本脚本把所有拒答一律记为 `retrieval_miss` 并打印
+            # "检索未命中而正确拒绝编造"，会把生成侧的行为误报成检索缺陷，
+            # 从而把优化方向指错（**判据本身坏掉**，本项目第六次）。
+            if c.sufficiency == Sufficiency.SUFFICIENT.value and c.evidence_count > 0:
+                c.declined_with_evidence = True
+            else:
+                c.retrieval_miss = True
         elif c.cited == 0:
             # 给出了技术内容却不标注任何来源——这才是真正危险的情况：
             # 结论无法追溯，用户无从判断可信度。
@@ -165,8 +179,8 @@ def main() -> int:
         c = run_case(orch, spec)
         cases.append(c)
         mark = "✓" if c.ok else "✗"
-        if c.retrieval_miss:
-            mark = "○"   # 安全但检索未命中
+        if c.retrieval_miss or c.declined_with_evidence:
+            mark = "○"   # 安全（拒绝编造），但没给出可用答案
         print(f"  {mark} [{i:>2}/{len(specs)}] {c.question[:34]:<36} "
               f"{c.sufficiency:<12} 来源{c.sources} 引用{c.cited} {c.ttft_s:.2f}s")
         for f in c.failures:
@@ -190,14 +204,18 @@ def main() -> int:
     if answered:
         with_src = sum(1 for c in answered if c.sources)
         miss = sum(1 for c in answered if c.retrieval_miss)
-        useful = [c for c in answered if not c.retrieval_miss]
+        mismatch = sum(1 for c in answered if c.declined_with_evidence)
+        useful = [c for c in answered
+                  if not (c.retrieval_miss or c.declined_with_evidence)]
         with_cite = sum(1 for c in useful if c.cited)
         print(f"  返回来源 {with_src}/{len(answered)}")
         print(f"  实际作答 {len(useful)}/{len(answered)}"
               f" · 其中带引用 {with_cite}/{len(useful)}"
               f"  （引用覆盖率 {with_cite/max(len(useful),1)*100:.0f}%）")
-        print(f"  ○ 检索未命中而正确拒绝编造: {miss}/{len(answered)}"
-              f"  —— 安全行为，属检索质量问题，由 I3 评测集驱动改进")
+        print(f"  ○ 拒绝编造（检索未给到合格证据）: {miss}/{len(answered)}"
+              f"  —— 检索问题")
+        print(f"  ○ 拒绝编造（证据判为充分仍答不了）: {mismatch}/{len(answered)}"
+              f"  —— 证据答非所问或问题超出证据范围，**不是**检索未命中")
     if ttfts:
         s = sorted(ttfts)
         print(f"  首 token: 中位 {statistics.median(s):.2f}s · "
@@ -224,6 +242,7 @@ def main() -> int:
         "dictionary_version": store.meta.get("dictionary_version"),
         "passed": passed, "total": len(cases),
         "retrieval_misses": sum(1 for c in cases if c.retrieval_miss),
+        "declined_with_evidence": sum(1 for c in cases if c.declined_with_evidence),
         "broken_links": broken,
         "cases": [vars(c) for c in cases],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
