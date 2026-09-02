@@ -1,0 +1,69 @@
+# 检索排序探针 —— 只读，秒级，不跑 LLM
+#
+# 存在的理由（T-017）：一次 50 题 LLM 回归要 8–10 分钟，无法用来扫参数。
+# 而 44 题「来源护栏」只断言 top5 里有没有期望**来源**，粒度太粗——
+# 「来源对但块不对」它抓不到（CR-013 自陈的薄弱点之二）。
+# 因此这里断言到**块**：每题指定一段人工核对过的正确小节，只测它的名次。
+#
+# 金标准怎么定（T-017 三次翻车换来的规矩）：
+#   - 不得用 `text LIKE '%关键词%'` 圈定正确块——那会把上百块全算对，指标失效。
+#   - 不得用「标题里有这个词」——`Increasing replication factor` 讲的是怎么加副本数，
+#     而问题问的是 ISR 机制，正确的是 `Design › Replication`。
+#   - 每条 gold 必须人工打开读过正文，确认它真的回答了这个问题。
+#
+# gold 用 title_path 前缀而非块 id：块 id 每次重建索引都会变，
+# title_path 是人可读、跨重建稳定的小节路径。
+#
+# 用法: .venv/bin/python packages/evaltools/probe_ranking.py
+
+version: 1
+
+# top_k：正确块必须进入前几名才算通过。5 对齐 AnswerConfig.max_evidence。
+top_k: 5
+
+probes:
+  # ---- CR-013 直接针对的两道（T-025 新增）----
+  - q: PostgreSQL 索引失效
+    project: postgresql
+    gold: "Indices › Indexes › Examining Index Usage"
+    baseline: null          # T-025 修复前：未进候选（关键词路第 109 名）
+    note: PG 官方讲「索引为什么没被用上」的正是这一节
+
+  - q: PostgreSQL 的 B-tree 索引什么时候会失效
+    project: postgresql
+    gold: "Indices › Indexes › Examining Index Usage"
+    note: |
+      同一概念，中间插了「什么时候会」。T-017 记录把它判为「语料没有覆盖」，
+      T-025 实测推翻：覆盖存在，是通用词映射把纯噪声送进 OR 查询导致的排序问题。
+
+  - q: Spring Boot 配置优先级是怎样的
+    project: spring-boot
+    gold: "External Config › Externalized Configuration"
+    baseline: 1
+    note: 属性源的完整优先级列表就在这一节正文里（`优先级` 是本轮改动的另一条通用映射）
+
+  # ---- 护栏：本轮改动不得让它们退步 ----
+  - q: Kafka 消费者重复消费怎么排查
+    project: kafka
+    gold: "Design › Message Delivery Semantics"
+    baseline: 6
+    known_open: true
+    note: |
+      讲至少一次/精确一次投递语义的是 Design 这节，不是各处的配置提及。
+      **既有缺口，非 T-025 引入**：top5 里第 4 名是 `rocksdb.config.setter`——
+      progress.md「已知但尚未立项的质量问题」记的就是它，本探针第一次把它量化了。
+
+  - q: Kafka 分区副本的同步机制是什么
+    project: kafka
+    gold: "Design › Replication"
+    note: 问的是 ISR 机制；`Increasing replication factor` 讲的是怎么加副本数，不算对
+
+  - q: Kubernetes liveness probe 配置参数有哪些
+    project: kubernetes
+    gold: "Liveness, Readiness, and Startup Probes › Configuration fields"
+    baseline: 11
+    known_open: true
+    note: |
+      探针字段（periodSeconds / failureThreshold 等）集中在这一节。
+      **既有缺口，非 T-025 引入**：该提问不含任何 term_map 键，展开为空，
+      纯靠 `liveness`/`probe` 两个词竞争 200 多个含探针的 K8s 块。
