@@ -56,6 +56,8 @@ terms:
   事务生产者: [transactional producer, transactional.id]
   分区: [partition, partitioning]
   副本: [replica, replication]
+  副本同步: [in-sync replica, ISR, replication, leader follower]
+  同步机制: [in-sync replica, ISR, replication protocol]
 
   # ---- 缓存 ----
   缓存注解: [Cacheable, CacheEvict, cache annotation, cache manager]
