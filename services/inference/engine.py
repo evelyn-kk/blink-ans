@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -84,6 +85,16 @@ class InferenceEngine:
         实测收益正比于前缀占比（235/1056 token 的前缀省下 19% TTFT），
         属于投机式 prefill 失败时的保底手段。
         """
+        with self._lock:
+            return self._warm_prefix_locked(system_prompt)
+
+    def _warm_prefix_locked(self, system_prompt: str) -> int:
+        """warm_prefix 的实现体。**调用方必须已持有 `_lock`。**
+
+        拆出来是因为 `_restore_prefix()` 在 `stream()` 的锁内被调用，
+        而它的回退路径需要重建前缀。`threading.Lock` 不可重入，
+        直接调用公开的 `warm_prefix()` 会当场自锁死（CR-010）。
+        """
         import mlx.core as mx
         from mlx_lm.models.cache import make_prompt_cache
 
@@ -98,12 +109,11 @@ class InferenceEngine:
             n += 1
         tokens = a[:n]
 
-        with self._lock:
-            cache = make_prompt_cache(self._model)
-            self._model(mx.array(tokens)[None], cache=cache)
-            mx.eval([c.state for c in cache])
-            self._prefix_cache = cache
-            self._prefix_tokens = tokens
+        cache = make_prompt_cache(self._model)
+        self._model(mx.array(tokens)[None], cache=cache)
+        mx.eval([c.state for c in cache])
+        self._prefix_cache = cache
+        self._prefix_tokens = tokens
         self.status.prefix_tokens = len(tokens)
         return len(tokens)
 
@@ -117,7 +127,7 @@ class InferenceEngine:
         return len(self._tokenizer.encode(text, add_special_tokens=False))
 
     def _restore_prefix(self, cache) -> None:
-        """把缓存裁剪回常驻前缀长度。
+        """把缓存裁剪回常驻前缀长度。**调用方已持有 `_lock`**（见 stream 的 finally）。
 
         裁剪失败时（模型的 cache 类型不支持）退回重建前缀——
         宁可慢一次，也不能让上一次请求的内容泄漏到下一次。
@@ -133,9 +143,25 @@ class InferenceEngine:
                 return
         except Exception:
             pass
-        self._prefix_cache = None   # 交由下次 warm_prefix 重建
-        if self._system_prompt:
-            self.warm_prefix(self._system_prompt)
+
+        # 走到这里说明裁剪没能还原缓存，只能丢弃重建。
+        # 丢弃这一步必须先做完：即使重建失败，也不能留着带上一次请求内容的缓存，
+        # 否则下一次请求会串话——串话比慢一次严重得多。
+        self._prefix_cache = None
+        self._prefix_tokens = []
+        self.status.prefix_tokens = 0
+        if not self._system_prompt:
+            return
+        try:
+            # 已在锁内，必须走不重复加锁的实现体
+            self._warm_prefix_locked(self._system_prompt)
+        except Exception as exc:
+            # 这里是 stream() 的 finally，客户端断流时还会带着 GeneratorExit。
+            # 让重建异常盖掉原本的退出原因只会更难排查，因此就地降级：
+            # 前缀归零，下一次请求走完整 prefill，仅仅是慢，不会错。
+            # status.prefix_tokens 归零使降级在 /healthz 上可见，不是静默失败。
+            print(f"[engine] 前缀缓存重建失败，已降级为无前缀: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
 
     def _render(self, system_prompt: str, user_content: str) -> str:
         msgs = []
