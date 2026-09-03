@@ -131,7 +131,7 @@ def cmd_project_import(args) -> int:
             source_index=Path(args.from_index) if args.from_index else CURRENT,
             name=name, activate=True,
         )
-    except (ValueError, IndexError_, OSError, UnicodeDecodeError) as exc:
+    except (ValueError, IndexError_, OSError, UnicodeDecodeError, ImportError, RuntimeError) as exc:
         print(f"项目导入失败: {exc}", file=sys.stderr)
         return 2
 
