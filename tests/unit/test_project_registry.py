@@ -25,6 +25,18 @@ def test_registry_loads_explicit_root_version_and_cloud_boundary(tmp_path):
     assert projects[0].root == root and projects[0].cloud_generation_allowed is False
 
 
+def test_relative_root_is_resolved_against_manifest_not_process_working_directory(tmp_path):
+    root = tmp_path / "orders"
+    root.mkdir()
+    manifest = write_manifest(tmp_path, """projects:
+  - id: orders
+    version: v1
+    root: orders
+    cloud_generation_allowed: true
+""")
+    assert load_projects(manifest)[0].root == root.resolve()
+
+
 @pytest.mark.parametrize("body, error", [
     ("projects:\n  - id: p\n    version: v1\n    root: /missing\n", "cloud_generation_allowed"),
     ("projects:\n  - id: ../p\n    version: v1\n    root: /tmp\n    cloud_generation_allowed: false\n", "非法项目"),

@@ -34,6 +34,11 @@ def load_projects(path: Path) -> list[Project]:
             raise ProjectRegistryError(f"项目 {item.get('id', '?')!r} 缺少: {', '.join(missing)}")
         ident = str(item["id"]).strip()
         root = Path(str(item["root"])).expanduser()
+        # 清单应能随项目一起移动；相对 root 的基准是清单自身而非启动命令的 cwd。
+        # resolve 也让后续 read_materials 的边界检查针对真实根目录进行。
+        if not root.is_absolute():
+            root = path.parent / root
+        root = root.resolve()
         if not ident or "/" in ident or ".." in ident:
             raise ProjectRegistryError(f"非法项目 ID: {ident!r}")
         if not root.is_dir():
