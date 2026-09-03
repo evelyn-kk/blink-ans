@@ -541,6 +541,32 @@ def test_candidate_banned_hit_not_selected_as_evidence_does_not_force_local():
     assert cloud_allowed is True
 
 
+def test_cloud_allowed_is_recomputed_after_local_reselect():
+    """CR-029 独立复现场景（用审查方给出的原始数字）：禁云块 rowid=1
+    (score=10, cost=700) 与允许块 rowid=2 (score=1, cost=650)，云端预算 1000、
+    本地预算 650。
+
+    云端预算下只能装下 1 或 2 中的一个（合计 1350 > 1000），DP 选分数更高的
+    块 1（禁云）→ 触发重选；本地预算 650 下块 1（cost 700）已经装不下，
+    重选只能选块 2（不禁云）。最终返回的证据是 [2]，完全不含禁云块，
+    `cloud_allowed` 必须重新算成 True——旧实现会继续沿用触发重选那一次算出的
+    False，让本可以走云端的证据被无故强制本地。
+    """
+    banned = hit(i=1, score=10.0, tokens=700)
+    banned.cloud_generation_allowed = False
+    allowed = hit(i=2, score=1.0, tokens=650)
+    hits = [banned, allowed]
+    cfg = AnswerConfig(max_evidence=5, evidence_budget=650, evidence_budget_cloud=1000)
+
+    orch = Orchestrator(
+        None, FakeEmbedder(), CostRouter(hits, cloud=FakeCloudBackend()), config=cfg,
+    )
+    evidence, cloud_allowed = orch._select_evidence_and_cloud_allowed(hits)
+
+    assert {e.rowid for e in evidence} == {2}
+    assert cloud_allowed is True
+
+
 def test_select_evidence_skips_cloud_budget_reselect_when_router_cannot_use_cloud():
     """路由层面已经确定走本地（离线）时，直接用本地预算选，不要先按云端
     预算选出超过本地 prefill 能力的证据——即使证据本身没有禁云限制。

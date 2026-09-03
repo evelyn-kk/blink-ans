@@ -1,10 +1,11 @@
-"""路由级回归：会话 API 的建轮/清空/取流交互（CR-021）。
+"""路由级回归：会话 API 的建轮/清空/取流交互（CR-021、CR-030）。
 
 不启动真实模型或索引——直接调用 `apps.gateway.main` 里的路由处理函数
 （它们只是普通的 async def，不经过 `TestClient` 也能直接调用），并用
 monkeypatch 替换掉模块级的 `_sessions`/`_pending_turns`/`_orchestrator`/`_store`。
-这样能验证真实的路由控制流（建轮时捕获 epoch、取流时核对 epoch、清空后
-拒绝旧轮次），而不需要触发 `lifespan()` 里的真实 MLX 模型加载。
+这样能验证真实的路由控制流（建轮时捕获 epoch/turn_seq、取流时核对二者、
+清空后拒绝旧轮次、乱序完成不回滚会话状态），而不需要触发 `lifespan()` 里的
+真实 MLX 模型加载。
 """
 
 from __future__ import annotations
@@ -46,6 +47,17 @@ class FakeOrchestrator:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _drain(response):
+    """`StreamingResponse` 不会在构造时执行它包的异步生成器——`sse_stream()`
+    的 body 要等真的被 ASGI 服务器迭代消费时才会跑。测试里直接调用
+    `stream_turn()` 拿到的 response 对象本身不会触发 `stream_and_record()`
+    的状态写回逻辑，必须显式把 `body_iterator` 迭代完，才算真正"跑完这次流"。
+    """
+    async for _ in response.body_iterator:
+        pass
+    return response
 
 
 @pytest.fixture(autouse=True)
@@ -111,3 +123,41 @@ def test_stream_turn_rejects_unknown_turn_id():
     with pytest.raises(HTTPException) as exc_info:
         _run(gw.stream_turn(sid, "no-such-turn"))
     assert exc_info.value.status_code == 404
+
+
+def test_older_turn_completing_after_newer_turn_does_not_roll_back_session():
+    """CR-030 独立复现场景（用审查方给出的原始描述）：先为 orders/v1 建一个轮次
+    （旧轮次），再为 checkout/v2 建一个显式新轮次（新轮次）。**先完整消费新流**，
+    会话状态变成 checkout/v2；**再消费旧流**——旧流仍应正常流完给客户端
+    （它对应的请求本身没有错，只是完成得晚），但不能把会话状态覆盖回
+    orders/v1，那样等于凭空回滚了用户已经看到、已经确认生效的最新状态。
+
+    这正是真实 SSE 流会发生的情形：两个轮次可以同时挂起，耗时不同，完成顺序
+    不保证等于创建顺序。旧的 epoch 机制（CR-021）只在 clear() 时变化，同一个
+    epoch 内的乱序完成完全不受它保护，需要单独的单调序号（turn_seq）。
+    """
+    session_view = _run(gw.create_session(gw.SessionCreateBody(
+        language="zh", project_id=None, version=None,
+    )))
+    sid = session_view["session_id"]
+
+    older = _run(gw.create_turn(sid, gw.TurnBody(
+        question="订单怎么预留库存", project_id="orders", version="v1",
+    )))
+    newer = _run(gw.create_turn(sid, gw.TurnBody(
+        question="结账怎么配置重试", project_id="checkout", version="v2",
+    )))
+
+    # 新轮次先完成：会话状态应该更新为 checkout/v2。
+    response_newer = _run(gw.stream_turn(sid, newer["turn_id"]))
+    assert response_newer.status_code == 200
+    _run(_drain(response_newer))
+    assert gw._sessions[sid].active_project_id == "checkout"
+    assert gw._sessions[sid].active_version == "v2"
+
+    # 旧轮次后完成：仍能正常拿到响应（不是错误），但不该把会话状态盖回去。
+    response_older = _run(gw.stream_turn(sid, older["turn_id"]))
+    assert response_older.status_code == 200
+    _run(_drain(response_older))
+    assert gw._sessions[sid].active_project_id == "checkout"
+    assert gw._sessions[sid].active_version == "v2"
