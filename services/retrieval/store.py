@@ -46,6 +46,10 @@ CREATE TABLE chunks (
     token_estimate    INTEGER NOT NULL,
     anchor            TEXT,
     source_path       TEXT,
+    project_id        TEXT,
+    module            TEXT,
+    symbol            TEXT,
+    cloud_generation_allowed INTEGER,
     text              TEXT NOT NULL,
 
     -- 唯一键必须带上来源身份。只按 checksum 去重会让"同一段说明出现在两个页面"
@@ -54,6 +58,8 @@ CREATE TABLE chunks (
 );
 CREATE INDEX idx_chunks_tech ON chunks(technology);
 CREATE INDEX idx_chunks_project ON chunks(source_project);
+CREATE INDEX idx_chunks_project_id ON chunks(project_id);
+CREATE INDEX idx_chunks_project_symbol ON chunks(project_id, symbol);
 -- 向量复用按 checksum 单独查（EmbeddingCache.get），
 -- 复合唯一键以 source_url 打头用不上，缺这条索引会退化成逐块全表扫描。
 CREATE INDEX idx_chunks_checksum ON chunks(checksum);
@@ -124,11 +130,13 @@ class IndexBuilder:
                     """INSERT INTO chunks
                        (checksum, source_url, source_project, version_or_commit, license,
                         retrieved_at, title_path, technology, content_type, locale,
-                        token_estimate, anchor, source_path, text)
+                        token_estimate, anchor, source_path, project_id, module, symbol,
+                        cloud_generation_allowed, text)
                        VALUES (:checksum, :source_url, :source_project, :version_or_commit,
                                :license, :retrieved_at, :title_path, :technology,
                                :content_type, :locale, :token_estimate, :anchor,
-                               :source_path, :text)""",
+                               :source_path, :project_id, :module, :symbol,
+                               :cloud_generation_allowed, :text)""",
                     row,
                 )
             except sqlite3.IntegrityError:
@@ -180,13 +188,15 @@ class IndexBuilder:
                     """INSERT INTO chunks
                        (checksum, source_url, source_project, version_or_commit, license,
                         retrieved_at, title_path, technology, content_type, locale,
-                        token_estimate, anchor, source_path, text)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        token_estimate, anchor, source_path, project_id, module, symbol,
+                        cloud_generation_allowed, text)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     tuple(r[k] for k in (
                         "checksum", "source_url", "source_project", "version_or_commit",
                         "license", "retrieved_at", "title_path", "technology",
                         "content_type", "locale", "token_estimate", "anchor",
-                        "source_path", "text")),
+                        "source_path", "project_id", "module", "symbol",
+                        "cloud_generation_allowed", "text")),
                 )
                 rid = cur.lastrowid
                 doc = to_fts_document(r["title_path"].replace(" › ", " ") + "\n" + r["text"])

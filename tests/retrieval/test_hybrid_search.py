@@ -113,6 +113,41 @@ def test_project_filter(store):
     assert all(h.source_project == "kafka" for h in hits)
 
 
+def test_project_metadata_survives_index_write_and_merge(tmp_path, monkeypatch):
+    """T-103：项目隔离字段必须真实入库，且 merge 不能静默抹掉它们。"""
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    project_chunk = Chunk(
+        source_url="https://example.com/orders/checkout.py#reserve",
+        source_project="user-project", version_or_commit="v1.2.3", license="MIT",
+        retrieved_at=utc_now(), title_path=["orders", "checkout", "reserve"],
+        technology="spring", content_type="code", locale="en", text="def reserve_stock(): pass",
+        source_path="services/orders/checkout.py", project_id="orders-prod", module="orders",
+        symbol="reserve_stock", cloud_generation_allowed=False,
+    )
+    project_chunk.validate()
+    source = IndexBuilder("source")
+    source.add([project_chunk], [_vec(0)])
+    source.finalize({"user-project": "v1.2.3"}, "synthetic")
+    source.activate()
+
+    merged = IndexBuilder("merged")
+    assert merged.carry_over(tmp_path / "source.db", set(), "synthetic") == 1
+    merged.finalize({"user-project": "v1.2.3"}, "synthetic")
+    merged.activate()
+    check = ChunkStore(tmp_path / "merged.db")
+    try:
+        row = check.execute(
+            "SELECT project_id, module, symbol, cloud_generation_allowed, source_path "
+            "FROM chunks"
+        )[0]
+        assert dict(row) == {
+            "project_id": "orders-prod", "module": "orders", "symbol": "reserve_stock",
+            "cloud_generation_allowed": 0, "source_path": "services/orders/checkout.py",
+        }
+    finally:
+        check.close()
+
+
 def test_token_budget_is_respected(store):
     """上下文预算是 I0 实测的硬约束：超出即首 token 时延超标。"""
     budget = 30
