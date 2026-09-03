@@ -232,6 +232,9 @@ def hybrid_search(
         r = rows.get(rid)
         if r is None:
             continue
+        # 仍在服役的 current.db 可能由 T-103 扩列之前构建；查询官方知识时，
+        # 缺失的项目字段应等价于 NULL，而不能让整个检索路径崩溃。
+        fields = set(r.keys())
         if token_budget is not None:
             if used + r["token_estimate"] > token_budget:
                 continue  # 跳过放不下的，继续找更小的块把预算填满
@@ -243,10 +246,13 @@ def hybrid_search(
                 version_or_commit=r["version_or_commit"], retrieved_at=r["retrieved_at"],
                 technology=r["technology"], content_type=r["content_type"],
                 token_estimate=r["token_estimate"], score=score,
-                project_id=r["project_id"], module=r["module"], symbol=r["symbol"],
+                project_id=r["project_id"] if "project_id" in fields else None,
+                module=r["module"] if "module" in fields else None,
+                symbol=r["symbol"] if "symbol" in fields else None,
                 cloud_generation_allowed=(
                     bool(r["cloud_generation_allowed"])
-                    if r["cloud_generation_allowed"] is not None else None
+                    if "cloud_generation_allowed" in fields
+                    and r["cloud_generation_allowed"] is not None else None
                 ),
                 keyword_rank=krank, vector_rank=vrank,
                 vector_distance=distances.get(rid),

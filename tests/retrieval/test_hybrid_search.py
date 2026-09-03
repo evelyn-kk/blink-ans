@@ -195,6 +195,13 @@ def test_merge_can_carry_legacy_index_without_project_metadata_columns(tmp_path,
     finally:
         db.close()
 
+    legacy = ChunkStore(tmp_path / "legacy.db")
+    try:
+        hits = hybrid_search(legacy, "legacy official evidence", _vec(0), limit=1)
+        assert hits and hits[0].project_id is None and hits[0].cloud_generation_allowed is None
+    finally:
+        legacy.close()
+
     merged = IndexBuilder("merged")
     assert merged.carry_over(tmp_path / "legacy.db", set(), "synthetic") == 1
     merged.finalize({"official": "v1"}, "synthetic")
