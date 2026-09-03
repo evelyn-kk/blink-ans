@@ -83,6 +83,7 @@ def _where(
     project_id: str | None,
     module: str | None,
     symbol: str | None,
+    version: str | None = None,
 ) -> tuple[str, list]:
     clauses, params = [], []
     if technology:
@@ -100,6 +101,11 @@ def _where(
     if symbol:
         clauses.append("c.symbol = ?")
         params.append(symbol)
+    if version:
+        # T-104：会话可以选定项目下的某个版本（architecture.md §3"活动项目/版本"）。
+        # 与 module/symbol 同一档过滤条件，缺失时不加条件，不强制要求块带版本信息。
+        clauses.append("c.version_or_commit = ?")
+        params.append(version)
     return (" AND " + " AND ".join(clauses) if clauses else ""), params
 
 
@@ -107,10 +113,11 @@ def keyword_search(
     store: ChunkStore, query: str, limit: int = 30,
     technology: str | None = None, project: str | None = None,
     *, project_id: str | None = None, module: str | None = None, symbol: str | None = None,
+    version: str | None = None,
 ) -> list[tuple[int, float]]:
     from .tokenize import to_fts_query
 
-    cond, params = _where(technology, project, project_id, module, symbol)
+    cond, params = _where(technology, project, project_id, module, symbol, version)
     sql = f"""
         SELECT c.id AS rowid, bm25(chunks_fts) AS score
         FROM chunks_fts
@@ -137,9 +144,10 @@ def vector_search(
     store: ChunkStore, vector: Sequence[float], limit: int = 30,
     technology: str | None = None, project: str | None = None,
     *, project_id: str | None = None, module: str | None = None, symbol: str | None = None,
+    version: str | None = None,
 ) -> list[tuple[int, float]]:
     # vec0 的 KNN 不支持与业务表 JOIN 后再过滤，因此先取更多候选再在外层过滤
-    has_filter = any((technology, project, project_id, module, symbol))
+    has_filter = any((technology, project, project_id, module, symbol, version))
     over = limit * 4 if has_filter else limit
     rows = store.execute(
         "SELECT rowid, distance FROM chunks_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
@@ -149,7 +157,7 @@ def vector_search(
         return []
 
     if has_filter:
-        cond, params = _where(technology, project, project_id, module, symbol)
+        cond, params = _where(technology, project, project_id, module, symbol, version)
         ids = [r["rowid"] for r in rows]
         keep = {
             r["id"] for r in store.execute(
@@ -198,6 +206,7 @@ def hybrid_search(
     project_id: str | None = None,
     module: str | None = None,
     symbol: str | None = None,
+    version: str | None = None,
     candidates: int = 30,
 ) -> list[Hit]:
     """关键词与向量并行检索后 RRF 融合，可选按 token 预算截断。
@@ -207,11 +216,11 @@ def hybrid_search(
     """
     kw = keyword_search(
         store, query, candidates, technology, project,
-        project_id=project_id, module=module, symbol=symbol,
+        project_id=project_id, module=module, symbol=symbol, version=version,
     )
     vec = vector_search(
         store, query_vector, candidates, technology, project,
-        project_id=project_id, module=module, symbol=symbol,
+        project_id=project_id, module=module, symbol=symbol, version=version,
     ) if query_vector else []
     distances = dict(vec)
     fused = rrf_fuse(kw, vec)
@@ -261,3 +270,68 @@ def hybrid_search(
         if len(hits) >= limit:
             break
     return hits
+
+
+def hits_by_rowid(
+    store: ChunkStore, rowids: Sequence[int], query_vector: Sequence[float] | None = None,
+) -> list[Hit]:
+    """按 rowid 精确取回块（T-104：追问复用上一轮引用过的证据）。
+
+    会话只保留上一轮**引用过**的块 rowid（见 orchestrator/session.py 的
+    TurnContext.cited_chunk_ids），不保留完整 Hit——那次检索的排名/距离信号
+    是针对上一轮问题算出的，这一轮问题即便是追问，语义也未必完全相同。
+    因此这里不复用旧分数，而是用**这一轮**的 query_vector 现算向量距离：
+    诚实反映"这条旧证据对这一轮新问题是否仍然相关"，而不是假定追问永远
+    还在讨论同一件事。
+
+    融合分定为"向量路排名并列第一"（VECTOR_WEIGHT/(RRF_K+1)），与
+    hybrid_search 真正检索出的候选处于同一量纲——追问场景下让已确认相关的
+    旧证据获得适度优先级，但不会用一个人为夸大的分数无条件压过同样强的新证据。
+    """
+    if not rowids:
+        return []
+    ids = list(rowids)
+    placeholders = ",".join("?" * len(ids))
+    rows = {
+        r["id"]: r for r in store.execute(
+            f"SELECT * FROM chunks WHERE id IN ({placeholders})", ids
+        )
+    }
+    vecs: dict[int, tuple[float, ...]] = {}
+    if query_vector is not None:
+        for r in store.execute(
+            f"SELECT rowid, embedding FROM chunks_vec WHERE rowid IN ({placeholders})", ids
+        ):
+            blob = r["embedding"]
+            vecs[r["rowid"]] = struct.unpack(f"{len(blob) // 4}f", blob)
+
+    score = VECTOR_WEIGHT / (RRF_K + 1)
+    out: list[Hit] = []
+    for rid in ids:
+        r = rows.get(rid)
+        if r is None:
+            continue  # 索引可能已被重建，块不复存在——静默跳过，不当作错误
+        dist = None
+        if rid in vecs and query_vector is not None:
+            dist = sum((a - b) ** 2 for a, b in zip(vecs[rid], query_vector)) ** 0.5
+        fields = set(r.keys())
+        out.append(
+            Hit(
+                rowid=rid, text=r["text"], title_path=r["title_path"],
+                source_url=r["source_url"], source_project=r["source_project"],
+                version_or_commit=r["version_or_commit"], retrieved_at=r["retrieved_at"],
+                technology=r["technology"], content_type=r["content_type"],
+                token_estimate=r["token_estimate"], score=score,
+                project_id=r["project_id"] if "project_id" in fields else None,
+                module=r["module"] if "module" in fields else None,
+                symbol=r["symbol"] if "symbol" in fields else None,
+                cloud_generation_allowed=(
+                    bool(r["cloud_generation_allowed"])
+                    if "cloud_generation_allowed" in fields
+                    and r["cloud_generation_allowed"] is not None else None
+                ),
+                keyword_rank=None, vector_rank=1 if dist is not None else None,
+                vector_distance=dist,
+            )
+        )
+    return out

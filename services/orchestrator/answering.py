@@ -39,7 +39,7 @@ from packages.prompts.answer import (  # noqa: E402
 from packages.schemas.chunk import estimate_tokens  # noqa: E402
 from services.inference.router import Router  # noqa: E402
 from services.retrieval.embed import Embedder  # noqa: E402
-from services.retrieval.search import Hit, hybrid_search  # noqa: E402
+from services.retrieval.search import Hit, hits_by_rowid, hybrid_search  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 from services.retrieval.tokenize import detect_technology  # noqa: E402
 
@@ -214,6 +214,7 @@ def _select_evidence_greedy(
                 text=h.text,
                 citation=h.citation,
                 source_url=h.source_url,
+                rowid=h.rowid,
             )
         )
     return out
@@ -320,6 +321,7 @@ def select_evidence(
                 text=h.text,
                 citation=h.citation,
                 source_url=h.source_url,
+                rowid=h.rowid,
             )
         )
     return out
@@ -333,12 +335,19 @@ class AnswerRequest:
     project_id: str | None = None    # 用户项目的稳定 ID，不能与 source_project 混用
     module: str | None = None
     symbol: str | None = None
+    # T-104：会话可选定项目下的某个版本（architecture.md §3"活动项目/版本"）。
+    # 与 module/symbol 同一档：单纯的检索过滤条件，不影响判定/生成逻辑。
+    version: str | None = None
     max_tokens: int | None = None
     # scope.md 开头：会话开始前选定，同一会话内界面、转写提示与回答语言一致，
     # 不在会话内自动猜测或切换——因此这里是逐请求字段而非进程级配置。
     # 类型用 packages.prompts.answer.Language 的字面量集合（"zh"/"en"），
     # 未知值在 answer() 里显式拒绝，不静默回退到某个默认语言。
     language: Language = "zh"
+    # T-104：会话层追问时，把上一轮**实际引用过**的块 rowid 传进来，
+    # 与本轮 hybrid_search 的结果合并参与判定/选取（见 Orchestrator.answer()）。
+    # 默认 None：一次性问答（POST /v1/answers）与既有测试完全不受影响。
+    extra_hit_rowids: list[int] | None = None
 
 
 class Orchestrator:
@@ -398,11 +407,23 @@ class Orchestrator:
                 limit=self.cfg.max_evidence * 2,
                 technology=tech, project=req.project,
                 project_id=req.project_id, module=req.module, symbol=req.symbol,
+                version=req.version,
                 candidates=self.cfg.candidates,
             )
         except Exception as exc:
             yield {"type": "error", "stage": "retrieval", "message": f"{type(exc).__name__}: {exc}"}
             return
+
+        if req.extra_hit_rowids:
+            # T-104：会话层追问传入的上一轮引用块——纳入这一轮的候选，
+            # 而不是另起一套判定/选取逻辑。取回失败（比如块已被重建索引移除）
+            # 不应打断这一轮追问，退回只用这一轮新检索到的结果。
+            try:
+                extra = hits_by_rowid(self.store, req.extra_hit_rowids, vector)
+            except Exception:
+                extra = []
+            seen = {h.rowid for h in hits}
+            hits = [h for h in extra if h.rowid not in seen] + hits
 
         # 路由输入之一：本轮命中证据里只要有一条项目材料显式禁止云端，
         # 就必须强制走本地——检索候选里未被最终选为证据的条目也算数（保守判断，
@@ -479,7 +500,10 @@ class Orchestrator:
         yield {
             "type": "sources",
             "items": [
-                {"index": e.index, "citation": e.citation, "url": e.source_url}
+                # chunk_id 是 T-104 新加字段（additive，兼容既有客户端）：
+                # 会话层用它记录"这次答案实际引用到哪些块"，供下一轮追问按 rowid
+                # 精确取回（见 services/orchestrator/session.py）。
+                {"index": e.index, "citation": e.citation, "url": e.source_url, "chunk_id": e.rowid}
                 for e in evidence
             ],
         }
