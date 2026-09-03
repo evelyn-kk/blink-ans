@@ -24,6 +24,7 @@ ALLOWED_LICENSES = {
     "CC-BY-4.0",
     "CC-BY-SA-4.0",
 }
+PROJECT_LICENSE = "Proprietary"
 
 CONTENT_TYPES = {"prose", "code", "config", "table", "mixed"}
 
@@ -83,10 +84,16 @@ class Chunk:
             if not str(getattr(self, name) or "").strip():
                 raise MetadataError(name, "必填字段为空")
 
-        if not self.source_url.startswith(("http://", "https://")):
+        is_project_material = bool(self.project_id)
+        if not self.source_url.startswith(("http://", "https://", "project://")):
             raise MetadataError("source_url", f"必须是可访问的 URL，实际为 {self.source_url!r}")
 
-        if self.license not in ALLOWED_LICENSES:
+        if self.source_url.startswith("project://") and not is_project_material:
+            raise MetadataError("project_id", "project:// 来源必须声明 project_id")
+
+        if self.license not in ALLOWED_LICENSES and not (
+            is_project_material and self.license == PROJECT_LICENSE
+        ):
             raise MetadataError(
                 "license",
                 f"{self.license!r} 不在允许清单内；许可受限的资料只做实时链接检索，不入核心语料",
