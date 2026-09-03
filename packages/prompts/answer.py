@@ -160,6 +160,10 @@ class Evidence:
     text: str
     citation: str
     source_url: str
+    # 检索命中的块 rowid（T-104）。渲染提示词不用它，只用于把"这次答案实际
+    # 引用了哪些块"回传给会话层，供追问复用（services/orchestrator/session.py）。
+    # 默认 None 保持向后兼容——不经过 select_evidence 构造的调用点不受影响。
+    rowid: int | None = None
 
 
 def render_evidence(items: list[Evidence]) -> str:

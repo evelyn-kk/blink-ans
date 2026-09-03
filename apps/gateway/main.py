@@ -34,6 +34,9 @@ from services.inference.router import Router  # noqa: E402
 from services.orchestrator.answering import (  # noqa: E402
     AnswerConfig, AnswerRequest, Orchestrator,
 )
+from services.orchestrator.session import (  # noqa: E402
+    ResolvedTurn, SessionState, build_request_for_turn, stream_and_record,
+)
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 
@@ -73,10 +76,21 @@ if _DEFAULT_LANGUAGE not in SUPPORTED_LANGUAGES:
         f"仅支持 {SUPPORTED_LANGUAGES}"
     )
 
-# 待取的问答会话。单用户本地服务，用内存字典即可；
-# 未被消费的会话在下次创建时按容量上限淘汰，避免长时间运行后无限增长。
+# 待取的一次性问答请求（POST /v1/answers 用）。单用户本地服务，用内存字典即可；
+# 未被消费的请求在下次创建时按容量上限淘汰，避免长时间运行后无限增长。
 _pending: dict[str, AnswerRequest] = {}
 _MAX_PENDING = 64
+
+# T-104：会话状态与"待取的会话内一轮问答"，与上面的 `_pending` 是两套独立语义——
+# `_pending` 是"一次性问答的暂存"，这里的 `_sessions` 是跨多个 turn 存活的会话
+# 状态（architecture.md §3：语言/活动项目/版本/上一轮实体与结论），
+# `_pending_turns` 只是"这一个 turn 建好了、还没被 GET .../stream 取走"的暂存，
+# 生命周期与一次性问答的 `_pending` 完全类似，只是多带了 session_id 与范围判定
+# 结果，供取流时更新对应会话。同样内存字典即可，不落盘，容量上限、超限淘汰。
+_sessions: dict[str, SessionState] = {}
+_MAX_SESSIONS = 64
+_pending_turns: dict[str, tuple[str, AnswerRequest, ResolvedTurn, str]] = {}
+_MAX_PENDING_TURNS = 64
 
 
 @asynccontextmanager
@@ -204,6 +218,131 @@ async def stream_answer(answer_id: str):
 
     return StreamingResponse(
         sse_stream(_orchestrator.answer(req)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-104：会话——独立问答/项目问答/追问，同一次对话跨多个 turn 保留最小状态。
+# `POST /v1/answers` 保持不变（一次性问答，不建会话），会话是并存的新入口。
+# ---------------------------------------------------------------------------
+
+class SessionCreateBody(BaseModel):
+    language: Language | None = Field(default=None, description="不传则用服务端默认语言")
+    project_id: str | None = Field(default=None, description="创建时即选定活动项目，可选")
+    version: str | None = Field(default=None, description="创建时即选定活动版本，可选")
+
+
+def _session_view(s: SessionState) -> dict:
+    return {
+        "session_id": s.session_id,
+        "language": s.language,
+        "active_project_id": s.active_project_id,
+        "active_version": s.active_version,
+        "last_turn": None if s.last_turn is None else {
+            "question": s.last_turn.question,
+            "entities": s.last_turn.entities,
+            "brief_conclusion": s.last_turn.brief_conclusion,
+            "cited_chunk_ids": s.last_turn.cited_chunk_ids,
+            "open_issue": s.last_turn.open_issue,
+        },
+    }
+
+
+@app.post("/v1/sessions", status_code=201)
+async def create_session(body: SessionCreateBody):
+    if len(_sessions) >= _MAX_SESSIONS:
+        for k in list(_sessions)[: len(_sessions) - _MAX_SESSIONS + 1]:
+            _sessions.pop(k, None)
+
+    sid = uuid.uuid4().hex[:16]
+    _sessions[sid] = SessionState(
+        session_id=sid,
+        language=body.language or _DEFAULT_LANGUAGE,
+        active_project_id=body.project_id,
+        active_version=body.version,
+    )
+    return _session_view(_sessions[sid])
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session(session_id: str):
+    s = _sessions.get(session_id)
+    if s is None:
+        raise HTTPException(404, "会话不存在或已过期")
+    return _session_view(s)
+
+
+@app.post("/v1/sessions/{session_id}/clear")
+async def clear_session(session_id: str):
+    s = _sessions.get(session_id)
+    if s is None:
+        raise HTTPException(404, "会话不存在或已过期")
+    s.clear()
+    return _session_view(s)
+
+
+class TurnBody(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    # 显式选择/切换项目——architecture.md §3 优先级第 1 档。传了就以它为准，
+    # 不管这次问题文本本身像不像追问。
+    project_id: str | None = Field(default=None, description="显式选择/切换项目")
+    technology: str | None = None
+    module: str | None = Field(default=None, description="用户项目模块精确过滤")
+    symbol: str | None = Field(default=None, description="用户项目符号精确过滤")
+    version: str | None = Field(default=None, description="显式选择/切换版本")
+    # 显式开始新问题——优先级第 2 档，跳过追问启发式，不复用上一轮证据。
+    new_topic: bool = Field(default=False, description="不追问上一轮，按新问题检索")
+    max_tokens: int | None = Field(default=None, ge=32, le=2048)
+
+
+@app.post("/v1/sessions/{session_id}/turns", status_code=201)
+async def create_turn(session_id: str, body: TurnBody):
+    if _orchestrator is None or _store is None:
+        raise HTTPException(503, "服务尚未就绪，请查看 /healthz")
+    session = _sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在或已过期")
+
+    if len(_pending_turns) >= _MAX_PENDING_TURNS:
+        for k in list(_pending_turns)[: len(_pending_turns) - _MAX_PENDING_TURNS + 1]:
+            _pending_turns.pop(k, None)
+
+    req, resolved, widened = build_request_for_turn(
+        _store, embedder, session,
+        question=body.question, project_id=body.project_id,
+        technology=body.technology, module=body.module, symbol=body.symbol,
+        version=body.version, new_topic=body.new_topic, max_tokens=body.max_tokens,
+        cfg=_orchestrator.cfg,
+    )
+    tid = uuid.uuid4().hex[:16]
+    _pending_turns[tid] = (session_id, req, resolved, body.question)
+    return {
+        "turn_id": tid,
+        "stream_url": f"/v1/sessions/{session_id}/turns/{tid}/stream",
+        "scope": resolved.kind.value,
+        "project_id": resolved.project_id,
+        "widened_retrieval": widened,
+    }
+
+
+@app.get("/v1/sessions/{session_id}/turns/{turn_id}/stream")
+async def stream_turn(session_id: str, turn_id: str):
+    pending = _pending_turns.pop(turn_id, None)
+    if pending is None:
+        raise HTTPException(404, "会话轮次不存在或已被消费")
+    sid, req, resolved, raw_question = pending
+    if sid != session_id:
+        raise HTTPException(404, "会话轮次不存在或已被消费")
+    session = _sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "会话不存在或已过期")
+    if _orchestrator is None:
+        raise HTTPException(503, "服务尚未就绪")
+
+    return StreamingResponse(
+        sse_stream(stream_and_record(_orchestrator, req, session, resolved, raw_question)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
