@@ -126,7 +126,31 @@ def _force_split(block: str) -> list[str]:
         n += t
     if buf:
         out.append("\n".join(buf) if "\n" in block else " ".join(buf))
-    return [o for o in out if o.strip()]
+
+    # 单行、没有句末标点的日志或代码说明会在上面的两级切分中仍是一个单位。
+    # 它们不能因为"没有自然边界"就绕过硬上限；尽量在空白处分割，实在没有
+    # 空白才按字符切。代码块已经由调用方排除，不会落到这里。
+    wrapped: list[str] = []
+    for piece in out:
+        remaining = piece
+        while estimate_tokens(remaining) > MAX_TOKENS:
+            lo, hi = 1, len(remaining)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if estimate_tokens(remaining[:mid]) <= MAX_TOKENS:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            cut = lo
+            whitespace = max(remaining.rfind(" ", max(1, cut // 2), cut + 1),
+                             remaining.rfind("\n", max(1, cut // 2), cut + 1))
+            if whitespace > 0:
+                cut = whitespace
+            wrapped.append(remaining[:cut].strip())
+            remaining = remaining[cut:].lstrip()
+        if remaining:
+            wrapped.append(remaining)
+    return [o for o in wrapped if o.strip()]
 
 
 def _split_body(body: str) -> list[str]:
