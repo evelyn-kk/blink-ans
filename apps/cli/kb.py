@@ -5,7 +5,7 @@
     kb sync --only id,... --mode verify         局部验证：只建这些来源的索引，跑相关回归，不激活
     kb sync --only id,... --mode merge          合并更新：以当前索引为底座换掉这些来源后激活
     kb search "问题" [--index 路径]              检索当前索引，或 verify 留下的暂存索引
-    kb project-import --manifest ... --project ... --file ...  显式导入项目文件到独立索引
+    kb project-import --manifest ... --project ... --file ...  导入项目说明文档到独立索引
     kb verify-links                             抽样验证引用链接可达性
     kb stats                                    当前索引概况
 """
@@ -218,11 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--index", help="改查指定索引文件，例如 verify 模式留下的暂存索引")
     p.set_defaults(fn=cmd_search)
 
-    p = sub.add_parser("project-import", help="显式导入用户项目的指定文件")
+    p = sub.add_parser("project-import", help="显式导入项目说明文档和挑选代码片段")
     p.add_argument("--manifest", required=True, help="项目注册表 YAML（含 root、版本、云端许可）")
     p.add_argument("--project-id", required=True, help="注册表中的项目 ID")
     p.add_argument("--file", dest="files", action="append", required=True,
-                   help="相对项目 root 的单个文件；可重复，不会扫描目录")
+                   help="相对项目 root 的说明文档（.md/.adoc/.rst/.txt）；可重复，不会扫描目录")
     p.add_argument("--from-index", help="作为增量底座的索引，默认 current.db")
     p.add_argument("--name", help="独立输出索引名，默认 project-<项目 ID>")
     p.add_argument("--activate-current", action="store_true",
