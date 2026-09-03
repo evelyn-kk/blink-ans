@@ -11,9 +11,9 @@ from pathlib import Path, PurePosixPath
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from packages.schemas.chunk import Chunk, PROJECT_LICENSE, utc_now
+from packages.schemas.chunk import Chunk, PROJECT_LICENSE, estimate_tokens, utc_now
 from services.projects.registry import Project
-from services.sync.chunk import _merge_small, _split_body
+from services.sync.chunk import MAX_TOKENS, _merge_small, _split_body
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,36 @@ class Material:
     technology: str = "project"
     locale: str = "en"
     content_type: str = "mixed"
+
+
+def _split_oversized_diagram(piece: str) -> list[str]:
+    """把未标注语言的 ASCII 图按行拆为可独立引用的小图块。
+
+    Markdown 的裸 ````` 围栏常用于流程图/数据流图而非代码。它们若超过上下文
+    预算，可以在行边界拆开并重新围栏，文本不丢失。`````java`` 等真实代码块
+    仍绝不自动拆断，由调用方显式选择可独立解释的片段。
+    """
+    lines = piece.splitlines()
+    if (estimate_tokens(piece) <= MAX_TOKENS or len(lines) < 2
+            or lines[0].strip() != "```" or lines[-1].strip() != "```"):
+        return [piece]
+
+    out: list[str] = []
+    buf: list[str] = []
+    # 留出围栏和换行的余量；图里的单行超过预算时仍应由人工整理，不能截断。
+    budget = MAX_TOKENS - 4
+    for line in lines[1:-1]:
+        if estimate_tokens(line) > budget:
+            raise ValueError("项目说明材料的单行图示超过上下文预算，请手动拆分")
+        candidate = "\n".join([*buf, line])
+        if buf and estimate_tokens(candidate) > budget:
+            out.append("```\n" + "\n".join(buf) + "\n```")
+            buf = [line]
+        else:
+            buf.append(line)
+    if buf:
+        out.append("```\n" + "\n".join(buf) + "\n```")
+    return out
 
 
 def material_chunk(*, project_id: str, version: str, module: str | None,
@@ -60,16 +90,33 @@ def build_material_chunks(project: Project, materials: list[Material]) -> list[C
         if not material.text.strip():
             raise ValueError(f"项目材料正文为空: {material.path}")
         # 与官方材料相同的 400-token 上限，避免一份项目文件独占回答上下文。
-        for piece in _merge_small(_split_body(material.text.strip())):
-            chunk = material_chunk(
-                project_id=project.id, version=project.version, module=material.module,
-                path=material.path, symbol=material.symbol, text=piece,
-                cloud_generation_allowed=project.cloud_generation_allowed,
-                technology=material.technology, locale=material.locale,
-                content_type=material.content_type,
-            )
-            chunk.validate()
-            chunks.append(chunk)
+        # `_merge_small` 可能把一个短尾巴并进已接近上限的前块。通用语料允许
+        # 少量超额以保留章节完整性，项目问答的证据预算更紧，故在此重新展开。
+        merged = _merge_small(_split_body(material.text.strip()))
+        pieces = [
+            subpiece
+            for piece in merged
+            for subpiece in (_split_body(piece) if estimate_tokens(piece) > MAX_TOKENS else [piece])
+        ]
+        for piece in pieces:
+            for prepared in _split_oversized_diagram(piece):
+                chunk = material_chunk(
+                    project_id=project.id, version=project.version, module=material.module,
+                    path=material.path, symbol=material.symbol, text=prepared,
+                    cloud_generation_allowed=project.cloud_generation_allowed,
+                    technology=material.technology, locale=material.locale,
+                    content_type=material.content_type,
+                )
+                # 官方文档为保持可运行的完整代码围栏，会保留超长代码块；项目库的
+                # 代码只是人工挑选的片段，不能让它绕过回答上下文的硬预算。拒绝并
+                # 要求在说明材料中按独立示例拆开，比自动截断一段不可理解的代码安全。
+                if chunk.token_estimate > MAX_TOKENS:
+                    raise ValueError(
+                        f"项目说明材料的单个片段超过 {MAX_TOKENS} token，请拆分后再导入: "
+                        f"{material.path}（{chunk.token_estimate} token）"
+                    )
+                chunk.validate()
+                chunks.append(chunk)
     return chunks
 
 

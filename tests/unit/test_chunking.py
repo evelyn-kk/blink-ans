@@ -71,6 +71,16 @@ def test_code_block_is_never_split():
     assert "line_199" in holding[0], "代码块被截断"
 
 
+def test_fenced_example_is_not_merged_with_neighboring_prose():
+    """完整示例要保留，但不应携带相邻说明一起越过上下文预算。"""
+    prose = "说明文字。" * 100
+    code = "```\n" + "line = value\n" * 30 + "```"
+    pieces = _split_body(f"{prose}\n\n{code}\n\n{prose}")
+    fenced = [p for p in pieces if "line = value" in p]
+    assert len(fenced) == 1
+    assert fenced[0].strip().startswith("```") and fenced[0].strip().endswith("```")
+
+
 def test_long_prose_is_split_near_target():
     body = "\n\n".join("这是一段中文技术说明文字，用于验证切块长度控制。" * 3 for _ in range(30))
     pieces = _split_body(body)

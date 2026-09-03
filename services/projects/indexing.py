@@ -14,6 +14,8 @@ from services.projects.registry import Project
 from services.retrieval.embed import DEFAULT_MODEL
 from services.retrieval.store import CURRENT, IndexBuilder, IndexStats
 
+EMBED_BATCH_SIZE = 16
+
 
 class _Embedder(Protocol):
     model_id: str
@@ -39,7 +41,11 @@ def rebuild_project_index(
     chunks = build_material_chunks(project, materials)
     if not chunks:
         raise ValueError("项目材料未产生可索引块")
-    vectors = embedder.encode([c.text for c in chunks])
+    # 项目说明文档可能一次带来数百块。嵌入模型的批处理不会带来等比例吞吐收益，
+    # 却会显著抬高统一内存峰值；小批顺序处理使首次导入在 M4 上可预测地完成。
+    vectors: list[list[float]] = []
+    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+        vectors.extend(embedder.encode([c.text for c in chunks[start:start + EMBED_BATCH_SIZE]]))
     if len(vectors) != len(chunks):
         raise ValueError(f"嵌入数 {len(vectors)} 与项目块数 {len(chunks)} 不一致")
 
