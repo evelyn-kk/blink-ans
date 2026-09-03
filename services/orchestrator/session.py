@@ -339,7 +339,7 @@ def brief_conclusion(answer_text: str, limit: int = 80) -> str | None:
 
 def stream_and_record(
     orchestrator: Orchestrator, req: AnswerRequest, session: SessionState,
-    resolved: ResolvedTurn, raw_question: str, turn_seq: int,
+    resolved: ResolvedTurn, raw_question: str, turn_seq: int, created_epoch: int,
 ) -> Iterator[dict]:
     """转发 Orchestrator.answer() 的事件流给客户端；流结束后用这一轮已经
     产出的信息（技术域/项目/模块/符号/命中的关键词、答案正文、实际引用到的
@@ -356,6 +356,16 @@ def stream_and_record(
     答案仍然会正常流给客户端（下面的 `yield ev` 不受影响），只有"要不要
     覆盖会话状态"这一步受 `turn_seq` 是否比 `session.last_completed_seq`
     更新来决定。
+
+    `created_epoch`（CR-031）：`apps/gateway/main.py` 的 `stream_turn()` 在构造
+    `StreamingResponse` **之前**已经核对过一次 epoch（CR-021），但 SSE 是惰性
+    消费的——响应对象构造完就立刻返回给客户端，这个生成器真正开始跑（进而
+    真正写回状态）要等到响应体被 drain 的那一刻，中间这段时间可能长达数秒
+    （真实生成耗时）。用户完全可以在这个窗口里调用 `clear()`，那样一来
+    "取流前核对一次 epoch"这道门槛就形同虚设——写回仍然会在流结束时执行，
+    把刚清空的会话状态又恢复回去。因此这里必须**在写回前再核对一次**当前
+    epoch 是否还等于建轮时捕获的值，而不能只信赖调用方在响应构造前做过的
+    那一次检查。
     """
     answer_parts: list[str] = []
     cited_indices: list[int] = []
@@ -378,6 +388,10 @@ def stream_and_record(
         yield ev
 
     if had_error:
+        return
+    if session.epoch != created_epoch:
+        # CR-031：会话在这次流式生成期间被 clear() 过——不能把这一轮的结果
+        # 写回一个已经被用户主动清空的会话，那等于悄悄撤销了这次清空。
         return
     if turn_seq <= session.last_completed_seq:
         # 一个更新的轮次已经先我一步完成并写回过会话状态——我这次的结果对

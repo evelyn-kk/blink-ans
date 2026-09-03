@@ -336,7 +336,7 @@ def test_stream_and_record_writes_resolved_version_back_to_session(monkeypatch):
     router = FakeRouter(FakeEngine())
     list(stream_and_record(
         Orchestrator(None, FakeEmbedder(), router), req, session, resolved, "怎么配置重试",
-        turn_seq=1,
+        turn_seq=1, created_epoch=0,
     ))
 
     assert session.active_version is None
@@ -433,7 +433,7 @@ def test_stream_and_record_updates_active_project_after_switch(monkeypatch):
     router = FakeRouter(FakeEngine())
     list(stream_and_record(
         Orchestrator(None, FakeEmbedder(), router), req, session, resolved, "怎么配置重试",
-        turn_seq=1,
+        turn_seq=1, created_epoch=0,
     ))
 
     assert session.active_project_id == "project-b"

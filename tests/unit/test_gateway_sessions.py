@@ -1,11 +1,11 @@
-"""路由级回归：会话 API 的建轮/清空/取流交互（CR-021、CR-030）。
+"""路由级回归：会话 API 的建轮/清空/取流交互（CR-021、CR-030、CR-031）。
 
 不启动真实模型或索引——直接调用 `apps.gateway.main` 里的路由处理函数
 （它们只是普通的 async def，不经过 `TestClient` 也能直接调用），并用
 monkeypatch 替换掉模块级的 `_sessions`/`_pending_turns`/`_orchestrator`/`_store`。
 这样能验证真实的路由控制流（建轮时捕获 epoch/turn_seq、取流时核对二者、
-清空后拒绝旧轮次、乱序完成不回滚会话状态），而不需要触发 `lifespan()` 里的
-真实 MLX 模型加载。
+清空后拒绝旧轮次、乱序完成不回滚会话状态、SSE 惰性消费期间清空不被绕过），
+而不需要触发 `lifespan()` 里的真实 MLX 模型加载。
 """
 
 from __future__ import annotations
@@ -161,3 +161,36 @@ def test_older_turn_completing_after_newer_turn_does_not_roll_back_session():
     _run(_drain(response_older))
     assert gw._sessions[sid].active_project_id == "checkout"
     assert gw._sessions[sid].active_version == "v2"
+
+
+def test_clear_during_lazy_sse_consumption_is_not_undone_by_late_writeback():
+    """CR-031 独立复现场景（用审查方给出的原始步骤）：`stream_turn()` 只在构造
+    `StreamingResponse` **之前**核对过一次 epoch（CR-021）——但 SSE 是惰性消费的，
+    响应对象构造完就立刻返回，真正执行生成器（进而真正写回状态）要等到响应体
+    被 drain 的那一刻。这中间的窗口里，用户完全可以调用 `clear()`。
+
+    步骤：为 orders/v1 建轮 → 调 `stream_turn()` 拿到 response（此时 epoch 检查
+    已经通过）→ **在 drain 之前**调用 `clear_session()`（会话状态变 `None`，
+    epoch 递增）→ 现在才 drain response。清空动作不能被这次"迟到"的写回撤销。
+    """
+    session_view = _run(gw.create_session(gw.SessionCreateBody(
+        language="zh", project_id=None, version=None,
+    )))
+    sid = session_view["session_id"]
+
+    turn = _run(gw.create_turn(sid, gw.TurnBody(
+        question="订单怎么预留库存", project_id="orders", version="v1",
+    )))
+    response = _run(gw.stream_turn(sid, turn["turn_id"]))
+    assert response.status_code == 200
+
+    # 响应已经构造好、还没被 drain——这时候清空。
+    _run(gw.clear_session(sid))
+    assert gw._sessions[sid].active_project_id is None
+
+    # 现在才真正消费这个（对清空来说已经过期的）流。
+    _run(_drain(response))
+
+    assert gw._sessions[sid].active_project_id is None
+    assert gw._sessions[sid].active_version is None
+    assert gw._sessions[sid].last_turn is None

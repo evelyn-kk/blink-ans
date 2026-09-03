@@ -403,7 +403,9 @@ async def stream_turn(session_id: str, turn_id: str):
         raise HTTPException(503, "服务尚未就绪")
 
     return StreamingResponse(
-        sse_stream(stream_and_record(_orchestrator, req, session, resolved, raw_question, turn_seq)),
+        sse_stream(stream_and_record(
+            _orchestrator, req, session, resolved, raw_question, turn_seq, created_epoch,
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
