@@ -31,7 +31,7 @@ from packages.prompts.answer import (  # noqa: E402
     INSUFFICIENT_PROMPT, Evidence, render_user_message, template_version,
 )
 from packages.schemas.chunk import estimate_tokens  # noqa: E402
-from services.inference.engine import InferenceEngine  # noqa: E402
+from services.inference.router import Router  # noqa: E402
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.search import Hit, hybrid_search  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
@@ -99,7 +99,14 @@ class AnswerConfig:
     # 首 token 时延超过此值即记录告警，用于发现预算漂移。
     # 3.0 秒来自 architecture.md 第 6.2 节按实测重新分配后的生成预算：
     # 检索实测 0.15 秒（原预算 0.8 秒），富余的时间划给了生成阶段。
+    # T-028：路由定案后本地降级为断网/失败兜底，这个值就是 §6.5 表里
+    # "本地兜底路径"那一列的生成子预算，只用于 served_by=local 的判断。
     ttft_budget_s: float = 3.0
+    # 云端主路径的生成子预算（architecture.md §6.5："generation_started→
+    # first_answer_text" 云端一列 3.6s，T-026 四档 P95 最差值 3.5427s 再留边际）。
+    # 与 ttft_budget_s 分开是因为两条路径的预算不同——用同一个阈值判 claude 的
+    # ttft_over_budget 会把落在 3.0–3.6s 之间、完全达标的云端响应误判为超预算。
+    cloud_ttft_budget_s: float = 3.6
 
 
 @dataclass
@@ -190,12 +197,15 @@ class Orchestrator:
         self,
         store: ChunkStore,
         embedder: Embedder,
-        engine: InferenceEngine,
+        router: Router,
         config: AnswerConfig | None = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
-        self.engine = engine
+        # T-028：编排层不再直接持有某个具体生成实现（之前是 InferenceEngine），
+        # 只依赖 Router 这一份契约——本地/云端/降级逻辑对编排层不可见，
+        # 换句话说编排层现在完全不知道 MLX 的存在。
+        self.router = router
         self.cfg = config or AnswerConfig()
 
     def answer(self, req: AnswerRequest) -> Iterator[dict]:
@@ -218,6 +228,12 @@ class Orchestrator:
             yield {"type": "error", "stage": "retrieval", "message": f"{type(exc).__name__}: {exc}"}
             return
 
+        # 路由输入之一：本轮命中证据里只要有一条项目材料显式禁止云端，
+        # 就必须强制走本地——检索候选里未被最终选为证据的条目也算数（保守判断，
+        # 见 architecture.md §8 数据边界：项目禁止云端时任何项目材料不得出网，
+        # 而候选阶段这些材料已经进了这次请求的处理过程）。
+        cloud_allowed = not any(h.cloud_generation_allowed is False for h in hits)
+
         verdict = assess(hits, self.cfg)
         retrieval_ms = round((time.perf_counter() - t0) * 1000, 1)
 
@@ -235,12 +251,12 @@ class Orchestrator:
             yield {"type": "status", "message": "本地知识库未覆盖该问题"}
             yield from self._generate(
                 req.question, max_tokens=220, system_override=INSUFFICIENT_PROMPT,
-                started=t0, sufficiency=verdict.level,
+                started=t0, sufficiency=verdict.level, cloud_allowed=cloud_allowed,
             )
             yield {"type": "sources", "items": []}
             return
 
-        evidence = select_evidence(hits, self.cfg, self.engine.count_tokens)
+        evidence = select_evidence(hits, self.cfg, self.router.count_tokens)
         if not evidence:
             # 命中了但每一条都超出预算——属于切块异常，不应静默降级为无证据作答
             yield {"type": "error", "stage": "context",
@@ -259,6 +275,7 @@ class Orchestrator:
         for ev in self._generate(
             user_msg, max_tokens=req.max_tokens or self.cfg.max_tokens,
             started=t0, sufficiency=verdict.level, evidence_count=len(evidence),
+            cloud_allowed=cloud_allowed,
         ):
             if ev["type"] == "answer_delta":
                 answer += ev["text"]
@@ -281,24 +298,37 @@ class Orchestrator:
     def _generate(
         self, content: str, *, max_tokens: int, started: float,
         sufficiency: Sufficiency, system_override: str | None = None,
-        evidence_count: int = 0,
+        evidence_count: int = 0, cloud_allowed: bool = True,
     ) -> Iterator[dict]:
         text = ""
         try:
-            for ev in self.engine.stream(
-                content, max_tokens=max_tokens, system_override=system_override
+            for ev in self.router.generate(
+                content, max_tokens=max_tokens, system_override=system_override,
+                cloud_allowed=cloud_allowed,
             ):
                 if ev["type"] == "delta":
                     text += ev["text"]
                     yield {"type": "answer_delta", "text": ev["text"]}
+                elif ev["type"] == "error":
+                    # 云端已吐出部分正文后失败：Router 不会拼接本地续写
+                    # （见 router.py 模块docstring），这里原样透传让请求干净结束。
+                    yield ev
                 elif ev["type"] == "done":
                     cited = citation_coverage(text, evidence_count)
+                    # 两条路径预算不同（architecture.md §6.5），按 served_by 选对应阈值。
+                    budget = (
+                        self.cfg.cloud_ttft_budget_s if ev["served_by"] == "claude"
+                        else self.cfg.ttft_budget_s
+                    )
                     yield {
                         "type": "done",
+                        # architecture.md §7："done 必须包含 served_by"，
+                        # 由 Router 决策产出，这里只负责透传，不重新判断。
+                        "served_by": ev["served_by"],
                         "sufficiency": sufficiency.value,
                         "template_version": template_version(),
                         "ttft_s": ev["ttft_s"],
-                        "ttft_over_budget": ev["ttft_s"] > self.cfg.ttft_budget_s,
+                        "ttft_over_budget": ev["ttft_s"] > budget,
                         "prompt_tokens": ev["prompt_tokens"],
                         "prefilled_tokens": ev["prefilled_tokens"],
                         "prefix_reused": ev["prefix_reused"],

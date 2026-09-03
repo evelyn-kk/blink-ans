@@ -129,6 +129,45 @@ def test_uncited_answer_reports_zero():
     assert citation_coverage("结论：应当调大线程池。", 3) == []
 
 
+class FakeEmbedder:
+    def encode_one(self, _question):
+        return [0.0]
+
+
+class FakeEngine:
+    """T-028 前的假引擎：只测判定逻辑，不测路由。"""
+
+    count_tokens = staticmethod(lambda text: len(text) // 4)
+
+    def stream(self, *_args, **_kwargs):
+        yield {"type": "delta", "text": "答案 [1]"}
+        yield {"type": "done", "ttft_s": 0.1, "prompt_tokens": 10,
+               "prefilled_tokens": 10, "prefix_reused": True, "decode_tps": 20.0}
+
+
+class FakeRouter:
+    """T-028：把 FakeEngine 适配成 Router 的最小接口（count_tokens + generate）。
+
+    不用真正的 `Router`，是因为这批测试要断言的是"编排层是否正确转发了
+    项目边界过滤条件"，与路由决策本身无关——用真 Router 只会多引入一个
+    需要被 mock 的 GenerationBackend，对测试意图没有帮助。真正的路由决策
+    （云端/本地切换、断网降级）由 test_router.py 覆盖。
+    """
+
+    def __init__(self, engine: FakeEngine, served_by: str = "local") -> None:
+        self._engine = engine
+        self._served_by = served_by
+
+    def count_tokens(self, text: str) -> int:
+        return self._engine.count_tokens(text)
+
+    def generate(self, content, *, max_tokens, system_override=None, cloud_allowed=True):
+        for ev in self._engine.stream(content, max_tokens=max_tokens, system_override=system_override):
+            if ev["type"] == "done":
+                ev = {**ev, "served_by": self._served_by}
+            yield ev
+
+
 def test_answering_forwards_project_boundary_to_both_retrieval_paths(monkeypatch):
     """T-103：HTTP/编排层不能在传递过程中丢掉项目隔离条件。"""
     captured = {}
@@ -137,26 +176,53 @@ def test_answering_forwards_project_boundary_to_both_retrieval_paths(monkeypatch
         captured.update(kwargs)
         return [hit()]
 
-    class FakeEmbedder:
-        def encode_one(self, _question):
-            return [0.0]
-
-    class FakeEngine:
-        count_tokens = staticmethod(lambda text: len(text) // 4)
-
-        def stream(self, *_args, **_kwargs):
-            yield {"type": "delta", "text": "答案 [1]"}
-            yield {"type": "done", "ttft_s": 0.1, "prompt_tokens": 10,
-                   "prefilled_tokens": 10, "prefix_reused": True, "decode_tps": 20.0}
-
     monkeypatch.setattr("services.orchestrator.answering.hybrid_search", fake_search)
-    events = list(Orchestrator(None, FakeEmbedder(), FakeEngine()).answer(AnswerRequest(
+    events = list(Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine())).answer(AnswerRequest(
         "怎么预留库存", project_id="orders", module="checkout", symbol="reserve_stock",
     )))
     assert any(e["type"] == "sources" for e in events)
     assert {k: captured[k] for k in ("project_id", "module", "symbol")} == {
         "project_id": "orders", "module": "checkout", "symbol": "reserve_stock",
     }
+
+
+def test_answering_forwards_served_by_into_done_event(monkeypatch):
+    """T-028：路由决策的 served_by 必须原样透传进 done 事件（architecture.md §7）。"""
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    events = list(Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine(), served_by="claude"))
+                  .answer(AnswerRequest("怎么预留库存")))
+    done = next(e for e in events if e["type"] == "done")
+    assert done["served_by"] == "claude"
+
+
+def test_project_cloud_ban_forces_cloud_allowed_false(monkeypatch):
+    """架构决策（§6.4）：命中证据里只要有一条项目材料禁止云端，就必须强制本地。
+
+    这里不重复测 Router 的降级逻辑（见 test_router.py），只断言编排层算出的
+    `cloud_allowed` 确实随 `cloud_generation_allowed=False` 的命中翻转——
+    路由层只能看到编排层传给它的这一个布尔值，算错了路由无从纠正。
+    """
+    banned_hit = hit()
+    banned_hit.cloud_generation_allowed = False
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [banned_hit]
+    )
+
+    captured_cloud_allowed = {}
+
+    class RecordingRouter(FakeRouter):
+        def generate(self, content, *, max_tokens, system_override=None, cloud_allowed=True):
+            captured_cloud_allowed["value"] = cloud_allowed
+            yield from super().generate(
+                content, max_tokens=max_tokens, system_override=system_override,
+                cloud_allowed=cloud_allowed,
+            )
+
+    list(Orchestrator(None, FakeEmbedder(), RecordingRouter(FakeEngine()))
+         .answer(AnswerRequest("怎么预留库存")))
+    assert captured_cloud_allowed["value"] is False
 
 
 # ---------- CR-002: 未加载时的错误路径不依赖 MLX ----------
