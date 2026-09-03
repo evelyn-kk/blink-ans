@@ -58,19 +58,30 @@ def test_batch_rejects_empty_material_before_indexing(tmp_path):
 def test_explicit_file_read_stays_inside_registered_root_and_does_not_scan(tmp_path):
     root = tmp_path / "orders"
     (root / "services").mkdir(parents=True)
-    (root / "services" / "app.py").write_text("class App: pass", encoding="utf-8")
-    (root / "ignored.py").write_text("secret", encoding="utf-8")
+    (root / "services" / "overview.md").write_text("# App\n\n```java\nclass App {}\n```", encoding="utf-8")
+    (root / "ignored.md").write_text("not selected", encoding="utf-8")
     project = Project("orders", "v1", root, False)
 
-    materials = read_materials(project, ["services/app.py"])
+    materials = read_materials(project, ["services/overview.md"])
 
     assert [(m.path, m.module, m.content_type) for m in materials] == [
-        ("services/app.py", "services", "code")
+        ("services/overview.md", "services", "mixed")
     ]
     with pytest.raises(ValueError, match="至少需要一个"):
         read_materials(project, [])
     with pytest.raises(ValueError, match="相对路径"):
         read_materials(project, ["../ignored.py"])
+
+
+def test_project_cli_reader_refuses_full_source_and_configuration_files(tmp_path):
+    root = tmp_path / "orders"
+    root.mkdir()
+    (root / "App.java").write_text("class App {}", encoding="utf-8")
+    (root / "application.yml").write_text("password: do-not-index", encoding="utf-8")
+    project = Project("orders", "v1", root, False)
+    for path in ("App.java", "application.yml"):
+        with pytest.raises(ValueError, match="不接纳源码或配置"):
+            read_materials(project, [path])
 
 
 def test_large_project_material_is_split_for_context_budget(tmp_path):

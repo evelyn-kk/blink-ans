@@ -1,7 +1,8 @@
-"""把用户项目材料规范化为可索引的 Chunk。
+"""把项目说明材料规范化为可索引的 Chunk。
 
-本模块刻意不读取工作区目录：调用方必须显式传入已获授权的文本和路径，
-避免“导入项目”变成不受控的全盘扫描。
+本模块刻意不读取工作区目录：调用方必须显式传入已获授权的文本和路径。
+CLI 只读取说明文档；少量代码片段应嵌在经人工整理的说明材料中，避免项目库
+退化成源码或配置的副本。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from services.sync.chunk import _merge_small, _split_body
 
 @dataclass(frozen=True)
 class Material:
-    """调用方已获授权读取的一份项目材料；不接受绝对路径或隐式 glob。"""
+    """调用方已获授权的一份项目说明材料；不接受绝对路径或隐式 glob。"""
 
     path: str
     text: str
@@ -72,15 +73,15 @@ def build_material_chunks(project: Project, materials: list[Material]) -> list[C
     return chunks
 
 
-_CODE_SUFFIXES = {".java", ".kt", ".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".sql", ".sh"}
-_CONFIG_SUFFIXES = {".yaml", ".yml", ".json", ".toml", ".properties", ".xml", ".conf"}
+_DOCUMENT_SUFFIXES = {".md", ".markdown", ".adoc", ".rst", ".txt"}
 
 
 def read_materials(project: Project, paths: list[str]) -> list[Material]:
-    """读取清单中逐个点名的文件，不递归扫描项目根目录。
+    """读取逐个点名的项目说明文档，不递归扫描项目根目录。
 
     ``paths`` 只能是相对于注册根的文件；解析后再次检查真实路径仍在根内，
-    所以 ``../`` 和指向根外的软链接都不能越界读取。
+    所以 ``../`` 和指向根外的软链接都不能越界读取。源码和配置扩展名不在
+    白名单中：必要代码须作为少量片段放进说明文档，而不是整文件入库。
     """
     if not paths:
         raise ValueError("至少需要一个 --file；项目导入不会自动扫描目录")
@@ -101,10 +102,15 @@ def read_materials(project: Project, paths: list[str]) -> list[Material]:
         if not target.is_file():
             raise ValueError(f"项目材料不存在或不是普通文件: {normalized}")
         suffix = target.suffix.lower()
-        content_type = "code" if suffix in _CODE_SUFFIXES else "config" if suffix in _CONFIG_SUFFIXES else "prose"
+        if suffix not in _DOCUMENT_SUFFIXES:
+            raise ValueError(
+                f"项目库只接纳说明文档/挑选片段，不接纳源码或配置文件: {normalized}"
+            )
+        text = target.read_text(encoding="utf-8")
+        content_type = "mixed" if "```" in text else "prose"
         module = relative.parts[0] if len(relative.parts) > 1 else None
         materials.append(Material(
-            path=normalized, text=target.read_text(encoding="utf-8"), module=module,
+            path=normalized, text=text, module=module,
             content_type=content_type,
         ))
     return materials
