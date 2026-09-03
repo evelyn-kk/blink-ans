@@ -13,21 +13,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.orchestrator.answering import (  # noqa: E402
-    AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, assess, citation_coverage,
-    declined, select_evidence,
+    AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, _select_evidence_greedy, assess,
+    citation_coverage, declined, select_evidence,
 )
 from services.retrieval.search import Hit  # noqa: E402
 
 CFG = AnswerConfig()
 
 
-def hit(dist=0.65, kw=1, tokens=200, i=1) -> Hit:
+def hit(dist=0.65, kw=1, tokens=200, i=1, score=0.03) -> Hit:
     return Hit(
         rowid=i, text=f"证据正文 {i}" * 10, title_path=f"A › B{i}",
         source_url=f"https://example.com/{i}.html", source_project="kafka",
         version_or_commit="abc", retrieved_at="2026-08-31T00:00:00+00:00",
         technology="kafka", content_type="prose", token_estimate=tokens,
-        score=0.03, keyword_rank=kw, vector_rank=1, vector_distance=dist,
+        score=score, keyword_rank=kw, vector_rank=1, vector_distance=dist,
     )
 
 
@@ -101,6 +101,33 @@ def test_selection_skips_oversized_and_keeps_filling():
 def test_selection_caps_count():
     cfg = AnswerConfig(evidence_budget=10_000, max_evidence=3)
     assert len(select_evidence([hit(tokens=50, i=i) for i in range(1, 9)], cfg)) == 3
+
+
+def test_greedy_evidence_selection_is_suboptimal():
+    """T-030 判别性回归：证明"按融合分顺序贪心装填"（旧实现，现仍留存为
+    _select_evidence_greedy 防御性回退）在构造场景下选不到预算内总分最大的组合，
+    而 select_evidence 的 0/1 背包 DP 能选到。
+
+    构造：候选 A(score=10, cost=650) 排序最靠前、单独恰好装满预算；
+    B、C(各 score=9, cost=325) 排序靠后，二者合计 650 同样刚好装满预算、
+    但总分 18 高于单独装 A 的 10。旧贪心一遇到"当前这条能装下"就装，装满 A
+    后 B、C 都放不下，只能选到总分 10 的次优解；DP 按"预算内总分最大化"求解，
+    应该选到 {B, C}，总分 18。
+    """
+    budget = 650
+    cfg = AnswerConfig(evidence_budget=budget, max_evidence=5)
+    hits = [
+        hit(tokens=650, i=1, score=10.0),
+        hit(tokens=325, i=2, score=9.0),
+        hit(tokens=325, i=3, score=9.0),
+    ]
+
+    old = _select_evidence_greedy(hits, cfg)
+    assert [e.citation for e in old] == [hits[0].citation]  # 只选到 A，总分 10——次优
+
+    new = select_evidence(hits, cfg)
+    assert {e.citation for e in new} == {hits[1].citation, hits[2].citation}  # 选到 {B, C}，总分 18——最优
+    assert sum(1 for h in hits if h.citation in {e.citation for e in new}) == 2
 
 
 def test_evidence_indices_are_sequential_from_one():

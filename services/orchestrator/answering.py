@@ -190,16 +190,14 @@ def assess(hits: list[Hit], cfg: AnswerConfig) -> Assessment:
     )
 
 
-def select_evidence(
+def _select_evidence_greedy(
     hits: list[Hit], cfg: AnswerConfig, count_tokens=None
 ) -> list[Evidence]:
-    """在 token 预算内挑选证据。
+    """按融合得分顺序贪心装填的退化路径（旧实现，见 select_evidence 的缺陷说明）。
 
-    按融合得分依次取，放不下的跳过继续找更小的——
-    宁可多带一条短证据，也不要让预算空着。
-
-    count_tokens 传入真实分词器时按真实 token 计数；缺省退回切块自带的估算值。
-    估算对英文 P90 低估约 16%，只用估算会让首 token 时延的尾部失控。
+    只在候选规模/预算大到 0/1 背包 DP 状态表会失控时使用——正常调用路径
+    （见 select_evidence 的规模注释）永远走 DP，这个函数只是防御性回退，
+    宁可选到次优解也不让内存/时延失控。
     """
     out: list[Evidence] = []
     used = 0
@@ -210,6 +208,112 @@ def select_evidence(
         if used + cost > cfg.evidence_budget:
             continue
         used += cost
+        out.append(
+            Evidence(
+                index=len(out) + 1,
+                text=h.text,
+                citation=h.citation,
+                source_url=h.source_url,
+            )
+        )
+    return out
+
+
+# 0/1 背包 DP 状态数上限（len(hits) * (max_evidence+1) * (evidence_budget+1)）。
+# 实践中唯一调用方 Orchestrator.answer 传入的 hits 来自
+# hybrid_search(limit=max_evidence*2)，即 len(hits) <= 10；evidence_budget
+# 本地档 650、云端档 3200——真实状态数约 10*6*3201 ≈ 19 万，DP 是毫秒级。
+# 这个上限是给未来配置改动（比如把 max_evidence 或 evidence_budget_cloud
+# 调大很多）设的安全网：状态数一旦超过它就退化回旧的顺序贪心，避免 DP 表
+# 本身占用过多内存或耗时——那种情况下选到次优解也好过卡死。
+_DP_STATE_CAP = 3_000_000
+
+
+def select_evidence(
+    hits: list[Hit], cfg: AnswerConfig, count_tokens=None
+) -> list[Evidence]:
+    """在 token 预算与证据条数上限内挑选融合分之和最大的证据组合。
+
+    旧实现按融合得分顺序贪心装填：放不下就跳过继续看下一条，直到条数或预算耗尽。
+    这个策略能处理"当前这条放不下、找条更小的补上"，但处理不了"当前这条放得下、
+    但装了它就会挤掉后面两条体积更小、总分更高的组合"——贪心只要装得下就装，
+    不会为了给后面的证据腾地方而放弃眼前这条已经能装下的证据。
+
+    构造反例（CR-030 排查记录，development-notes.md 2026-09-02「模型拒答」不等于
+    「检索未命中」）：候选 A(score=10, cost=650)、B(score=9, cost=325)、
+    C(score=9, cost=325)，budget=650。旧贪心先装 A（650<=650，装满），B、C 都
+    放不下，选中总分=10。但 {B, C} 总分=18，同样刚好装满 650——旧算法选到的
+    不是预算内总分最大的组合（tests/unit/test_answering.py 的
+    test_greedy_evidence_selection_is_suboptimal 用真实的旧函数体复现这一点）。
+
+    换成 0/1 背包动态规划（维度：证据条数上限 × token 预算），在约束内求"融合分
+    之和最大"的子集，把优化目标从"顺序贪心"换成"总分最大化"这个更通用的表述。
+    不显式识别"这几条是不是同一小节切出来的"——那类情况只是"总分最大化"目标下
+    会被自动处理的一个特例，不需要单独的小节感知逻辑。
+
+    规模与复杂度见 _DP_STATE_CAP 的注释：真实调用规模下状态数不到 20 万，
+    不需要退化到 O(2^n) 暴力枚举；状态数超过上限时退回 _select_evidence_greedy。
+
+    count_tokens 传入真实分词器时按真实 token 计数；缺省退回切块自带的估算值。
+    估算对英文 P90 低估约 16%，只用估算会让首 token 时延的尾部失控。
+    """
+    n = len(hits)
+    if n == 0 or cfg.max_evidence <= 0 or cfg.evidence_budget <= 0:
+        return []
+
+    k = cfg.max_evidence
+    budget = cfg.evidence_budget
+
+    if n * (k + 1) * (budget + 1) > _DP_STATE_CAP:
+        return _select_evidence_greedy(hits, cfg, count_tokens)
+
+    costs = [
+        int(count_tokens(h.text)) if count_tokens else int(h.token_estimate)
+        for h in hits
+    ]
+
+    # dp[i][c][b]：只看前 i 条候选、最多选 c 条、总花费不超过 b 时能拿到的
+    # 最大融合分之和。i=0（空集）时任意 (c, b) 都可行——"最多"是两个约束都
+    # 取"不超过"，空集花费 0、条数 0，天然满足任意 c>=0、b>=0，值为 0，
+    # 不需要 -inf 哨兵（每个状态至少有"什么都不选"这一可行解）。
+    dp = [[[0.0] * (budget + 1) for _ in range(k + 1)] for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        cost = costs[i - 1]
+        score = hits[i - 1].score
+        prev_layer = dp[i - 1]
+        layer = dp[i]
+        for c in range(k + 1):
+            prev_c = prev_layer[c]
+            row = layer[c]
+            if c > 0 and cost <= budget:
+                prev_c1 = prev_layer[c - 1]
+                for b in range(budget + 1):
+                    best = prev_c[b]
+                    if b >= cost:
+                        cand = prev_c1[b - cost] + score
+                        if cand > best:
+                            best = cand
+                    row[b] = best
+            else:
+                # 这一条单独就超预算，永远选不了，直接照抄"不选它"的状态。
+                row[:] = prev_c
+
+    # 回溯：从"最多 k 条、预算 budget 全部可用"出发，逐条候选往回推，
+    # dp[i][c][b] 严格大于 dp[i-1][c][b] 说明第 i 条必须被选中才能达到这个值；
+    # 相等则说明存在不含它的同分解，按不选处理（并列时接受任一最优解）。
+    chosen: list[int] = []
+    c, b = k, budget
+    for i in range(n, 0, -1):
+        if dp[i][c][b] != dp[i - 1][c][b]:
+            cost = costs[i - 1]
+            chosen.append(i - 1)
+            c -= 1
+            b -= cost
+    chosen.reverse()  # 恢复为候选原始顺序（即融合分从高到低）
+
+    out: list[Evidence] = []
+    for idx in chosen:
+        h = hits[idx]
         out.append(
             Evidence(
                 index=len(out) + 1,
