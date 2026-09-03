@@ -584,6 +584,16 @@ class Orchestrator:
                         "prompt_tokens": ev["prompt_tokens"],
                         "prefilled_tokens": ev["prefilled_tokens"],
                         "prefix_reused": ev["prefix_reused"],
+                        # T-029：云端才有这两个字段（services/inference/claude_backend.py
+                        # 的 stream()）；本地引擎的 done 事件里没有，.get() 缺省为 None——
+                        # 本地没有"缓存花了多少钱"这个概念，不伪造数值（见 engine.py
+                        # docstring 与用户给定事实 #3：本地缓存语义只有 prefix_reused 一个布尔量）。
+                        "cache_read_tokens": ev.get("cache_read_tokens"),
+                        "cache_write_tokens": ev.get("cache_write_tokens"),
+                        # 本地/降级路径没有 cost_usd 键，缺省为 0.0——本地生成成本恒为 0
+                        # 是本项目一贯口径（自有硬件，摊销电费/硬件成本不计入这个指标），
+                        # 不是"测不出来"的占位，是这条路径真实成本就是 0。
+                        "cost_usd": ev.get("cost_usd", 0.0),
                         "decode_tps": ev["decode_tps"],
                         # architecture.md 第 9 节要求记录引用覆盖率：
                         # 没有引用的技术结论无法追溯，等同于不可用
@@ -611,6 +621,9 @@ class Orchestrator:
                 "template_version": template_version(),
                 "ttft_s": None, "ttft_over_budget": True,
                 "prompt_tokens": None, "prefilled_tokens": None, "prefix_reused": False,
+                # 没有调用任何模型——两个后端都失败了（见上面的异常分支），
+                # 没有缓存可言、没有花任何钱，这两点都不是"测不出来"，是确定值。
+                "cache_read_tokens": None, "cache_write_tokens": None, "cost_usd": 0.0,
                 "decode_tps": None,
                 "cited_evidence": citation_coverage(fallback, len(evidence)),
                 "evidence_count": len(evidence),

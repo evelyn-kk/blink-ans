@@ -238,6 +238,57 @@ def test_answering_forwards_served_by_into_done_event(monkeypatch):
     assert done["served_by"] == "claude"
 
 
+class FakeCloudEngine(FakeEngine):
+    """T-029 回归：模拟云端 done 事件里带 cache_read_tokens/cache_write_tokens/
+    cost_usd（真实实现见 services/inference/claude_backend.py 的 stream()）。
+    """
+
+    def stream(self, *_args, **_kwargs):
+        yield {"type": "delta", "text": "答案 [1]"}
+        yield {
+            "type": "done", "ttft_s": 0.1, "prompt_tokens": 10,
+            "prefilled_tokens": 10, "prefix_reused": True, "decode_tps": 20.0,
+            "cache_read_tokens": 123, "cache_write_tokens": 45, "cost_usd": 0.000789,
+        }
+
+
+def test_generate_forwards_cache_tokens_and_cost_into_done_event(monkeypatch):
+    """T-029 CR 修复回归：Orchestrator._generate() 此前手工挑字段构造 done 事件时
+    漏传了 cache_read_tokens/cache_write_tokens（只透传了 prefix_reused）。
+    这里用假路由构造一个带这两个字段的 done 事件，断言最终 done 事件里确实出现。
+    """
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    events = list(
+        Orchestrator(None, FakeEmbedder(), FakeRouter(FakeCloudEngine(), served_by="claude"))
+        .answer(AnswerRequest("怎么预留库存"))
+    )
+    done = next(e for e in events if e["type"] == "done")
+    assert done["cache_read_tokens"] == 123
+    assert done["cache_write_tokens"] == 45
+    assert done["cost_usd"] == 0.000789
+
+
+def test_generate_defaults_cache_tokens_to_none_and_cost_to_zero_for_local(monkeypatch):
+    """本地引擎的 done 事件里没有 cache_read_tokens/cache_write_tokens/cost_usd 这几个
+    键（services/inference/engine.py 没有这个概念）——透传时不能伪造出数值，
+    cache 字段缺省为 None，cost_usd 缺省为 0.0（本地生成成本恒为 0，这是项目
+    一贯口径，不是"测不出来"的占位）。
+    """
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    events = list(
+        Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine(), served_by="local"))
+        .answer(AnswerRequest("怎么预留库存"))
+    )
+    done = next(e for e in events if e["type"] == "done")
+    assert done["cache_read_tokens"] is None
+    assert done["cache_write_tokens"] is None
+    assert done["cost_usd"] == 0.0
+
+
 def test_project_cloud_ban_forces_cloud_allowed_false(monkeypatch):
     """架构决策（§6.4）：命中证据里只要有一条项目材料禁止云端，就必须强制本地。
 
