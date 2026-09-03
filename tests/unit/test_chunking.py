@@ -184,6 +184,13 @@ def test_url_markdown_hugo_layout():
     assert u == "https://kubernetes.io/docs/concepts/workloads/pods/#lifecycle"
 
 
+def test_url_markdown_drops_source_configured_path_characters():
+    """Kafka 的 Geo-Replication 源文件带圆括号，官网 URL 不带。"""
+    s = src(format="markdown", base_url="https://kafka.apache.org/43/", url_strip_prefix="docs/", url_path_drop_chars="()")
+    u = build_url(s, Path("docs/operations/geo-replication-(cross-cluster-data-mirroring).md"), None)
+    assert u == "https://kafka.apache.org/43/operations/geo-replication-cross-cluster-data-mirroring/"
+
+
 def test_url_docbook_sect1_becomes_page():
     s = src(format="docbook", base_url="https://www.postgresql.org/docs/17/")
     u = build_url(s, Path("doc/src/sgml/config.sgml"), "runtime-config-query", "runtime-config-query")

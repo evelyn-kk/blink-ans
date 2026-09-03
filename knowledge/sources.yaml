@@ -49,6 +49,9 @@ sources:
     # 因此去掉 url_template，改走通用的 Hugo 布局映射。
     base_url: https://kafka.apache.org/43/
     url_strip_prefix: "docs/"
+    # Kafka Docsy 保留标题中的 _；发布路径会丢弃文件名里的圆括号。
+    markdown_anchor_style: kafka
+    url_path_drop_chars: "()"
     paths:
       - docs
     ingest: true
@@ -67,6 +70,8 @@ sources:
     format: markdown
     locale: en
     base_url: https://v1-36.docs.kubernetes.io/docs/
+    # Kubernetes blackfriday 先解 HTML 实体，再把非字母数字替成 -。
+    markdown_anchor_style: kubernetes
     # 仓库 550MB，首期只取与生产问题最相关的两个子域
     paths:
       - content/en/docs/concepts

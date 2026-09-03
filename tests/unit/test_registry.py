@@ -82,6 +82,19 @@ def test_unknown_format_rejected(tmp_path):
         load_registry(p)
 
 
+def test_unknown_markdown_anchor_style_rejected(tmp_path):
+    doc = {"version": 1, "sources": [{
+        "id": "x", "project": "p", "technology": "t", "repo": "https://github.com/a/b",
+        "ref": "main", "license": "MIT", "license_file": "LICENSE", "format": "markdown",
+        "locale": "en", "base_url": "https://e.com/", "paths": ["d"],
+        "markdown_anchor_style": "imagined-generator",
+    }]}
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    with pytest.raises(RegistryError, match="markdown_anchor_style"):
+        load_registry(p)
+
+
 # ---------- 许可实测校验 ----------
 
 def test_matching_license_passes(tmp_path):

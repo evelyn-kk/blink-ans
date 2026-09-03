@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,7 +126,22 @@ _MD_SHORTCODE = re.compile(r"\{\{[<%].*?[%>]\}\}", re.S)
 _MD_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
-def parse_markdown(text: str, doc_title: str) -> list[Section]:
+def _markdown_anchor(title: str, style: str) -> str:
+    """按来源实际发布器规则生成 Markdown 标题锚点。
+
+    Kafka Docsy 保留 ``_``（包括 Markdown 强调留下的首尾下划线）；
+    Kubernetes 的 blackfriday 规则先解 HTML 实体，再把连续非 ASCII 字母数字替为 ``-``。
+    两者不能互相替代，默认值仅保留给未登记特殊规则的来源。
+    """
+    if style == "kafka":
+        s = re.sub(r"[^\w\s-]", "", title.lower())
+        return re.sub(r"\s+", "-", s).strip("-")
+    if style == "kubernetes":
+        return re.sub(r"[^a-z0-9]+", "-", unescape(title).lower()).strip("-")
+    return _anchor(title)
+
+
+def parse_markdown(text: str, doc_title: str, anchor_style: str = "generic") -> list[Section]:
     title = doc_title
     if m := _MD_FRONTMATTER.search(text):
         if t := re.search(r"^title:\s*(.+?)\s*$", m.group(1), re.M):
@@ -133,7 +149,10 @@ def parse_markdown(text: str, doc_title: str) -> list[Section]:
         text = text[m.end():]
 
     text = _MD_COMMENT.sub("", _MD_SHORTCODE.sub("", text))
-    return _split_by_headings(text, _MD_HEADING, [title], _md_heading_parts)
+    return _split_by_headings(
+        text, _MD_HEADING, [title],
+        lambda m: _md_heading_parts(m, anchor_style),
+    )
 
 
 # Hugo 的显式锚点写在标题末尾：`## Increase the load {#increase-load}`。
@@ -142,11 +161,11 @@ def parse_markdown(text: str, doc_title: str) -> list[Section]:
 _MD_EXPLICIT_ID = re.compile(r"\s*\{#([^}\s]+)\}\s*$")
 
 
-def _md_heading_parts(m) -> tuple[int, str, str | None]:
+def _md_heading_parts(m, anchor_style: str = "generic") -> tuple[int, str, str | None]:
     title = m.group(2)
     if e := _MD_EXPLICIT_ID.search(title):
         return len(m.group(1)), title[: e.start()].rstrip(), e.group(1)
-    return len(m.group(1)), title, _anchor(title)
+    return len(m.group(1)), title, _markdown_anchor(title, anchor_style)
 
 
 # ---------- AsciiDoc ----------
@@ -337,4 +356,6 @@ def parse_file(path: Path, src: Source) -> list[Section]:
     if not text.strip():
         return []
     doc_title = path.stem.replace("-", " ").replace("_", " ").title()
+    if src.format == "markdown":
+        return parse_markdown(text, doc_title, src.markdown_anchor_style)
     return _PARSERS[src.format](text, doc_title)
