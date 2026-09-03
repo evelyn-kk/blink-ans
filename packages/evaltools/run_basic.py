@@ -26,19 +26,24 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 
+from packages.config.env import load_dotenv  # noqa: E402
 from packages.prompts.answer import SYSTEM_PROMPT, template_version  # noqa: E402
+from services.inference.backend import LocalBackend  # noqa: E402
+from services.inference.claude_backend import ClaudeBackend  # noqa: E402
 from services.inference.engine import DEFAULT_MODEL, InferenceEngine  # noqa: E402
+from services.inference.router import Router  # noqa: E402
 from services.orchestrator.answering import (  # noqa: E402
     AnswerRequest, Orchestrator, Sufficiency,
 )
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 
-QUESTIONS = Path(__file__).resolve().parents[2] / "knowledge" / "eval" / "basic_questions.yaml"
-REPORTS = Path(__file__).resolve().parents[2] / "bench" / "reports"
+QUESTIONS = ROOT / "knowledge" / "eval" / "basic_questions.yaml"
+REPORTS = ROOT / "bench" / "reports"
 
 
 @dataclass
@@ -52,6 +57,7 @@ class Case:
     ttft_s: float = 0.0
     total_s: float = 0.0
     prompt_tokens: int = 0
+    served_by: str = ""            # T-028：走的是哪个生成后端（"claude"/"local"）
     urls: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
@@ -100,6 +106,7 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
             c.ttft_s, c.total_s = ev["ttft_s"], ev["total_s"]
             c.prompt_tokens = ev["prompt_tokens"]
             c.evidence_count = ev.get("evidence_count", 0)
+            c.served_by = ev.get("served_by", "")
         elif t == "error":
             c.failures.append(f"错误 {ev['stage']}: {ev['message']}")
 
@@ -157,7 +164,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
     ap.add_argument("--check-links", action="store_true", help="逐条 HEAD 验证来源可达（较慢）")
+    ap.add_argument("--offline", action="store_true",
+                     help="强制走本地兜底，不尝试云端 Claude（省钱/可复现；"
+                          "不传时按生产路由跑：有 ANTHROPIC_API_KEY 就走云端）")
     args = ap.parse_args()
+    load_dotenv(ROOT / ".env")
 
     specs = yaml.safe_load(QUESTIONS.read_text(encoding="utf-8"))["questions"]
     if args.limit:
@@ -170,7 +181,11 @@ def main() -> int:
         return 2
     embedder = Embedder(); embedder.load()
     store = ChunkStore()
-    orch = Orchestrator(store, embedder, engine)
+    # T-028：与生产同一套路由（services/inference/router.py），而不是直接绑死本地
+    # InferenceEngine——回归脚本要能看出真实生产会走哪个后端（served_by）。
+    # --offline 强制本地，避免每次跑 50 题回归都产生云端调用开销。
+    router = Router(LocalBackend(engine), ClaudeBackend(SYSTEM_PROMPT), offline=args.offline)
+    orch = Orchestrator(store, embedder, router)
 
     print(f"运行 {len(specs)} 题（模板 {template_version()}）\n")
     cases: list[Case] = []
@@ -182,7 +197,8 @@ def main() -> int:
         if c.retrieval_miss or c.declined_with_evidence:
             mark = "○"   # 安全（拒绝编造），但没给出可用答案
         print(f"  {mark} [{i:>2}/{len(specs)}] {c.question[:34]:<36} "
-              f"{c.sufficiency:<12} 来源{c.sources} 引用{c.cited} {c.ttft_s:.2f}s")
+              f"{c.sufficiency:<12} 来源{c.sources} 引用{c.cited} "
+              f"{c.served_by or '?':<6} {c.ttft_s:.2f}s")
         for f in c.failures:
             print(f"        └─ {f}")
 
@@ -201,6 +217,12 @@ def main() -> int:
     print(f"通过 {passed}/{len(cases)}")
     print(f"  应作答 {sum(1 for c in answered if c.ok)}/{len(answered)}"
           f" · 应拒答 {sum(1 for c in refused if c.ok)}/{len(refused)}")
+    served_by_counts: dict[str, int] = {}
+    for c in cases:
+        key = c.served_by or "(未生成)"
+        served_by_counts[key] = served_by_counts.get(key, 0) + 1
+    print(f"  生成后端: {', '.join(f'{k} {v}' for k, v in sorted(served_by_counts.items()))}"
+          + ("  ← --offline 强制本地" if args.offline else ""))
     if answered:
         with_src = sum(1 for c in answered if c.sources)
         miss = sum(1 for c in answered if c.retrieval_miss)
@@ -243,6 +265,8 @@ def main() -> int:
         "passed": passed, "total": len(cases),
         "retrieval_misses": sum(1 for c in cases if c.retrieval_miss),
         "declined_with_evidence": sum(1 for c in cases if c.declined_with_evidence),
+        "served_by_counts": served_by_counts,
+        "offline_mode": args.offline,
         "broken_links": broken,
         "cases": [vars(c) for c in cases],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
