@@ -101,6 +101,17 @@ DEFAULT_MODELS = {
     # --models 覆盖；脚本会保留服务端原文，避免把“模型下线”误判为时延失败。
     "kimi": ["kimi-k3"],
 }
+CLAUDE_API_BASE_URL = "https://api.anthropic.com"
+
+
+def _claude_client():
+    """构造直连官方端点的客户端，不受同机兼容网关环境变量污染。"""
+    import anthropic
+
+    return anthropic.Anthropic(
+        api_key=os.environ["ANTHROPIC_API_KEY"],
+        base_url=CLAUDE_API_BASE_URL,
+    )
 
 
 def build_evidence(target_tokens: int) -> tuple[str, int]:
@@ -138,9 +149,10 @@ def measure_claude(model: str, evidence: str, max_tokens: int, effort: str) -> d
     effort 默认 low 是有意的：Opus 5 思考默认开启，而思考的 token 全部落在
     用户看到第一个字之前。在 5 秒硬预算下，这是产品指标而非省钱选项。
     """
-    import anthropic
-
-    client = anthropic.Anthropic()
+    # 不继承进程中的 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN。
+    # 这台机器可能同时配置了 Kimi 的 Anthropic 兼容网关；若静默继承，
+    # “Claude 基准”会实际打到另一家端点，401/时延结论都会失真。
+    client = _claude_client()
     t0 = time.perf_counter()
     first_event = first_text = None
     text_chars = thinking_chars = 0
