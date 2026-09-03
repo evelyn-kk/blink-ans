@@ -26,6 +26,89 @@ DEFAULT_MODEL = "claude-opus-5"  # T-026 实测所用型号，见 bench/reports/
 CLAUDE_API_BASE_URL = "https://api.anthropic.com"
 DEFAULT_TIMEOUT_S = 3.6  # architecture.md §6.5：generation_started→first_answer_text 云端子预算
 
+# T-029：Claude Opus 5（claude-opus-5）官方定价，2026-06-24 Anthropic 官方费率表
+# （Current Models 表，$/MTok）。价格变动时先来这里核对更新，再看下面两个衍生倍率
+# 是否仍然成立——费率表变了这两个常量不会自动跟着变。
+PRICE_PER_MTOK_INPUT_USD = 5.00
+PRICE_PER_MTOK_OUTPUT_USD = 25.00
+# 缓存写入价 ≈ 输入价的 1.25 倍、缓存读取价 ≈ 输入价的 0.1 倍——这组倍率关系
+# development-notes.md（T-026 附近）已记过一次，与官方费率表口径一致，直接复用。
+PRICE_PER_MTOK_CACHE_WRITE_USD = PRICE_PER_MTOK_INPUT_USD * 1.25  # 6.25
+PRICE_PER_MTOK_CACHE_READ_USD = PRICE_PER_MTOK_INPUT_USD * 0.1    # 0.50
+
+
+def compute_cost_usd(
+    *,
+    prompt_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int | None = None,
+    cache_write_tokens: int | None = None,
+) -> float:
+    """按官方费率把这次云端请求的 token 用量换算成美元。
+
+    口径：Anthropic 用量语义里 `usage.input_tokens`（这里的 prompt_tokens）本身就
+    已经排除了缓存命中的部分——`cache_read_input_tokens`/`cache_creation_input_tokens`
+    是分开计的两个桶，三者互不重叠，相加才是这次请求真正处理的总 token 数。
+    因此这里直接按各自单价分别计费再相加，不需要做任何去重或扣减。
+
+    本地后端没有这个函数对应的调用点——本地固定 cost_usd=0.0（自有硬件，摊销
+    电费/硬件成本不计入这个指标，见 architecture.md/development-notes.md 里
+    这项一贯的口径），不经过这里。
+
+    保留 6 位小数：单次请求成本常在 $0.001 量级，4 位小数会把大多数请求截断成 0，
+    抹掉埋点区分度；50 题回归汇总总成本时，6 位小数足够看出个位数美分级别的差异。
+    """
+    cost = (
+        prompt_tokens / 1_000_000 * PRICE_PER_MTOK_INPUT_USD
+        + output_tokens / 1_000_000 * PRICE_PER_MTOK_OUTPUT_USD
+        + (cache_read_tokens or 0) / 1_000_000 * PRICE_PER_MTOK_CACHE_READ_USD
+        + (cache_write_tokens or 0) / 1_000_000 * PRICE_PER_MTOK_CACHE_WRITE_USD
+    )
+    return round(cost, 6)
+
+
+def probe_network_floor(timeout_s: float = 2.0) -> dict:
+    """生产用的轻量版网络地板探测（/healthz 用，思路抄 bench/bench_llm_remote.py
+    的 `probe_network_rtt()`，但只探一次，不做那份基准脚本的多次采样统计——
+    `/healthz` 不需要那种精度，且探测本身已经是额外的一次真实网络往返，
+    多探几次只会让 `/healthz` 更慢）。
+
+    对 `api.anthropic.com` 做一次 TCP 连接 + TLS 握手，握手完立刻关闭连接。
+    **不发送任何 HTTP 请求，不调用 `/v1/messages`，不花钱**——这一点是硬约束，
+    不是这个函数手误的事：`/healthz` 可能被监控系统高频轮询，一旦这里改成
+    发起真实模型请求，每次轮询都会计费。
+
+    - `tcp_connect_s`：一次网络往返，稳态下每个请求要付的网络地板。
+    - `tcp_tls_s`：TCP+TLS 完整握手，冷连接才付的一次性成本。
+
+    网络不通/超时/证书问题等一律捕获，返回 `error` 字段而不是向上抛异常——
+    调用方（`/healthz`）不能因为这一项测不出来就让整个响应跟着 500。
+    """
+    import socket
+    import ssl
+
+    host = CLAUDE_API_BASE_URL.split("://", 1)[-1].rstrip("/")
+    t0 = time.perf_counter()
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=timeout_s) as sock:
+            tcp_connect_s = round(time.perf_counter() - t0, 4)
+            with ctx.wrap_socket(sock, server_hostname=host):
+                pass
+        return {
+            "host": host,
+            "tcp_connect_s": tcp_connect_s,
+            "tcp_tls_s": round(time.perf_counter() - t0, 4),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "host": host,
+            "tcp_connect_s": None,
+            "tcp_tls_s": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
 
 class ClaudeBackend:
     name = "claude"
@@ -108,6 +191,20 @@ class ClaudeBackend:
         total = time.perf_counter() - t0
         usage = final.usage
         cache_read = getattr(usage, "cache_read_input_tokens", None)
+        cache_write = getattr(usage, "cache_creation_input_tokens", None)
+        # 输出 token 数优先用 SDK 汇总的 usage.output_tokens（若有），比累加流式
+        # delta 条数（n）更可靠——n 数的是「文本 delta 事件」条数，不是 token 数，
+        # 二者在多字节/多 token 一个 delta 的情况下本就不该假定相等。usage 对象
+        # 没有这个字段时（旧版 SDK）才退回 n 作为近似。
+        output_tokens = getattr(usage, "output_tokens", None)
+        if output_tokens is None:
+            output_tokens = n
+        cost_usd = compute_cost_usd(
+            prompt_tokens=usage.input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+        )
         yield {
             "type": "done",
             # 整轮没吐出正文（全被截断/被思考吃掉）时，ttft 记 total——
@@ -125,5 +222,7 @@ class ClaudeBackend:
             "prefix_reused": bool(cache_read),
             # 拿不到的数据不硬造：Claude API 没有这两个字段的等价物就不填。
             "cache_read_tokens": cache_read,
-            "cache_write_tokens": getattr(usage, "cache_creation_input_tokens", None),
+            "cache_write_tokens": cache_write,
+            # T-029：云端场景才有真实美元成本，本地固定 0.0（见 compute_cost_usd 的说明）。
+            "cost_usd": cost_usd,
         }

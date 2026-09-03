@@ -67,6 +67,12 @@ class Case:
     total_s: float = 0.0
     prompt_tokens: int = 0
     served_by: str = ""            # T-028：走的是哪个生成后端（"claude"/"local"）
+    # T-029：cache 命中与成本埋点，字段名与 done 事件保持一致。云端没命中缓存、
+    # 或本地场景（没有这个概念）时为 None，不伪造成 0——与 done 事件同一口径。
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    prefix_reused: bool = False
+    cost_usd: float = 0.0          # --offline 模式下应恒为 0，见 main() 里的隐含正确性检查
     urls: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
@@ -114,6 +120,10 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
             c.prompt_tokens = ev["prompt_tokens"]
             c.evidence_count = ev.get("evidence_count", 0)
             c.served_by = ev.get("served_by", "")
+            c.cache_read_tokens = ev.get("cache_read_tokens")
+            c.cache_write_tokens = ev.get("cache_write_tokens")
+            c.prefix_reused = bool(ev.get("prefix_reused"))
+            c.cost_usd = ev.get("cost_usd", 0.0) or 0.0
         elif t == "error":
             c.failures.append(f"错误 {ev['stage']}: {ev['message']}")
 
@@ -213,7 +223,10 @@ def main() -> int:
             mark = "○"   # 安全（拒绝编造），但没给出可用答案
         print(f"  {mark} [{i:>2}/{len(specs)}] {c.question[:34]:<36} "
               f"{c.sufficiency:<12} 来源{c.sources} 引用{c.cited} "
-              f"{c.served_by or '?':<6} {c.ttft_s:.2f}s")
+              f"{c.served_by or '?':<6} {c.ttft_s:.2f}s "
+              f"cache读{c.cache_read_tokens if c.cache_read_tokens is not None else '-'} "
+              f"写{c.cache_write_tokens if c.cache_write_tokens is not None else '-'} "
+              f"${c.cost_usd:.6f}")
         for f in c.failures:
             print(f"        └─ {f}")
 
@@ -238,6 +251,19 @@ def main() -> int:
         served_by_counts[key] = served_by_counts.get(key, 0) + 1
     print(f"  生成后端: {', '.join(f'{k} {v}' for k, v in sorted(served_by_counts.items()))}"
           + ("  ← --offline 强制本地" if args.offline else ""))
+
+    # T-029：cache 命中与成本汇总。--offline 模式下所有请求都走本地，
+    # 本地 cost_usd 恒为 0.0——total_cost_usd 不为 0 说明哪里算错了，
+    # 用它当一次隐含的正确性检查（见下方 offline_cost_ok）。
+    total_cost_usd = round(sum(c.cost_usd for c in cases), 6)
+    cache_hits = sum(1 for c in cases if c.prefix_reused)
+    offline_cost_ok = not args.offline or total_cost_usd == 0.0
+    print(f"  cache 命中（prefix_reused）: {cache_hits}/{len(cases)}")
+    print(f"  云端成本合计: ${total_cost_usd:.6f}"
+          + ("  ← --offline 应恒为 0" if args.offline else ""))
+    if not offline_cost_ok:
+        print(f"        └─ 异常：--offline 模式下成本合计应为 0，实际 ${total_cost_usd:.6f}，"
+              f"cost_usd 计算或透传有误")
     if answered:
         with_src = sum(1 for c in answered if c.sources)
         miss = sum(1 for c in answered if c.retrieval_miss)
@@ -283,13 +309,16 @@ def main() -> int:
         "declined_with_evidence": sum(1 for c in cases if c.declined_with_evidence),
         "served_by_counts": served_by_counts,
         "offline_mode": args.offline,
+        "cache_hits": cache_hits,
+        "total_cost_usd": total_cost_usd,
+        "offline_cost_ok": offline_cost_ok,
         "broken_links": broken,
         "cases": [vars(c) for c in cases],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  报告 {path.name}")
 
     store.close()
-    return 0 if passed == len(cases) and not broken else 1
+    return 0 if passed == len(cases) and not broken and offline_cost_ok else 1
 
 
 if __name__ == "__main__":

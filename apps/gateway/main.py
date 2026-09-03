@@ -28,7 +28,7 @@ from packages.prompts.answer import (  # noqa: E402
     SUPPORTED_LANGUAGES, Language, system_prompt, template_version,
 )
 from services.inference.backend import LocalBackend  # noqa: E402
-from services.inference.claude_backend import ClaudeBackend  # noqa: E402
+from services.inference.claude_backend import ClaudeBackend, probe_network_floor  # noqa: E402
 from services.inference.engine import DEFAULT_MODEL, InferenceEngine  # noqa: E402
 from services.inference.router import Router  # noqa: E402
 from services.orchestrator.answering import (  # noqa: E402
@@ -137,13 +137,50 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="blink-ans gateway", lifespan=lifespan)
 
 
+def _healthz_status(core_ready: bool, cloud_ready: bool, s, store_error: str | None) -> str:
+    """T-029：三档状态——`/healthz` 要能区分"完全正常"和"云端挂了但本地能兜底"，
+    不能把这两种都报成同一个 `"error"`（检索/嵌入永远走本地，architecture.md §7）。
+
+    - **硬错误（"error"）**：本地引擎或索引没就绪——这两个不 ready 服务就完全
+      不能用，与云端状态无关，判断条件不变（沿用原来的 `ready = s.loaded and
+      index_ready`）。
+    - **降级可用（"degraded"）**：本地 + 索引都 ready，但云端不可用/未配置——
+      服务仍然可用（本地兜底），不该跟硬错误混在一起报。这是本轮新增的一档。
+    - **正常（"ok"）**：本地 + 索引 + 云端都 ready。
+    - **"loading"**：本地/索引尚未就绪，但也没有记录错误——还在启动过程中，
+      沿用原有语义。
+    """
+    core_error = bool(s.error or store_error)
+    if core_ready and cloud_ready:
+        return "ok"
+    if core_ready:
+        return "degraded"
+    return "error" if core_error else "loading"
+
+
 @app.get("/healthz")
 async def healthz():
     s = engine.status
     index_ready = _store is not None
-    ready = s.loaded and index_ready
+    core_ready = s.loaded and index_ready
+    # "ready" 只反映凭据是否配置（ClaudeBackend.available()），语义不变——
+    # 探测过真实连通性的结果单独放进 network_floor，不混进这个字段。
+    cloud_ready = bool(_router and _router.cloud and _router.cloud.available())
+
+    # 网络地板：只在云端凭据已配置时才探测（没配凭据没必要连一次官方 endpoint）。
+    # probe_network_floor() 内部已经把连接异常兜底成 error 字段而不抛出，这里
+    # 再包一层 try/except 纯属防御性——保证这一项探测无论如何都不能把整个
+    # /healthz 拖到 500（要观测的是"这一项测不出来"，不是让请求本身失败）。
+    network_floor = None
+    if cloud_ready:
+        try:
+            network_floor = probe_network_floor()
+        except Exception as exc:
+            network_floor = {"host": None, "tcp_connect_s": None, "tcp_tls_s": None,
+                              "error": f"{type(exc).__name__}: {exc}"}
+
     return {
-        "status": "ok" if ready else ("error" if (s.error or _store_error) else "loading"),
+        "status": _healthz_status(core_ready, cloud_ready, s, _store_error),
         "components": {
             "inference": {
                 "ready": s.loaded, "model": s.model_id,
@@ -162,11 +199,18 @@ async def healthz():
             },
             # architecture.md §7：healthz 要分别报告本地生成与云端生成状态。
             # "ready" 只反映凭据是否配置（ClaudeBackend.available()），不代表
-            # 探测过真实连通性——探测本身就是一次会花钱、可能超时的调用。
+            # 探测过真实连通性——真正探测过连通性的结果放在 network_floor 里，
+            # 且那次探测本身不发起任何模型请求、不花钱（只是 TCP+TLS 握手，见
+            # probe_network_floor()），与"ready 不代表探测过连通性"这句注释
+            # 描述的是"没有靠一次会花钱的模型调用去确认"，不是完全不探测网络。
             "cloud_generation": {
-                "ready": bool(_router and _router.cloud and _router.cloud.available()),
+                "ready": cloud_ready,
                 "backend": _router.cloud.name if _router and _router.cloud else None,
                 "offline_mode": _router.offline if _router else _offline_mode,
+                # T-029：网络地板（TCP 连接 + TLS 握手耗时）。只在凭据已配置时探测；
+                # 未配置凭据时为 None（没必要连一次官方 endpoint）。探测失败时
+                # tcp_connect_s/tcp_tls_s 为 None、error 说明原因，不代表 /healthz 本身失败。
+                "network_floor": network_floor,
             },
             "transcription": {"ready": False, "note": "I4 接入 mlx-whisper"},
             "external_search": {"ready": False, "note": "I6 接入官方来源白名单"},
