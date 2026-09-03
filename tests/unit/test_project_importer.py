@@ -4,7 +4,7 @@ import pytest
 
 from packages.schemas.chunk import MetadataError
 from services.projects.importer import material_chunk
-from services.projects.importer import Material, build_material_chunks
+from services.projects.importer import Material, build_material_chunks, read_materials
 from services.projects.registry import Project
 
 
@@ -53,3 +53,30 @@ def test_batch_rejects_empty_material_before_indexing(tmp_path):
     root.mkdir()
     with pytest.raises(ValueError, match="正文为空"):
         build_material_chunks(Project("orders", "v1", root, True), [Material("a.py", "")])
+
+
+def test_explicit_file_read_stays_inside_registered_root_and_does_not_scan(tmp_path):
+    root = tmp_path / "orders"
+    (root / "services").mkdir(parents=True)
+    (root / "services" / "app.py").write_text("class App: pass", encoding="utf-8")
+    (root / "ignored.py").write_text("secret", encoding="utf-8")
+    project = Project("orders", "v1", root, False)
+
+    materials = read_materials(project, ["services/app.py"])
+
+    assert [(m.path, m.module, m.content_type) for m in materials] == [
+        ("services/app.py", "services", "code")
+    ]
+    with pytest.raises(ValueError, match="至少需要一个"):
+        read_materials(project, [])
+    with pytest.raises(ValueError, match="相对路径"):
+        read_materials(project, ["../ignored.py"])
+
+
+def test_large_project_material_is_split_for_context_budget(tmp_path):
+    root = tmp_path / "orders"
+    root.mkdir()
+    project = Project("orders", "v1", root, False)
+    chunks = build_material_chunks(project, [Material("a.txt", "word " * 2_500)])
+    assert len(chunks) > 1
+    assert all(c.token_estimate <= 400 for c in chunks)

@@ -80,6 +80,14 @@ def test_long_prose_is_split_near_target():
     assert all(estimate_tokens(p) <= MAX_TOKENS * 1.5 for p in pieces)
 
 
+def test_single_unpunctuated_long_line_still_respects_hard_limit():
+    """日志和压缩配置常没有换行或句号，不能借此绕过硬上限。"""
+    from packages.schemas.chunk import estimate_tokens
+    pieces = _split_body("setting=value " * 1_000)
+    assert len(pieces) > 1
+    assert all(estimate_tokens(p) <= MAX_TOKENS for p in pieces)
+
+
 def test_dedupe_adjacent_titles():
     """文件名派生的标题常与文首 H1 重复，会产生 "Appendix › Appendix"。"""
     assert _dedupe_path(["Appendix", "Appendix", "Schema"]) == ["Appendix", "Schema"]
