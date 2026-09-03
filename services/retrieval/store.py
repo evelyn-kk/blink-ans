@@ -184,6 +184,10 @@ class IndexBuilder:
             for r in rows:
                 if r["source_project"] in exclude_projects:
                     continue
+                # current.db 可能由项目元数据扩列之前的版本构建。合并项目资料时
+                # 不能因为旧官方块没有这些列就无法搬运；它们明确为 NULL，而不是
+                # 猜测成某个项目。这次发布后，新索引自然带齐完整 schema。
+                available = set(r.keys())
                 cur = self.db.execute(
                     """INSERT INTO chunks
                        (checksum, source_url, source_project, version_or_commit, license,
@@ -191,7 +195,7 @@ class IndexBuilder:
                         token_estimate, anchor, source_path, project_id, module, symbol,
                         cloud_generation_allowed, text)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    tuple(r[k] for k in (
+                    tuple(r[k] if k in available else None for k in (
                         "checksum", "source_url", "source_project", "version_or_commit",
                         "license", "retrieved_at", "title_path", "technology",
                         "content_type", "locale", "token_estimate", "anchor",

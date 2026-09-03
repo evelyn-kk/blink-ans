@@ -170,6 +170,43 @@ def test_project_metadata_survives_index_write_and_merge(tmp_path, monkeypatch):
         check.close()
 
 
+def test_merge_can_carry_legacy_index_without_project_metadata_columns(tmp_path, monkeypatch):
+    """T-103：首次项目导入必须能以扩列前的 current.db 作为增量底座。"""
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    chunk = Chunk(
+        source_url="https://example.com/legacy", source_project="official", version_or_commit="v1",
+        license="Apache-2.0", retrieved_at=utc_now(), title_path=["Legacy"], technology="java",
+        content_type="prose", locale="en", text="legacy official evidence",
+    )
+    chunk.validate()
+    source = IndexBuilder("legacy")
+    source.add([chunk], [_vec(0)])
+    source.finalize({"official": "v1"}, "synthetic")
+    source.activate()
+
+    # 真实 current.db 可能来自 T-103 扩列前；用旧表形状复现它，而非只测新 schema。
+    db = store_mod._connect(tmp_path / "legacy.db")
+    try:
+        db.execute("DROP INDEX idx_chunks_project_id")
+        db.execute("DROP INDEX idx_chunks_project_symbol")
+        for column in ("project_id", "module", "symbol", "cloud_generation_allowed"):
+            db.execute(f"ALTER TABLE chunks DROP COLUMN {column}")
+        db.commit()
+    finally:
+        db.close()
+
+    merged = IndexBuilder("merged")
+    assert merged.carry_over(tmp_path / "legacy.db", set(), "synthetic") == 1
+    merged.finalize({"official": "v1"}, "synthetic")
+    merged.activate()
+    check = ChunkStore(tmp_path / "merged.db")
+    try:
+        row = check.execute("SELECT project_id, module, symbol, cloud_generation_allowed FROM chunks")[0]
+        assert tuple(row) == (None, None, None, None)
+    finally:
+        check.close()
+
+
 def test_token_budget_is_respected(store):
     """上下文预算是 I0 实测的硬约束：超出即首 token 时延超标。"""
     budget = 30

@@ -170,6 +170,13 @@ def _split_body(body: str) -> list[str]:
         fences = len(_CODE_FENCE.findall(b))
         t = estimate_tokens(b)
 
+        # 围栏中的示例（尤其是 ASCII 数据流图）与相邻散文合并后很容易跨过
+        # 上下文硬上限。代码/图本身不切开，但在边界处先把已有散文封口；这样既
+        # 保留完整示例，又不会让它拖着前一段一起成为无法选入 prompt 的大块。
+        if fences and not in_code and buf:
+            out.append("\n\n".join(buf))
+            buf, buf_tokens = [], 0
+
         # 代码块内部一律不切，哪怕超过硬上限
         if in_code or (buf_tokens + t <= MAX_TOKENS) or not buf:
             buf.append(b)
@@ -181,7 +188,11 @@ def _split_body(body: str) -> list[str]:
         if fences % 2 == 1:
             in_code = not in_code
 
-        if not in_code and buf_tokens >= TARGET_TOKENS:
+        # 一个完整围栏也独立成块，后续解释不要和它再次拼接。
+        if fences and not in_code:
+            out.append("\n\n".join(buf))
+            buf, buf_tokens = [], 0
+        elif not in_code and buf_tokens >= TARGET_TOKENS:
             out.append("\n\n".join(buf))
             buf, buf_tokens = [], 0
 

@@ -91,3 +91,23 @@ def test_large_project_material_is_split_for_context_budget(tmp_path):
     chunks = build_material_chunks(project, [Material("a.txt", "word " * 2_500)])
     assert len(chunks) > 1
     assert all(c.token_estimate <= 400 for c in chunks)
+
+
+def test_project_import_rejects_oversized_code_fence_instead_of_truncating_it(tmp_path):
+    root = tmp_path / "orders"
+    root.mkdir()
+    project = Project("orders", "v1", root, False)
+    code = "```java\n" + "veryLongIdentifier();\n" * 200 + "```"
+    with pytest.raises(ValueError, match="超过 400 token"):
+        build_material_chunks(project, [Material("design.md", code, content_type="mixed")])
+
+
+def test_project_import_splits_oversized_untyped_diagram_at_line_boundaries(tmp_path):
+    root = tmp_path / "orders"
+    root.mkdir()
+    project = Project("orders", "v1", root, False)
+    diagram = "```\n" + "step → next step\n" * 150 + "```"
+    chunks = build_material_chunks(project, [Material("flow.md", diagram, content_type="mixed")])
+    assert len(chunks) > 1
+    assert all(c.token_estimate <= 400 for c in chunks)
+    assert all(c.text.startswith("```") and c.text.endswith("```") for c in chunks)
