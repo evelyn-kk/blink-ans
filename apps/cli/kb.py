@@ -5,6 +5,7 @@
     kb sync --only id,... --mode verify         局部验证：只建这些来源的索引，跑相关回归，不激活
     kb sync --only id,... --mode merge          合并更新：以当前索引为底座换掉这些来源后激活
     kb search "问题" [--index 路径]              检索当前索引，或 verify 留下的暂存索引
+    kb project-import --manifest ... --project ... --file ...  显式导入项目文件到独立索引
     kb verify-links                             抽样验证引用链接可达性
     kb stats                                    当前索引概况
 """
@@ -86,6 +87,7 @@ def cmd_search(args) -> int:
         store, args.query, vec,
         limit=args.limit, token_budget=args.token_budget,
         technology=args.technology, project=args.project,
+        project_id=args.project_id, module=args.module, symbol=args.symbol,
     )
     elapsed = (time.perf_counter() - t0) * 1000
 
@@ -102,6 +104,48 @@ def cmd_search(args) -> int:
         print(f"    融合分 {h.score:.4f} ({ranks}) | {h.token_estimate} tok | {h.content_type}")
         body = " ".join(h.text.split())
         print(f"    {body[:180]}{'...' if len(body) > 180 else ''}\n")
+    return 0
+
+
+def cmd_project_import(args) -> int:
+    """导入用户逐一指定的本地项目文件；默认不替换全局 current 索引。"""
+    from services.projects.assets import build_assets
+    from services.projects.importer import read_materials
+    from services.projects.indexing import rebuild_project_index
+    from services.projects.registry import load_projects
+    from services.retrieval.embed import Embedder
+    from services.retrieval.store import CURRENT, IndexError_
+
+    try:
+        projects = load_projects(Path(args.manifest))
+        project = next((p for p in projects if p.id == args.project_id), None)
+        if project is None:
+            raise ValueError(f"注册表中不存在项目: {args.project_id}")
+        materials = read_materials(project, args.files)
+        # 单独的派生索引先发布，避免还没有项目级回归集时静默覆盖所有用户的 current。
+        name = "current" if args.activate_current else (args.name or f"project-{project.id}")
+        if "/" in name or "\\" in name or name in {"", ".", ".."}:
+            raise ValueError("索引名只能是一个文件名片段，不能包含路径分隔符")
+        stats = rebuild_project_index(
+            project, materials, Embedder(),
+            source_index=Path(args.from_index) if args.from_index else CURRENT,
+            name=name, activate=True,
+        )
+    except (ValueError, IndexError_, OSError, UnicodeDecodeError) as exc:
+        print(f"项目导入失败: {exc}", file=sys.stderr)
+        return 2
+
+    # 摘要和别名是从本次明确材料生成的，不让模型臆测项目结构。
+    from services.projects.importer import build_material_chunks
+    assets = build_assets(build_material_chunks(project, materials))
+    destination = stats.path.with_name(f"{name}.db")
+    print(f"项目 {project.id}：写入 {stats.added} 块，搬运 {stats.carried} 块")
+    print(f"索引: {destination}")
+    print(assets.summary)
+    if assets.aliases:
+        print(f"符号/文件别名: {', '.join(assets.aliases)}")
+    if not args.activate_current:
+        print(f"查询此项目索引：kb search <问题> --index {destination} --project-id {project.id}")
     return 0
 
 
@@ -166,10 +210,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-n", "--limit", type=int, default=5)
     p.add_argument("--token-budget", type=int, help="按 token 预算截断，模拟真实上下文约束")
     p.add_argument("--technology")
-    p.add_argument("--project")
+    p.add_argument("--project", help="外部来源项目 ID（如 kafka）；与 --project-id 不同")
+    p.add_argument("--project-id", help="用户项目 ID；严格只检索该项目的材料")
+    p.add_argument("--module", help="项目模块精确过滤（须配合 --project-id 使用）")
+    p.add_argument("--symbol", help="项目符号精确过滤（须配合 --project-id 使用）")
     p.add_argument("--keyword-only", action="store_true", help="跳过向量检索")
     p.add_argument("--index", help="改查指定索引文件，例如 verify 模式留下的暂存索引")
     p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser("project-import", help="显式导入用户项目的指定文件")
+    p.add_argument("--manifest", required=True, help="项目注册表 YAML（含 root、版本、云端许可）")
+    p.add_argument("--project-id", required=True, help="注册表中的项目 ID")
+    p.add_argument("--file", dest="files", action="append", required=True,
+                   help="相对项目 root 的单个文件；可重复，不会扫描目录")
+    p.add_argument("--from-index", help="作为增量底座的索引，默认 current.db")
+    p.add_argument("--name", help="独立输出索引名，默认 project-<项目 ID>")
+    p.add_argument("--activate-current", action="store_true",
+                   help="显式将结果发布为 current.db；默认只发布独立项目索引")
+    p.set_defaults(fn=cmd_project_import)
 
     p = sub.add_parser("verify-links", help="抽样验证引用链接可达性")
     p.add_argument("--sample", type=int, default=5, help="每个来源抽样条数")

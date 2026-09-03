@@ -178,7 +178,10 @@ def select_evidence(
 class AnswerRequest:
     question: str
     technology: str | None = None
-    project: str | None = None
+    project: str | None = None       # 外部语料的 source_project（兼容已有 API）
+    project_id: str | None = None    # 用户项目的稳定 ID，不能与 source_project 混用
+    module: str | None = None
+    symbol: str | None = None
     max_tokens: int | None = None
 
 
@@ -208,6 +211,7 @@ class Orchestrator:
                 self.store, req.question, vector,
                 limit=self.cfg.max_evidence * 2,
                 technology=tech, project=req.project,
+                project_id=req.project_id, module=req.module, symbol=req.symbol,
                 candidates=self.cfg.candidates,
             )
         except Exception as exc:
