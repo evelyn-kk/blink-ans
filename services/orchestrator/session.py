@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, replace
+import threading
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Iterator
@@ -78,6 +79,13 @@ class SessionState:
     # 覆盖会话状态（见 stream_and_record()）。
     turn_seq: int = 0
     last_completed_seq: int = 0
+    # SSE 的生产端由 apps.gateway.sse 在工作线程中消费；clear() 则运行在
+    # FastAPI 的事件循环线程。因此 epoch/turn_seq 的条件判断与整组状态写回不能
+    # 只靠 GIL 或“async 单线程”的假设：两条线程可以恰好穿插在判断和赋值之间。
+    # 这把锁只保护很短的会话状态提交，不覆盖检索或模型生成，避免 clear 被长流阻塞。
+    _state_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False, compare=False,
+    )
 
     def clear(self) -> None:
         """清空会话上下文：保留 session_id 与 language，其余全部重置。
@@ -87,10 +95,13 @@ class SessionState:
         否则下一轮追问检索仍会把旧项目的块 id 传回 Orchestrator。`epoch` 递增
         使清空之前建好、尚未取流的旧轮次在取流时被拒绝（CR-021）。
         """
-        self.active_project_id = None
-        self.active_version = None
-        self.last_turn = None
-        self.epoch += 1
+        # CR-032：与 stream_and_record() 的“校验 epoch + 完整状态提交”使用同一
+        # 把锁，保证用户的 clear 不会落在校验之后、写回之前而被迟到流撤销。
+        with self._state_lock:
+            self.active_project_id = None
+            self.active_version = None
+            self.last_turn = None
+            self.epoch += 1
 
 
 # ---------------------------------------------------------------------------
@@ -389,15 +400,6 @@ def stream_and_record(
 
     if had_error:
         return
-    if session.epoch != created_epoch:
-        # CR-031：会话在这次流式生成期间被 clear() 过——不能把这一轮的结果
-        # 写回一个已经被用户主动清空的会话，那等于悄悄撤销了这次清空。
-        return
-    if turn_seq <= session.last_completed_seq:
-        # 一个更新的轮次已经先我一步完成并写回过会话状态——我这次的结果对
-        # 客户端仍然有效（已经流完了），但不能拿旧状态盖掉新状态。
-        return
-
     full_answer = "".join(answer_parts)
     cited_chunk_ids = [
         s["chunk_id"] for s in sources
@@ -418,17 +420,30 @@ def stream_and_record(
     }
     open_issue = verdict_level if verdict_level != "sufficient" else None
 
-    # CR-030：这一轮确实要写回了，把它标记为"目前写回过的最新版本"，
-    # 挡住比它更旧（seq 更小）的轮次之后再来覆盖。
-    session.last_completed_seq = turn_seq
-    session.active_project_id = resolved.project_id
-    # req.version 已经在 build_request_for_turn()/build_followup_request() 里按
-    # 正确优先级解析过（显式 > 会话活动版本，切项目且未显式给版本时为 None）——
-    # 这里无条件写回，让"切换项目未带版本"能正确清空旧版本（CR-022），而不是
-    # 像旧代码那样只在 truthy 时才更新、导致旧版本号残留。
-    session.active_version = req.version
-    session.last_turn = TurnContext(
-        question=raw_question, entities=entities,
-        brief_conclusion=brief_conclusion(full_answer),
-        cited_chunk_ids=cited_chunk_ids, open_issue=open_issue,
-    )
+    # CR-032：sse_stream() 在工作线程迭代本函数，clear() 在事件循环线程运行。
+    # 把 CR-031 的 epoch 检查、CR-030 的序号检查和整组写回放进同一临界段，避免
+    # clear 恰好夹在“检查通过”和“最后一次赋值”之间而被旧流反向覆盖。
+    with session._state_lock:
+        if session.epoch != created_epoch:
+            # CR-031：会话在这次流式生成期间被 clear() 过——不能把这一轮的结果
+            # 写回一个已经被用户主动清空的会话，那等于悄悄撤销了这次清空。
+            return
+        if turn_seq <= session.last_completed_seq:
+            # 一个更新的轮次已经先我一步完成并写回过会话状态——我这次的结果对
+            # 客户端仍然有效（已经流完了），但不能拿旧状态盖掉新状态。
+            return
+
+        # CR-030：这一轮确实要写回了，把它标记为"目前写回过的最新版本"，
+        # 挡住比它更旧（seq 更小）的轮次之后再来覆盖。
+        session.last_completed_seq = turn_seq
+        session.active_project_id = resolved.project_id
+        # req.version 已经在 build_request_for_turn()/build_followup_request() 里按
+        # 正确优先级解析过（显式 > 会话活动版本，切项目且未显式给版本时为 None）——
+        # 这里无条件写回，让"切换项目未带版本"能正确清空旧版本（CR-022），而不是
+        # 像旧代码那样只在 truthy 时才更新、导致旧版本号残留。
+        session.active_version = req.version
+        session.last_turn = TurnContext(
+            question=raw_question, entities=entities,
+            brief_conclusion=brief_conclusion(full_answer),
+            cited_chunk_ids=cited_chunk_ids, open_issue=open_issue,
+        )
