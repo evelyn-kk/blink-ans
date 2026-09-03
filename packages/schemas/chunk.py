@@ -59,6 +59,12 @@ class Chunk:
     # ---- 可选 ----
     anchor: str | None = None
     source_path: str | None = None
+    # 项目材料专用。通用官方语料保持 None，避免把来源项目误作用户项目。
+    # 这些字段须进 SQLite 列：仅放 extra 会导致查询无法过滤、merge 会静默丢失。
+    project_id: str | None = None
+    module: str | None = None
+    symbol: str | None = None
+    cloud_generation_allowed: bool | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -107,6 +113,8 @@ class Chunk:
     def to_row(self) -> dict[str, Any]:
         d = asdict(self)
         d["title_path"] = " › ".join(self.title_path)
+        if d["cloud_generation_allowed"] is not None:
+            d["cloud_generation_allowed"] = int(d["cloud_generation_allowed"])
         d.pop("extra")
         return d
 
