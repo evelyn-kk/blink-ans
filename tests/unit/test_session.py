@@ -65,6 +65,20 @@ def test_independent_technical_question_is_not_followup():
     assert looks_like_followup("Kafka 幂等生产者怎么配置？") is False
 
 
+def test_generic_demonstrative_followed_by_new_topic_is_not_followup():
+    """CR-026 独立复现场景：裸的"这个"/"那个"后面直接跟一个全新的名词短语
+    （不是指向历史），整句其实是完整独立问题——不该被误判为追问。
+    """
+    assert looks_like_followup("这个 Spring Boot 应用启动为什么失败？") is False
+    assert looks_like_followup("这个 bug 怎么排查？") is False
+
+
+def test_generic_what_about_followed_by_new_topic_is_not_followup():
+    """CR-026 的一致性延伸：英文"what about"/"how about"是同一种结构性歧义
+    （标记词后直接跟全新名词短语），一并收紧。"""
+    assert looks_like_followup("What about caching the response with Redis?") is False
+
+
 # ---------- 简要结论派生（不额外调用模型） ----------
 
 def test_brief_conclusion_truncates_to_first_sentence():
@@ -81,10 +95,11 @@ def test_brief_conclusion_none_for_empty_answer():
 
 # ---------- 范围判定优先级链（architecture.md §3） ----------
 
-def _session(active_project_id=None, last_turn=None) -> SessionState:
+def _session(active_project_id=None, last_turn=None, active_version=None) -> SessionState:
     return SessionState(
         session_id="s1", language="zh",
         active_project_id=active_project_id, last_turn=last_turn,
+        active_version=active_version,
     )
 
 
@@ -195,6 +210,135 @@ def test_followup_widens_scope_when_tight_scope_insufficient(monkeypatch):
     assert widened is True  # 收紧范围判定为证据不足，触发放开
     assert req.module is None
     assert req.technology is None
+
+
+# ---------- CR-022：显式/活动版本必须真正进入检索过滤条件 ----------
+
+def test_continued_turn_falls_back_to_active_version_when_not_given():
+    """普通（非追问）turn 没有显式传版本时，应落回会话当前的活动版本，
+    而不是像旧实现那样直接丢弃、让 req.version 恒为 None。
+    """
+    session = _session(active_project_id="orders", active_version="v1")
+    req, resolved, _ = build_request_for_turn(
+        None, FakeEmbedder(), session,
+        question="怎么配置重试", project_id=None, technology=None,
+        module=None, symbol=None, version=None, new_topic=False, max_tokens=None,
+        cfg=CFG,
+    )
+    assert resolved.kind is TurnKind.PROJECT_CONTINUED
+    assert req.version == "v1"
+
+
+def test_explicit_version_overrides_active_version_for_continued_turn():
+    session = _session(active_project_id="orders", active_version="v1")
+    req, _, _ = build_request_for_turn(
+        None, FakeEmbedder(), session,
+        question="怎么配置重试", project_id=None, technology=None,
+        module=None, symbol=None, version="v2", new_topic=False, max_tokens=None,
+        cfg=CFG,
+    )
+    assert req.version == "v2"
+
+
+def test_project_switch_without_explicit_version_clears_old_active_version():
+    """切换项目时不回落到旧项目的活动版本——不同项目的版本号互不相干，
+    沿用旧版本只会带出错误的过滤条件。
+    """
+    session = _session(active_project_id="orders", active_version="v1")
+    req, resolved, _ = build_request_for_turn(
+        None, FakeEmbedder(), session,
+        question="怎么配置重试", project_id="checkout", technology=None,
+        module=None, symbol=None, version=None, new_topic=False, max_tokens=None,
+        cfg=CFG,
+    )
+    assert resolved.kind is TurnKind.PROJECT_EXPLICIT
+    assert req.version is None
+
+
+def test_project_switch_with_explicit_version_uses_it():
+    session = _session(active_project_id="orders", active_version="v1")
+    req, _, _ = build_request_for_turn(
+        None, FakeEmbedder(), session,
+        question="怎么配置重试", project_id="checkout", technology=None,
+        module=None, symbol=None, version="v9", new_topic=False, max_tokens=None,
+        cfg=CFG,
+    )
+    assert req.version == "v9"
+
+
+def test_followup_falls_back_to_active_version_when_not_given(monkeypatch):
+    last = TurnContext(
+        question="消费者为什么重复消费", entities={}, brief_conclusion="偏移量未提交。",
+        cited_chunk_ids=[],
+    )
+    session = _session(active_project_id="orders", active_version="v1", last_turn=last)
+
+    captured = {}
+
+    def fake_hybrid_search(store, query, vector, *, limit, candidates, **kwargs):
+        captured.update(kwargs)
+        return [hit(i=1, dist=0.6)]
+
+    monkeypatch.setattr("services.orchestrator.session.hybrid_search", fake_hybrid_search)
+    monkeypatch.setattr("services.orchestrator.session.hits_by_rowid", lambda *a, **kw: [])
+
+    req, _ = build_followup_request(None, FakeEmbedder(), session, "那要怎么验证", "zh", CFG)
+
+    assert req.version == "v1"
+    assert captured.get("version") == "v1"
+
+
+def test_followup_explicit_version_overrides_active_and_prior_turn_version(monkeypatch):
+    """CR-022 独立复现场景：上一轮版本是 v1，本轮追问显式传 version=v2，
+    必须真正体现在检索过滤条件与 AnswerRequest 里，而不是被忽略。
+    """
+    last = TurnContext(
+        question="消费者为什么重复消费",
+        entities={"version": "v1"}, brief_conclusion="偏移量未提交。", cited_chunk_ids=[],
+    )
+    session = _session(active_project_id="orders", active_version="v1", last_turn=last)
+
+    captured = {}
+
+    def fake_hybrid_search(store, query, vector, *, limit, candidates, **kwargs):
+        captured.update(kwargs)
+        return [hit(i=1, dist=0.6)]
+
+    monkeypatch.setattr("services.orchestrator.session.hybrid_search", fake_hybrid_search)
+    monkeypatch.setattr("services.orchestrator.session.hits_by_rowid", lambda *a, **kw: [])
+
+    req, resolved, _ = build_request_for_turn(
+        None, FakeEmbedder(), session,
+        question="那要怎么验证", project_id=None, technology=None,
+        module=None, symbol=None, version="v2", new_topic=False, max_tokens=None,
+        cfg=CFG,
+    )
+
+    assert resolved.kind is TurnKind.FOLLOWUP
+    assert req.version == "v2"
+    assert captured.get("version") == "v2"
+
+
+def test_stream_and_record_writes_resolved_version_back_to_session(monkeypatch):
+    """一轮结束后，会话的 active_version 必须跟着这一轮实际使用的版本更新——
+    包括"切换项目未带版本"时应清空，而不是残留旧项目的版本号。
+    """
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search",
+        lambda *a, **kw: [hit(i=1, dist=0.6, project_id="checkout")],
+    )
+    from tests.unit.test_answering import FakeEngine
+
+    session = _session(active_project_id="orders", active_version="v1")
+    req = AnswerRequest("怎么配置重试", project_id="checkout", version=None)
+    resolved = ResolvedTurn(TurnKind.PROJECT_EXPLICIT, "checkout", carry_forward=False)
+
+    router = FakeRouter(FakeEngine())
+    list(stream_and_record(
+        Orchestrator(None, FakeEmbedder(), router), req, session, resolved, "怎么配置重试",
+    ))
+
+    assert session.active_version is None
 
 
 # ---------- 一次完整追问：证据复用进 Orchestrator，且不泄漏历史全文 ----------

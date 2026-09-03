@@ -89,7 +89,9 @@ _MAX_PENDING = 64
 # 结果，供取流时更新对应会话。同样内存字典即可，不落盘，容量上限、超限淘汰。
 _sessions: dict[str, SessionState] = {}
 _MAX_SESSIONS = 64
-_pending_turns: dict[str, tuple[str, AnswerRequest, ResolvedTurn, str]] = {}
+# 元组最后一项是建轮时的 session.epoch 快照（CR-021）：取流前核对是否仍等于
+# 会话当前 epoch，会话被 clear() 过就会不等，届时拒绝这个轮次而不是执行它。
+_pending_turns: dict[str, tuple[str, AnswerRequest, ResolvedTurn, str, int]] = {}
 _MAX_PENDING_TURNS = 64
 
 
@@ -317,7 +319,7 @@ async def create_turn(session_id: str, body: TurnBody):
         cfg=_orchestrator.cfg,
     )
     tid = uuid.uuid4().hex[:16]
-    _pending_turns[tid] = (session_id, req, resolved, body.question)
+    _pending_turns[tid] = (session_id, req, resolved, body.question, session.epoch)
     return {
         "turn_id": tid,
         "stream_url": f"/v1/sessions/{session_id}/turns/{tid}/stream",
@@ -332,12 +334,17 @@ async def stream_turn(session_id: str, turn_id: str):
     pending = _pending_turns.pop(turn_id, None)
     if pending is None:
         raise HTTPException(404, "会话轮次不存在或已被消费")
-    sid, req, resolved, raw_question = pending
+    sid, req, resolved, raw_question, created_epoch = pending
     if sid != session_id:
         raise HTTPException(404, "会话轮次不存在或已被消费")
     session = _sessions.get(session_id)
     if session is None:
         raise HTTPException(404, "会话不存在或已过期")
+    if session.epoch != created_epoch:
+        # CR-021：这个轮次是在上一次 clear() 之前建的，携带的是清空前的会话
+        # 状态（比如旧项目的 extra_hit_rowids）。清空之后必须让它失效，
+        # 否则执行完还会把这份旧状态重新写回会话，等于撤销了这次清空。
+        raise HTTPException(409, "会话已被清空，此轮次已失效，请重新发起")
     if _orchestrator is None:
         raise HTTPException(503, "服务尚未就绪")
 

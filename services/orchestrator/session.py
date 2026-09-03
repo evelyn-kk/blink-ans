@@ -61,17 +61,27 @@ class SessionState:
     active_project_id: str | None = None
     active_version: str | None = None
     last_turn: TurnContext | None = None
+    # CR-021：`POST .../turns` 建好一轮（携带当时的会话状态构造出 AnswerRequest）
+    # 之后、`GET .../stream` 取走之前，会话可能被清空——那样一来这个已经构造好的
+    # 旧请求（可能带着旧项目的 extra_hit_rowids/project_id）仍会被取流执行，
+    # 执行完还会把旧状态重新写回会话，等于让"清空"形同虚设。每次 clear() 时
+    # 递增这个计数器，取流前核对建轮时捕获的 epoch 是否仍然等于当前 epoch，
+    # 不等就拒绝——比逐个从 `_pending_turns` 里删除更简单可靠，不用担心
+    # 清空、建轮两个动作在字典操作上的先后细节。
+    epoch: int = 0
 
     def clear(self) -> None:
         """清空会话上下文：保留 session_id 与 language，其余全部重置。
 
         scope.md：用户可随时清空会话上下文；清空后不得使用前一项目的材料——
         因此这里必须连 `last_turn`（含上一轮引用的块 rowid）一起清掉，
-        否则下一轮追问检索仍会把旧项目的块 id 传回 Orchestrator。
+        否则下一轮追问检索仍会把旧项目的块 id 传回 Orchestrator。`epoch` 递增
+        使清空之前建好、尚未取流的旧轮次在取流时被拒绝（CR-021）。
         """
         self.active_project_id = None
         self.active_version = None
         self.last_turn = None
+        self.epoch += 1
 
 
 # ---------------------------------------------------------------------------
@@ -92,15 +102,27 @@ class SessionState:
 # 但比"逢代词就当追问、把不相关的旧证据强行搭进这一轮"更安全：
 # 检索层面前者的代价是"检索范围稍宽、多花一次查询"，后者的代价是
 # "答案可能被上一轮无关的项目材料污染"——两害相权取其轻。
+#
+# CR-026：最初的列表里有"这个"/"那个"，同属这一类过于宽泛的指代词——
+# 独立复现"这个 Spring Boot 应用启动为什么失败？""这个 bug 怎么排查？"
+# 这类完整独立问题（指代词后面直接跟一个全新的名词短语，不指向历史）都会
+# 被误判为追问。这跟"它"/"this"/"it"被排除在外是同一个道理，已移除。
+# 英文的"what about"/"how about"结构上是同一种模式（标记词后直接跟全新
+# 名词短语也很常见，如"What about caching the response with Redis?"），
+# 为一致性一并移除，即使本轮没有对应的具体误判复现。
+# **残留风险（如实记录，未验证但推理上同样可能存在）**："这样"/"那样"
+# 单独出现在独立新问题开头时同样有一定误判空间（如"这样配置有什么风险"）——
+# 目前尚未复现出具体误判案例，暂时保留，后续如出现真实误判应参照同样的
+# 思路收紧或移除。
 _FOLLOWUP_MARKERS_ZH = (
-    "这个", "那个", "这样", "那样", "上面", "上述", "刚才", "刚刚",
+    "这样", "那样", "上面", "上述", "刚才", "刚刚",
     "该怎么", "继续", "然后呢", "接着", "那要怎么", "那怎么", "还有呢",
     "为什么呢",
 )
 _FOLLOWUP_MARKERS_EN = (
     "that approach", "this approach", "the above", "previous answer",
-    "previous step", "previously", "second one", "what about",
-    "how about", "why is that", "why does that", "and then",
+    "previous step", "previously", "second one",
+    "why is that", "why does that", "and then",
 )
 
 
@@ -188,6 +210,7 @@ def _enrich_question(question: str, brief_conclusion: str | None, language: Lang
 def build_followup_request(
     store: ChunkStore, embedder: Embedder, session: SessionState,
     question: str, language: Language, cfg: AnswerConfig,
+    body_version: str | None = None,
 ) -> tuple[AnswerRequest, bool]:
     """追问的检索范围与证据来源。
 
@@ -195,21 +218,28 @@ def build_followup_request(
     当作这一轮检索的过滤条件，并把上一轮引用过的块 rowid 一并带给 Orchestrator
     （见 AnswerRequest.extra_hit_rowids，Orchestrator.answer() 会把它们纳入候选）。
 
+    版本按 architecture.md §3 的优先级：本轮显式传入的 `body_version` 优先于
+    上一轮实体里记的版本，再优先于会话当前的活动版本（CR-022：显式版本此前
+    在追问分支被完全忽略，即便用户明确要求切到另一个版本也不生效）。
+
     必要时才放开：这里的预检索只用来判断"收紧后的范围是否大概率给不出足够证据"——
     真正的充分性判定与证据选取仍在 Orchestrator.answer() 里做一次（这里的判定
     只影响传给它的过滤条件，不重复生成流程）。放开限制**只丢弃 technology/
-    module/symbol**，绝不放开 project_id——切换/清空之外，追问不能突破项目边界。
+    module/symbol/version**，绝不放开 project_id——切换/清空之外，追问不能突破
+    项目边界。
     """
     last = session.last_turn
     assert last is not None
     vector = embedder.encode_one(question)
+
+    effective_version = body_version or last.entities.get("version") or session.active_version
 
     tight_kwargs: dict[str, str | None] = {
         "technology": last.entities.get("technology"),
         "project_id": session.active_project_id,
         "module": last.entities.get("module"),
         "symbol": last.entities.get("symbol"),
-        "version": last.entities.get("version"),
+        "version": effective_version,
     }
     prior_hits = hits_by_rowid(store, last.cited_chunk_ids, vector)
     tight_fresh = hybrid_search(
@@ -250,15 +280,28 @@ def build_request_for_turn(
     """
     resolved = resolve_turn(question, project_id, new_topic, session)
     if resolved.kind is TurnKind.FOLLOWUP:
-        req, widened = build_followup_request(store, embedder, session, question, session.language, cfg)
+        req, widened = build_followup_request(
+            store, embedder, session, question, session.language, cfg, body_version=version,
+        )
         if max_tokens is not None:
             req = replace(req, max_tokens=max_tokens)
         return req, resolved, widened
 
+    # 版本优先级（architecture.md §3）：本轮显式传入 > 会话当前活动版本；
+    # 显式切换项目（PROJECT_EXPLICIT）且未显式给版本时不回落到旧项目的活动
+    # 版本——不同项目的版本编号互不相干，沿用旧版本号只会带出错误的过滤条件
+    # （CR-022）。
+    if version is not None:
+        effective_version = version
+    elif resolved.kind is TurnKind.PROJECT_EXPLICIT:
+        effective_version = None
+    else:
+        effective_version = session.active_version
+
     req = AnswerRequest(
         question=question, language=session.language,
         technology=technology, project_id=resolved.project_id,
-        module=module, symbol=symbol, version=version, max_tokens=max_tokens,
+        module=module, symbol=symbol, version=effective_version, max_tokens=max_tokens,
     )
     return req, resolved, False
 
@@ -340,8 +383,11 @@ def stream_and_record(
     open_issue = verdict_level if verdict_level != "sufficient" else None
 
     session.active_project_id = resolved.project_id
-    if req.version:
-        session.active_version = req.version
+    # req.version 已经在 build_request_for_turn()/build_followup_request() 里按
+    # 正确优先级解析过（显式 > 会话活动版本，切项目且未显式给版本时为 None）——
+    # 这里无条件写回，让"切换项目未带版本"能正确清空旧版本（CR-022），而不是
+    # 像旧代码那样只在 truthy 时才更新、导致旧版本号残留。
+    session.active_version = req.version
     session.last_turn = TurnContext(
         question=raw_question, entities=entities,
         brief_conclusion=brief_conclusion(full_answer),

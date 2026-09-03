@@ -7,7 +7,8 @@
    prompt cache，同样不占用这次请求的"证据预算"额度，但云端 prefill 本身
    不受本机算力线性约束（architecture.md §6.6 第 1 条），因此本地/云端两条
    路径的证据预算不再共用一个数字——见 `AnswerConfig.evidence_budget` /
-   `evidence_budget_cloud` 与 `Orchestrator._evidence_budget()`。
+   `evidence_budget_cloud` 与 `Orchestrator._select_evidence_and_cloud_allowed()`
+   （CR-025：按实际选中的证据判定 cloud_allowed，不是全部检索候选）。
 
 2. **"证据不足"不能靠空结果判定**（I1）。FTS 用 OR 查询以容忍语音转写的错字，
    代价是几乎任何中文提问都会返回结果。必须用相关性阈值判定。
@@ -33,8 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.prompts.answer import (  # noqa: E402
-    DECLINE_TOKEN, SUPPORTED_LANGUAGES, Evidence, Language, insufficient_prompt,
-    render_user_message, system_prompt, template_version,
+    DECLINE_TOKEN, SUPPORTED_LANGUAGES, Evidence, Language, fallback_message,
+    insufficient_prompt, render_user_message, system_prompt, template_version,
 )
 from packages.schemas.chunk import estimate_tokens  # noqa: E402
 from services.inference.router import Router  # noqa: E402
@@ -366,25 +367,58 @@ class Orchestrator:
         self.router = router
         self.cfg = config or AnswerConfig()
 
-    def _evidence_budget(self, cloud_allowed: bool) -> int:
-        """按这次请求大概率会走的路径选证据预算档位。
-
-        与 `Router.generate()` 内部判断 `use_cloud` 的三个条件保持一致
-        （见 `services/inference/router.py`）——这里只读属性，不产生副作用，
-        为的是"这次多半走云端"这个预判要在选证据、构建 prompt 之前就做出来，
-        证据集合定型之后才真正开始生成，不可能等生成开始了再回头改证据。
-
-        真正走到本地兜底、却仍用了云端档预算的少数情形（比如判断时云端可用，
-        真正发请求时网络在最后一刻失败）是接受的降级：本地兜底路径本就不再是
-        产品主 SLA（architecture.md §6.6 第 4 条），慢一次不算错，只是不达标。
+    def _router_might_use_cloud(self) -> bool:
+        """路由层面这次请求是否**可能**走云端——只看路由自身状态（离线/凭据/
+        可用性），不看证据内容。与 `Router.generate()` 判断 `use_cloud` 的
+        对应三个条件保持一致（见 `services/inference/router.py`），少了
+        `cloud_allowed` 这一项——它现在由证据内容决定，属于下一步
+        `_select_evidence_and_cloud_allowed()` 的职责，不在这里预判。
         """
-        will_use_cloud = (
+        return (
             not self.router.offline
-            and cloud_allowed
             and self.router.cloud is not None
             and self.router.cloud.available()
         )
-        return self.cfg.evidence_budget_cloud if will_use_cloud else self.cfg.evidence_budget
+
+    def _select_evidence_and_cloud_allowed(
+        self, hits: list[Hit],
+    ) -> tuple[list[Evidence], bool]:
+        """选证据，并按**实际选中的证据**判定这一轮云端是否允许（CR-025 修复）。
+
+        旧实现按全部检索候选（`hits`，含未被选中的条目）判断 cloud_allowed，
+        导致候选里恰好混进一条禁云项目块、但它根本没进最终证据时，也会白白
+        强制走本地——那条材料从未真正参与这次请求（既没被选中也不会被发送），
+        不适用 architecture.md §8"项目材料不得出网"的约束。
+
+        路由层面已经确定不会走云端（离线/未配置凭据/云端不可用）时，直接用
+        本地（严格）预算选——没必要先用云端（宽松）预算选出超过本地 prefill
+        能力的证据，那样会让本地生成显著超出 architecture.md §6.5 的本地子
+        预算（3.0s，对应约 879 token 上限）。这种情形下 cloud_allowed 的返回值
+        仍然按证据内容如实计算（供 `done` 事件/日志观测语义一致），只是不影响
+        这次已经确定要走本地的预算选择。
+
+        路由层面云端可能可用时，先按云端（宽松）预算选一次——云端是默认路径，
+        用它的预算不会误伤本可以走云端的证据。若最终选中的证据里没有禁云
+        项目块，直接采用这次选择结果；若含禁云块，这一轮必须走本地，本地
+        预算更紧，需要重选一次。
+        """
+        might_use_cloud = self._router_might_use_cloud()
+        primary_budget = (
+            self.cfg.evidence_budget_cloud if might_use_cloud else self.cfg.evidence_budget
+        )
+        cfg = replace(self.cfg, evidence_budget=primary_budget)
+        evidence = select_evidence(hits, cfg, self.router.count_tokens)
+
+        selected = {e.rowid for e in evidence}
+        cloud_allowed = not any(
+            h.cloud_generation_allowed is False for h in hits if h.rowid in selected
+        )
+
+        if might_use_cloud and not cloud_allowed:
+            local_cfg = replace(self.cfg, evidence_budget=self.cfg.evidence_budget)
+            evidence = select_evidence(hits, local_cfg, self.router.count_tokens)
+
+        return evidence, cloud_allowed
 
     def answer(self, req: AnswerRequest) -> Iterator[dict]:
         """产出事件流。事件类型在 I2 定死，后续迭代只加不改语义。"""
@@ -425,11 +459,11 @@ class Orchestrator:
             seen = {h.rowid for h in hits}
             hits = [h for h in extra if h.rowid not in seen] + hits
 
-        # 路由输入之一：本轮命中证据里只要有一条项目材料显式禁止云端，
-        # 就必须强制走本地——检索候选里未被最终选为证据的条目也算数（保守判断，
-        # 见 architecture.md §8 数据边界：项目禁止云端时任何项目材料不得出网，
-        # 而候选阶段这些材料已经进了这次请求的处理过程）。
-        cloud_allowed = not any(h.cloud_generation_allowed is False for h in hits)
+        # 判定"证据不足"分支要用的 cloud_allowed：这个分支不发送任何证据正文
+        # （只发问题本身），无法按"最终证据"判定，因此仍按候选是否属于禁云项目
+        # 保守判断——候选已经过 project_id 过滤，能代表这一轮问题的项目归属
+        # （CR-025 只纠正"候选未被选中也强制本地"这一点，不改这个分支）。
+        candidates_cloud_allowed = not any(h.cloud_generation_allowed is False for h in hits)
 
         verdict = assess(hits, self.cfg)
         retrieval_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -452,15 +486,16 @@ class Orchestrator:
             yield from self._generate(
                 req.question, max_tokens=220,
                 system_override=insufficient_prompt(req.language),
-                started=t0, sufficiency=verdict.level, cloud_allowed=cloud_allowed,
+                started=t0, sufficiency=verdict.level, cloud_allowed=candidates_cloud_allowed,
             )
             yield {"type": "sources", "items": []}
             return
 
-        # 证据预算按这次请求实际会走哪条路径分档（本地严格 / 云端宽松，
-        # 见 AnswerConfig.evidence_budget / evidence_budget_cloud 的注释）。
-        budget_cfg = replace(self.cfg, evidence_budget=self._evidence_budget(cloud_allowed))
-        evidence = select_evidence(hits, budget_cfg, self.router.count_tokens)
+        # 证据预算按这次请求实际会走哪条路径分档（本地严格 / 云端宽松，见
+        # AnswerConfig.evidence_budget / evidence_budget_cloud 的注释）；
+        # cloud_allowed 按**实际选中的证据**重新判定，不再沿用候选阶段的
+        # candidates_cloud_allowed（CR-025：候选里未被选中的禁云块不该强制本地）。
+        evidence, cloud_allowed = self._select_evidence_and_cloud_allowed(hits)
         if not evidence:
             # 命中了但每一条都超出预算——属于切块异常，不应静默降级为无证据作答
             yield {"type": "error", "stage": "context",
@@ -486,6 +521,7 @@ class Orchestrator:
             user_msg, max_tokens=req.max_tokens or self.cfg.max_tokens,
             started=t0, sufficiency=verdict.level, evidence_count=len(evidence),
             cloud_allowed=cloud_allowed, system_override=override,
+            evidence=evidence, language=req.language,
         ):
             if ev["type"] == "answer_delta":
                 answer += ev["text"]
@@ -512,6 +548,7 @@ class Orchestrator:
         self, content: str, *, max_tokens: int, started: float,
         sufficiency: Sufficiency, system_override: str | None = None,
         evidence_count: int = 0, cloud_allowed: bool = True,
+        evidence: list[Evidence] | None = None, language: Language = "zh",
     ) -> Iterator[dict]:
         text = ""
         try:
@@ -525,6 +562,8 @@ class Orchestrator:
                 elif ev["type"] == "error":
                     # 云端已吐出部分正文后失败：Router 不会拼接本地续写
                     # （见 router.py 模块docstring），这里原样透传让请求干净结束。
+                    # 这种情况已经流出去过正文，不属于 CR-024 的"双后端都没有
+                    # 任何产出"场景，不触发下面的最小可用答案兜底。
                     yield ev
                 elif ev["type"] == "done":
                     cited = citation_coverage(text, evidence_count)
@@ -553,4 +592,29 @@ class Orchestrator:
                         "total_s": round(time.perf_counter() - started, 3),
                     }
         except Exception as exc:
-            yield {"type": "error", "stage": "generation", "message": f"{type(exc).__name__}: {exc}"}
+            if not evidence:
+                # 没有证据可列——这是"证据不足"分支（本身就不发证据）的失败，
+                # 或者证据选取阶段就出了问题；此时"要点+来源"里的"来源"也
+                # 拿不出来，只能报错，没有更好的最小可用答案可给。
+                yield {"type": "error", "stage": "generation", "message": f"{type(exc).__name__}: {exc}"}
+                return
+            # CR-024（architecture.md §6.4）：云端与本地都失败，且都没有吐出过
+            # 任何正文——按最终降级要求返回"要点+来源"的最小可用答案，而不是
+            # 只报一个错误让用户两手空空。不调用任何模型：`fallback_message()`
+            # 是纯拼接，直接把已经检索到的证据编号/来源列出来。
+            fallback = fallback_message(evidence, language)
+            yield {"type": "answer_delta", "text": fallback}
+            yield {
+                "type": "done",
+                "served_by": "none",
+                "sufficiency": sufficiency.value,
+                "template_version": template_version(),
+                "ttft_s": None, "ttft_over_budget": True,
+                "prompt_tokens": None, "prefilled_tokens": None, "prefix_reused": False,
+                "decode_tps": None,
+                "cited_evidence": citation_coverage(fallback, len(evidence)),
+                "evidence_count": len(evidence),
+                "total_s": round(time.perf_counter() - started, 3),
+                "fallback": True,
+                "fallback_reason": f"{type(exc).__name__}: {exc}",
+            }
