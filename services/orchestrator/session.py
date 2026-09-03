@@ -69,6 +69,15 @@ class SessionState:
     # 不等就拒绝——比逐个从 `_pending_turns` 里删除更简单可靠，不用担心
     # 清空、建轮两个动作在字典操作上的先后细节。
     epoch: int = 0
+    # CR-030：epoch 只在 clear() 时变化，挡不住同一个 epoch 内、多个已建 turn
+    # 乱序完成的情形——真实 SSE 流耗时不同，先建的 turn 完全可能比后建的 turn
+    # 晚完成。`turn_seq` 每次建轮时递增一次，作为这一轮的"版本号"；
+    # `last_completed_seq` 记录目前已经写回过状态的最高版本号。写回前只要
+    # 判定"我的版本号是不是比已经写回过的更新"，就能防止一个旧轮次在新轮次
+    # 之后完成时把会话状态回滚——它仍然会把答案正常流给客户端，只是不再
+    # 覆盖会话状态（见 stream_and_record()）。
+    turn_seq: int = 0
+    last_completed_seq: int = 0
 
     def clear(self) -> None:
         """清空会话上下文：保留 session_id 与 language，其余全部重置。
@@ -330,7 +339,7 @@ def brief_conclusion(answer_text: str, limit: int = 80) -> str | None:
 
 def stream_and_record(
     orchestrator: Orchestrator, req: AnswerRequest, session: SessionState,
-    resolved: ResolvedTurn, raw_question: str,
+    resolved: ResolvedTurn, raw_question: str, turn_seq: int,
 ) -> Iterator[dict]:
     """转发 Orchestrator.answer() 的事件流给客户端；流结束后用这一轮已经
     产出的信息（技术域/项目/模块/符号/命中的关键词、答案正文、实际引用到的
@@ -338,6 +347,15 @@ def stream_and_record(
 
     出错时不更新会话状态：保留上一轮仍然有效的上下文，好过用一次失败的
     请求把它冲掉。
+
+    `turn_seq`（CR-030）：调用方（`apps/gateway/main.py` 的 `create_turn()`）
+    在建轮时递增并捕获的单调序号。同一个 epoch 内可以同时存在多个已建但未
+    取流的轮次，真实 SSE 流耗时不同、完成顺序不保证与创建顺序一致——如果
+    先建的轮次比后建的轮次更晚完成，它的写回不能覆盖后建轮次已经写回的
+    更新状态，否则会话会诡异地"回滚"到更旧的项目/版本/追问上下文。
+    答案仍然会正常流给客户端（下面的 `yield ev` 不受影响），只有"要不要
+    覆盖会话状态"这一步受 `turn_seq` 是否比 `session.last_completed_seq`
+    更新来决定。
     """
     answer_parts: list[str] = []
     cited_indices: list[int] = []
@@ -361,6 +379,10 @@ def stream_and_record(
 
     if had_error:
         return
+    if turn_seq <= session.last_completed_seq:
+        # 一个更新的轮次已经先我一步完成并写回过会话状态——我这次的结果对
+        # 客户端仍然有效（已经流完了），但不能拿旧状态盖掉新状态。
+        return
 
     full_answer = "".join(answer_parts)
     cited_chunk_ids = [
@@ -382,6 +404,9 @@ def stream_and_record(
     }
     open_issue = verdict_level if verdict_level != "sufficient" else None
 
+    # CR-030：这一轮确实要写回了，把它标记为"目前写回过的最新版本"，
+    # 挡住比它更旧（seq 更小）的轮次之后再来覆盖。
+    session.last_completed_seq = turn_seq
     session.active_project_id = resolved.project_id
     # req.version 已经在 build_request_for_turn()/build_followup_request() 里按
     # 正确优先级解析过（显式 > 会话活动版本，切项目且未显式给版本时为 None）——

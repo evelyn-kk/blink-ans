@@ -89,9 +89,10 @@ _MAX_PENDING = 64
 # 结果，供取流时更新对应会话。同样内存字典即可，不落盘，容量上限、超限淘汰。
 _sessions: dict[str, SessionState] = {}
 _MAX_SESSIONS = 64
-# 元组最后一项是建轮时的 session.epoch 快照（CR-021）：取流前核对是否仍等于
-# 会话当前 epoch，会话被 clear() 过就会不等，届时拒绝这个轮次而不是执行它。
-_pending_turns: dict[str, tuple[str, AnswerRequest, ResolvedTurn, str, int]] = {}
+# 元组最后两项分别是建轮时的 session.epoch 快照（CR-021：取流前核对是否仍等于
+# 会话当前 epoch，会话被 clear() 过就会不等，届时拒绝这个轮次而不是执行它）与
+# session.turn_seq 快照（CR-030：乱序完成时不让旧轮次的写回盖掉新轮次的状态）。
+_pending_turns: dict[str, tuple[str, AnswerRequest, ResolvedTurn, str, int, int]] = {}
 _MAX_PENDING_TURNS = 64
 
 
@@ -368,7 +369,11 @@ async def create_turn(session_id: str, body: TurnBody):
         cfg=_orchestrator.cfg,
     )
     tid = uuid.uuid4().hex[:16]
-    _pending_turns[tid] = (session_id, req, resolved, body.question, session.epoch)
+    # CR-030：每建一轮就递增一次会话的单调序号，捕获成这一轮的版本号——
+    # 取流时凭它判断"有没有更新的轮次已经先我一步完成并写回过"，见
+    # services/orchestrator/session.stream_and_record() 的说明。
+    session.turn_seq += 1
+    _pending_turns[tid] = (session_id, req, resolved, body.question, session.epoch, session.turn_seq)
     return {
         "turn_id": tid,
         "stream_url": f"/v1/sessions/{session_id}/turns/{tid}/stream",
@@ -383,7 +388,7 @@ async def stream_turn(session_id: str, turn_id: str):
     pending = _pending_turns.pop(turn_id, None)
     if pending is None:
         raise HTTPException(404, "会话轮次不存在或已被消费")
-    sid, req, resolved, raw_question, created_epoch = pending
+    sid, req, resolved, raw_question, created_epoch, turn_seq = pending
     if sid != session_id:
         raise HTTPException(404, "会话轮次不存在或已被消费")
     session = _sessions.get(session_id)
@@ -398,7 +403,7 @@ async def stream_turn(session_id: str, turn_id: str):
         raise HTTPException(503, "服务尚未就绪")
 
     return StreamingResponse(
-        sse_stream(stream_and_record(_orchestrator, req, session, resolved, raw_question)),
+        sse_stream(stream_and_record(_orchestrator, req, session, resolved, raw_question, turn_seq)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

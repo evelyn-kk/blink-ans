@@ -417,6 +417,15 @@ class Orchestrator:
         if might_use_cloud and not cloud_allowed:
             local_cfg = replace(self.cfg, evidence_budget=self.cfg.evidence_budget)
             evidence = select_evidence(hits, local_cfg, self.router.count_tokens)
+            # CR-029：重选后必须按**这一次真正返回的证据**重新判定，不能继续沿用
+            # 触发重选那一次（云端预算）算出的 cloud_allowed=False。本地预算更紧，
+            # 重选出的集合完全可能已经不含禁云块——这种情况下最终要发的证据其实
+            # 可以走云端，继续返回 False 会违反"按实际选中证据判定"这条契约本身
+            # （CR-025 修的就是这件事，这里是同一个原则在重选分支上没有贯彻到底）。
+            selected = {e.rowid for e in evidence}
+            cloud_allowed = not any(
+                h.cloud_generation_allowed is False for h in hits if h.rowid in selected
+            )
 
         return evidence, cloud_allowed
 
