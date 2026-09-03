@@ -101,7 +101,10 @@ async def healthz():
 class AskBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     technology: str | None = None
-    project: str | None = None
+    project: str | None = Field(default=None, description="外部来源项目 ID，例如 kafka")
+    project_id: str | None = Field(default=None, description="用户项目 ID；严格限制项目材料")
+    module: str | None = Field(default=None, description="用户项目模块精确过滤")
+    symbol: str | None = Field(default=None, description="用户项目符号精确过滤")
     max_tokens: int | None = Field(default=None, ge=32, le=2048)
 
 
@@ -117,7 +120,8 @@ async def create_answer(body: AskBody):
     aid = uuid.uuid4().hex[:16]
     _pending[aid] = AnswerRequest(
         question=body.question, technology=body.technology,
-        project=body.project, max_tokens=body.max_tokens,
+        project=body.project, project_id=body.project_id,
+        module=body.module, symbol=body.symbol, max_tokens=body.max_tokens,
     )
     return {"answer_id": aid, "stream_url": f"/v1/answers/{aid}/stream"}
 

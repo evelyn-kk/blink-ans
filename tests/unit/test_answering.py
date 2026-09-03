@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.orchestrator.answering import (  # noqa: E402
-    AnswerConfig, Sufficiency, assess, citation_coverage, select_evidence,
+    AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, assess, citation_coverage, select_evidence,
 )
 from services.retrieval.search import Hit  # noqa: E402
 
@@ -127,6 +127,36 @@ def test_citation_coverage_empty_when_no_evidence():
 def test_uncited_answer_reports_zero():
     """无引用的技术论断无法追溯，对本产品等同于不可用，必须能被观测到。"""
     assert citation_coverage("结论：应当调大线程池。", 3) == []
+
+
+def test_answering_forwards_project_boundary_to_both_retrieval_paths(monkeypatch):
+    """T-103：HTTP/编排层不能在传递过程中丢掉项目隔离条件。"""
+    captured = {}
+
+    def fake_search(*_args, **kwargs):
+        captured.update(kwargs)
+        return [hit()]
+
+    class FakeEmbedder:
+        def encode_one(self, _question):
+            return [0.0]
+
+    class FakeEngine:
+        count_tokens = staticmethod(lambda text: len(text) // 4)
+
+        def stream(self, *_args, **_kwargs):
+            yield {"type": "delta", "text": "答案 [1]"}
+            yield {"type": "done", "ttft_s": 0.1, "prompt_tokens": 10,
+                   "prefilled_tokens": 10, "prefix_reused": True, "decode_tps": 20.0}
+
+    monkeypatch.setattr("services.orchestrator.answering.hybrid_search", fake_search)
+    events = list(Orchestrator(None, FakeEmbedder(), FakeEngine()).answer(AnswerRequest(
+        "怎么预留库存", project_id="orders", module="checkout", symbol="reserve_stock",
+    )))
+    assert any(e["type"] == "sources" for e in events)
+    assert {k: captured[k] for k in ("project_id", "module", "symbol")} == {
+        "project_id": "orders", "module": "checkout", "symbol": "reserve_stock",
+    }
 
 
 # ---------- CR-002: 未加载时的错误路径不依赖 MLX ----------
