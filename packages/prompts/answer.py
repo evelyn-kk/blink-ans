@@ -195,6 +195,27 @@ def render_user_message(
     return f"{evidence_label}\n{render_evidence(items)}\n\n{question_label}{question}"
 
 
+_FALLBACK_HEADER: dict[Language, str] = {
+    "zh": "生成暂时不可用（云端与本地均失败），以下是本次检索到的相关证据来源：",
+    "en": "Generation is temporarily unavailable (both cloud and local backends failed). "
+          "Here are the retrieved sources that may be relevant:",
+}
+
+
+def fallback_message(items: list[Evidence], language: Language = "zh") -> str:
+    """CR-024：云端与本地生成都失败时的最小可用答案——不调用任何模型，纯拼接。
+
+    architecture.md §6.4："云端与本地仍失败则返回'要点+来源'的最小可用答案"。
+    这里没有模型可用来提炼"要点"，只能把已经检索到的证据原样列出来（带
+    `[N]` 编号，与 `sources` 事件的 `index` 对应，客户端可以互相关联）——
+    比一个空的错误提示更有用：用户至少能看到问题可能与哪些资料相关，
+    自己点进去核实，而不是两手空空重试。
+    """
+    header = _FALLBACK_HEADER[_check_language(language)]
+    bullets = "\n".join(f"[{e.index}] {e.citation}" for e in items)
+    return f"{header}\n{bullets}" if bullets else header
+
+
 def template_version() -> str:
     """提示词内容哈希。换了任一语言的任一份提示词都要能在评测报告里区分开。"""
     blob = "\x00".join([

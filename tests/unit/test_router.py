@@ -135,6 +135,24 @@ def test_cloud_midstream_failure_does_not_splice_local_continuation():
     assert not any(e["type"] == "done" for e in events)
 
 
+def test_empty_text_delta_before_failure_still_falls_back_to_local():
+    """CR-023：空文本 delta（GenerationBackend 契约允许）不算"已经吐出正文"。
+
+    用户什么都没看到时失败，仍应能安全切本地重来一遍——不应该被误判为
+    "已经吐出正文、不能拼接"而直接吐 error、放弃本地降级。
+    """
+    cloud = ScriptedBackend("claude", [{"type": "delta", "text": ""}, RuntimeError])
+    local = ScriptedBackend("local", [{"type": "delta", "text": "本地答案"}, _done()])
+    router = Router(local, cloud)
+
+    events = list(router.generate("问题", max_tokens=100))
+
+    assert local.call_count == 1
+    assert not any(e["type"] == "error" for e in events)
+    done = next(e for e in events if e["type"] == "done")
+    assert done["served_by"] == "local"
+
+
 # ---------- 强制本地的两个触发条件 ----------
 
 def test_cloud_generation_allowed_false_forces_local_even_if_cloud_available():

@@ -393,35 +393,30 @@ class OfflineRouter(FakeRouter):
         return len(text) // 4
 
 
-def test_evidence_budget_prefers_cloud_when_cloud_will_serve():
+def test_router_might_use_cloud_true_when_cloud_available():
     orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=FakeCloudBackend()))
-    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget_cloud
+    assert orch._router_might_use_cloud() is True
 
 
-def test_evidence_budget_falls_back_to_local_when_offline():
+def test_router_might_use_cloud_false_when_offline():
     orch = Orchestrator(
         None, FakeEmbedder(), OfflineRouter(offline=True, cloud=FakeCloudBackend())
     )
-    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget
+    assert orch._router_might_use_cloud() is False
 
 
-def test_evidence_budget_falls_back_to_local_when_project_bans_cloud():
-    orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=FakeCloudBackend()))
-    assert orch._evidence_budget(cloud_allowed=False) == orch.cfg.evidence_budget
-
-
-def test_evidence_budget_falls_back_to_local_when_no_cloud_backend_configured():
+def test_router_might_use_cloud_false_when_no_cloud_backend_configured():
     orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=None))
-    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget
+    assert orch._router_might_use_cloud() is False
 
 
-def test_evidence_budget_falls_back_to_local_when_cloud_unavailable():
+def test_router_might_use_cloud_false_when_cloud_unavailable():
     class UnavailableCloud(FakeCloudBackend):
         def available(self) -> bool:
             return False
 
     orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=UnavailableCloud()))
-    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget
+    assert orch._router_might_use_cloud() is False
 
 
 def test_cloud_and_local_evidence_budgets_are_distinct_and_ordered():
@@ -430,6 +425,154 @@ def test_cloud_and_local_evidence_budgets_are_distinct_and_ordered():
     """
     cfg = AnswerConfig()
     assert cfg.evidence_budget_cloud > cfg.evidence_budget
+
+
+# ---------- CR-025：cloud_allowed 按实际选中的证据判定，不是全部候选 ----------
+
+class CostRouter(OfflineRouter):
+    """按 `hit.text -> token_estimate` 的映射精确控制每条候选的"真实" token
+    成本，而不是依赖 `len(text)//4`（`hit()` 的 text 与 `tokens=` 参数无关，
+    真实成本必须能被测试精确控制才能断言预算边界）。
+    """
+
+    def __init__(self, hits: list[Hit], **kw):
+        super().__init__(**kw)
+        self._costs = {h.text: h.token_estimate for h in hits}
+
+    def count_tokens(self, text):
+        return self._costs[text]
+
+
+def test_select_evidence_uses_cloud_budget_and_allows_cloud_when_nothing_selected_is_banned():
+    hits = [hit(i=1, score=0.05, tokens=100)]
+    orch = Orchestrator(
+        None, FakeEmbedder(), CostRouter(hits, cloud=FakeCloudBackend()),
+    )
+    evidence, cloud_allowed = orch._select_evidence_and_cloud_allowed(hits)
+    assert cloud_allowed is True
+    assert len(evidence) == 1
+
+
+def test_select_evidence_forces_local_budget_when_selected_evidence_is_banned():
+    """唯一候选就是禁云块——它必然被选中，必须强制本地并使用本地预算。"""
+    banned = hit(i=1, score=0.05, tokens=100)
+    banned.cloud_generation_allowed = False
+    orch = Orchestrator(
+        None, FakeEmbedder(), CostRouter([banned], cloud=FakeCloudBackend()),
+    )
+
+    evidence, cloud_allowed = orch._select_evidence_and_cloud_allowed([banned])
+
+    assert cloud_allowed is False
+    assert len(evidence) == 1
+
+
+def test_candidate_banned_hit_not_selected_as_evidence_does_not_force_local():
+    """CR-025 判别性场景：候选里有一条禁云块，但它分数最低、超出
+    `max_evidence` 条数上限，从未被选为最终证据——不该因此强制本地。
+
+    旧实现（按全部候选判断）会在这里错误地把 cloud_allowed 判成 False；
+    修复后的实现只看实际选中的证据，这条从未参与选择的禁云块不该影响判定。
+    """
+    cfg = AnswerConfig(max_evidence=5, evidence_budget=650, evidence_budget_cloud=3200)
+    allowed_hits = [hit(i=i, score=1.0 - i * 0.01, tokens=50) for i in range(1, 6)]
+    banned_but_unselected = hit(i=6, score=0.01, tokens=50)  # 分数最低，且第 6 条超出 max_evidence
+    banned_but_unselected.cloud_generation_allowed = False
+    hits = allowed_hits + [banned_but_unselected]
+
+    orch = Orchestrator(
+        None, FakeEmbedder(), CostRouter(hits, cloud=FakeCloudBackend()), config=cfg,
+    )
+    evidence, cloud_allowed = orch._select_evidence_and_cloud_allowed(hits)
+
+    assert len(evidence) == 5
+    assert 6 not in {e.rowid for e in evidence}
+    assert cloud_allowed is True
+
+
+def test_select_evidence_skips_cloud_budget_reselect_when_router_cannot_use_cloud():
+    """路由层面已经确定走本地（离线）时，直接用本地预算选，不要先按云端
+    预算选出超过本地 prefill 能力的证据——即使证据本身没有禁云限制。
+    """
+    cfg = AnswerConfig(max_evidence=5, evidence_budget=100, evidence_budget_cloud=3200)
+    # 单条 200 token：超过本地预算(100)，若错误地按云端预算(3200)选中就会超本地预算。
+    hits = [hit(i=1, score=1.0, tokens=200)]
+    orch = Orchestrator(
+        None, FakeEmbedder(),
+        CostRouter(hits, offline=True, cloud=FakeCloudBackend()), config=cfg,
+    )
+
+    evidence, cloud_allowed = orch._select_evidence_and_cloud_allowed(hits)
+
+    assert evidence == []  # 唯一候选超出本地预算，选不出证据——不会误用云端预算硬塞进去
+    assert cloud_allowed is True  # 证据内容本身不禁云，只是路由层面已经不会走云端
+
+
+# ---------- CR-024：双后端都失败时的"要点+来源"最小可用答案 ----------
+
+class BothBackendsFailRouter(FakeRouter):
+    """模拟云端与本地都已耗尽（Router 内部把最终失败原样抛出）。"""
+
+    def generate(self, content, *, max_tokens, system_override=None, cloud_allowed=True):
+        raise RuntimeError("both backends exhausted")
+        yield  # pragma: no cover — 让这个方法仍是生成器，便于 for-in 调用形态一致
+
+
+def test_double_backend_failure_yields_deterministic_fallback_with_sources(monkeypatch):
+    """architecture.md §6.4：云端与本地仍失败则返回"要点+来源"的最小可用答案，
+    不是一个只有 error、没有任何可用内容的空响应。
+    """
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit(i=1, dist=0.6)]
+    )
+    events = list(Orchestrator(None, FakeEmbedder(), BothBackendsFailRouter(FakeEngine()))
+                  .answer(AnswerRequest("怎么预留库存")))
+
+    assert not any(e["type"] == "error" for e in events)  # 不是纯错误，有可用内容
+    delta_text = "".join(e["text"] for e in events if e["type"] == "answer_delta")
+    assert "[1]" in delta_text  # 证据编号，与 sources 事件的 index 对应
+
+    done = next(e for e in events if e["type"] == "done")
+    assert done["served_by"] == "none"
+    assert done.get("fallback") is True
+    assert "both backends exhausted" in done["fallback_reason"]
+
+    sources = next(e for e in events if e["type"] == "sources")
+    assert len(sources["items"]) == 1  # 真实证据来源仍然完整展示，不是空列表
+
+
+def test_double_backend_failure_with_no_evidence_still_errors():
+    """"证据不足"分支本身就没有证据可列——没有"来源"可给时没有更好的最小可用
+    答案，只能报错，这与"有证据但生成失败"的场景不同，不应该混为一谈。
+    """
+    events = list(Orchestrator(None, FakeEmbedder(), BothBackendsFailRouter(FakeEngine()))
+                  ._generate(
+        "问题", max_tokens=100, started=0.0, sufficiency=Sufficiency.INSUFFICIENT,
+    ))
+    assert len(events) == 1
+    assert events[0]["type"] == "error"
+
+
+def test_midstream_cloud_failure_is_not_treated_as_double_backend_failure(monkeypatch):
+    """已经吐出过部分正文的云端中途失败（T-028 既有场景）与 CR-024 的
+    "双后端全无产出"是两回事——前者已经在 Router 里处理成 error 事件转发，
+    不应该在这里被 evidence 触发再包一层最小可用答案，那样才是真的拼接。
+    """
+    class MidstreamFailRouter(FakeRouter):
+        def generate(self, content, *, max_tokens, system_override=None, cloud_allowed=True):
+            yield {"type": "delta", "text": "云端开了个头"}
+            yield {"type": "error", "stage": "generation_cloud_midstream", "message": "boom"}
+
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit(i=1, dist=0.6)]
+    )
+    events = list(Orchestrator(None, FakeEmbedder(), MidstreamFailRouter(FakeEngine()))
+                  .answer(AnswerRequest("怎么预留库存")))
+
+    deltas = [e["text"] for e in events if e["type"] == "answer_delta"]
+    assert deltas == ["云端开了个头"]  # 没有被最小可用答案的文本追加在后面
+    assert any(e["type"] == "error" and e["stage"] == "generation_cloud_midstream" for e in events)
+    assert not any(e["type"] == "done" for e in events)
 
 
 # ---------- CR-002: 未加载时的错误路径不依赖 MLX ----------

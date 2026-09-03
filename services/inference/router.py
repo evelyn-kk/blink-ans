@@ -89,7 +89,9 @@ class Router:
             for ev in self.cloud.stream(
                 user_content, max_tokens=max_tokens, system_override=system_override
             ):
-                if ev["type"] == "delta":
+                if ev["type"] == "delta" and ev.get("text"):
+                    # 空文本 delta（`GenerationBackend` 契约允许）不算"已经吐出正文"——
+                    # 用户什么都没看到，此时失败仍应能安全切本地重来一遍（CR-023）。
                     started_delta = True
                 if ev["type"] == "done":
                     ev = {**ev, "served_by": self.cloud.name}
