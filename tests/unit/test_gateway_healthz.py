@@ -186,3 +186,40 @@ def test_healthz_network_probe_failure_is_captured_not_raised(monkeypatch):
     nf = body["components"]["cloud_generation"]["network_floor"]
     assert nf["error"] is not None
     assert nf["tcp_connect_s"] is None
+
+
+def test_healthz_slow_probe_does_not_block_event_loop(monkeypatch):
+    """CR-027 判别性回归：`probe_network_floor()` 是阻塞 I/O（最长 `timeout_s` 秒），
+    `healthz()` 是 async 路由——如果同步直接调用会占住事件循环，暂停 SSE 流和
+    其他所有并发请求。这里用 `time.sleep(0.2)` 模拟慢探测，验证并发调度的另一个
+    协程（`asyncio.sleep(0.01)`）不会被拖慢——它理应仍在 ~0.01s 左右完成，而不是
+    被拖到 ~0.2s（旧实现同步调用会复现审查方给出的那个数字：0.217s）。
+    """
+    import time as time_module
+
+    monkeypatch.setattr(gw.engine, "status", _loaded_status())
+    monkeypatch.setattr(gw, "_store", FakeStore())
+    monkeypatch.setattr(gw, "_store_error", None)
+    monkeypatch.setattr(gw, "_router", FakeRouter(cloud=FakeCloudBackend(available=True)))
+    monkeypatch.setattr(gw, "probe_network_floor", lambda: (time_module.sleep(0.2), {
+        "host": "api.anthropic.com", "tcp_connect_s": 0.2, "tcp_tls_s": 0.2, "error": None,
+    })[1])
+
+    async def _quick_task(start):
+        # 从共享起点 `start` 算起，而不是从这个协程自己开始执行的那一刻算起——
+        # 否则如果事件循环被 healthz() 的同步阻塞占住，这个协程根本没机会被
+        # 调度到，等它终于跑起来时再测"自己的" 0.01s 睡眠时长永远是对的，
+        # 测不出"它等了多久才轮到自己"这个真正要验证的东西。
+        await asyncio.sleep(0.01)
+        return time_module.perf_counter() - start
+
+    async def _both():
+        start = time_module.perf_counter()
+        return await asyncio.gather(gw.healthz(), _quick_task(start))
+
+    _, quick_elapsed = _run(_both())
+
+    assert quick_elapsed < 0.1, (
+        f"并发的 asyncio.sleep(0.01) 被拖到 {quick_elapsed:.3f}s 才完成——"
+        "说明 healthz() 里的慢探测阻塞了事件循环"
+    )

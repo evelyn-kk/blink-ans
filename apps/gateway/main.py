@@ -168,13 +168,18 @@ async def healthz():
     cloud_ready = bool(_router and _router.cloud and _router.cloud.available())
 
     # 网络地板：只在云端凭据已配置时才探测（没配凭据没必要连一次官方 endpoint）。
-    # probe_network_floor() 内部已经把连接异常兜底成 error 字段而不抛出，这里
-    # 再包一层 try/except 纯属防御性——保证这一项探测无论如何都不能把整个
-    # /healthz 拖到 500（要观测的是"这一项测不出来"，不是让请求本身失败）。
+    # CR-027：probe_network_floor() 内部是阻塞 I/O（socket.create_connection +
+    # TLS 握手，最长 timeout_s 秒），`healthz()` 是 async 路由——直接同步调用会
+    # 占住事件循环，暂停 SSE 流和其他所有并发请求，这正是健康检查最不该有的副作用
+    # （审查方用 monkeypatch 成 0.2s 的假探测复现：并发的 `asyncio.sleep(0.01)`
+    # 任务被拖到 0.217s 才完成）。改用 `asyncio.to_thread()` 丢到线程池执行，
+    # 不阻塞事件循环。probe_network_floor() 内部已经把连接异常兜底成 error 字段
+    # 而不抛出，这里再包一层 try/except 纯属防御性——保证这一项探测无论如何都
+    # 不能把整个 /healthz 拖到 500（要观测的是"这一项测不出来"，不是让请求本身失败）。
     network_floor = None
     if cloud_ready:
         try:
-            network_floor = probe_network_floor()
+            network_floor = await asyncio.to_thread(probe_network_floor)
         except Exception as exc:
             network_floor = {"host": None, "tcp_connect_s": None, "tcp_tls_s": None,
                               "error": f"{type(exc).__name__}: {exc}"}

@@ -83,14 +83,22 @@ def probe_network_floor(timeout_s: float = 2.0) -> dict:
 
     网络不通/超时/证书问题等一律捕获，返回 `error` 字段而不是向上抛异常——
     调用方（`/healthz`）不能因为这一项测不出来就让整个响应跟着 500。
+
+    CR-028：计时必须在 `ssl.create_default_context()`**之后**才开始——它要读本机
+    证书库，耗时随平台/证书数量变化，混进计时会让"网络"数字实际测的是本机负载
+    （复现：把 `create_default_context()` 延迟 50ms、socket/TLS 都设为立即返回，
+    修复前 `tcp_connect_s`/`tcp_tls_s` 仍报 ≈0.05s）。`bench/bench_llm_remote.py`
+    的 `probe_network_rtt()` 原本就是先建 context、循环内才计时，这里移植成单次
+    探测时把 `t0` 错放到了 context 创建之前，属于移植引入的新回归，不是照抄旧代码
+    的既有缺陷。
     """
     import socket
     import ssl
 
     host = CLAUDE_API_BASE_URL.split("://", 1)[-1].rstrip("/")
-    t0 = time.perf_counter()
     try:
         ctx = ssl.create_default_context()
+        t0 = time.perf_counter()
         with socket.create_connection((host, 443), timeout=timeout_s) as sock:
             tcp_connect_s = round(time.perf_counter() - t0, 4)
             with ctx.wrap_socket(sock, server_hostname=host):

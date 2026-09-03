@@ -170,5 +170,51 @@ def test_probe_network_floor_success_shape(monkeypatch):
 
     assert result["error"] is None
     assert result["host"] == "api.anthropic.com"
+
+
+def test_probe_network_floor_does_not_count_local_context_setup_as_network_time(monkeypatch):
+    """CR-028 判别性回归：`tcp_connect_s`/`tcp_tls_s` 只能测网络往返，不能把本机
+    证书库初始化（`ssl.create_default_context()`）的耗时算进去——那会把本机负载
+    误报成网络地板。
+
+    构造：`create_default_context()` 人为延迟 50ms，socket/TLS 握手都设为立即
+    返回（0 延迟）。计时正确时两个字段应接近 0；旧实现（`t0` 在建 context 之前）
+    会把这 50ms 也计进去，报出 ≈0.05s。
+    """
+    import socket
+    import ssl
+    import time as time_module
+
+    class _FakeSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FakeSSLSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _slow_create_default_context(*a, **kw):
+        time_module.sleep(0.05)
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    monkeypatch.setattr(ssl, "create_default_context", _slow_create_default_context)
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **kw: _FakeSock())
+    monkeypatch.setattr(
+        ssl.SSLContext, "wrap_socket", lambda self, sock, server_hostname=None: _FakeSSLSock()
+    )
+
+    result = probe_network_floor(timeout_s=0.5)
+
+    assert result["error"] is None
+    # 留够浮点噪声余量，但必须远小于人为注入的 50ms 延迟——否则说明本机初始化
+    # 耗时又被算进"网络"数字了。
+    assert result["tcp_connect_s"] < 0.02
+    assert result["tcp_tls_s"] < 0.02
     assert isinstance(result["tcp_connect_s"], float) and result["tcp_connect_s"] >= 0
     assert isinstance(result["tcp_tls_s"], float) and result["tcp_tls_s"] >= 0
