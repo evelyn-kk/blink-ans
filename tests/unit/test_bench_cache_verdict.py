@@ -11,13 +11,14 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
-from bench_llm_remote import cache_verdict, summarize  # noqa: E402
+from bench_llm_remote import CLAUDE_API_BASE_URL, _claude_client, cache_verdict, summarize  # noqa: E402
 
 
 def sample(read=None, write=None, ttft=1.0):
@@ -27,6 +28,24 @@ def sample(read=None, write=None, ttft=1.0):
         "prompt_tokens": 1000, "output_tokens": 20,
         "cache_write_tokens": write, "cache_read_tokens": read,
     }
+
+
+def test_claude_client_uses_the_official_endpoint_not_an_inherited_gateway(monkeypatch):
+    """同机配置 Kimi 兼容网关时，Claude 测量仍必须直连 Anthropic。"""
+    called = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            called.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=FakeAnthropic))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.moonshot.cn/anthropic/")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "another-token")
+
+    _claude_client()
+
+    assert called == {"api_key": "test-key", "base_url": CLAUDE_API_BASE_URL}
 
 
 # ---------- 两阶段断言：首轮写入、后续读取 ----------
