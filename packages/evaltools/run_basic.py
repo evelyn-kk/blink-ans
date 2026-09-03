@@ -8,8 +8,16 @@
 充分性判定是否正确），**不比对答案文本**——I0 已确认答案不可逐字复现。
 答案的技术正确性由 I3 的场景评测负责。
 
+T-022（双语提示词）：`--language en` 用同一份 50 题问题集要求**英文**作答。
+问题文本本身仍是中文——检索是跨语言的（development-notes.md 2026-09-02
+「场景卡片改用英文正文」实测：向量路跨语言损失仅 0.035–0.05），换语言只影响
+生成阶段用哪份提示词、模型该用哪种语言回答。这不是 T-023 要建的完整双语评测集
+（那一套需要 `q_zh`/`q_en` 对照与独立的关键点标注），只是本轮验证"英文提示词路径
+在真实检索证据下也能正确生成带引用的回答、且拒答标记正常工作"的务实最小验证——
+足以覆盖本轮验收要求的"中英各跑 50 题回归均通过"，但不是语言对照质量评测。
+
 用法:
-    python packages/evaltools/run_basic.py [--limit N] [--check-links]
+    python packages/evaltools/run_basic.py [--limit N] [--check-links] [--language zh|en]
 """
 
 from __future__ import annotations
@@ -18,7 +26,6 @@ import argparse
 import json
 import statistics
 import sys
-import re
 import time
 import urllib.error
 import urllib.request
@@ -31,13 +38,15 @@ sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 
 from packages.config.env import load_dotenv  # noqa: E402
-from packages.prompts.answer import SYSTEM_PROMPT, template_version  # noqa: E402
+from packages.prompts.answer import (  # noqa: E402
+    SUPPORTED_LANGUAGES, system_prompt, template_version,
+)
 from services.inference.backend import LocalBackend  # noqa: E402
 from services.inference.claude_backend import ClaudeBackend  # noqa: E402
 from services.inference.engine import DEFAULT_MODEL, InferenceEngine  # noqa: E402
 from services.inference.router import Router  # noqa: E402
 from services.orchestrator.answering import (  # noqa: E402
-    AnswerRequest, Orchestrator, Sufficiency,
+    AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, declined,
 )
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
@@ -73,10 +82,6 @@ class Case:
         return not self.failures
 
 
-# 模型明确表示证据不支撑作答的措辞
-_DECLINED = re.compile(r"证据未涵盖|现有证据不足|证据不足以")
-
-
 def check_url(url: str, timeout: float = 10.0) -> bool:
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "blink-ans-eval/0.1"})
     try:
@@ -88,10 +93,12 @@ def check_url(url: str, timeout: float = 10.0) -> bool:
         return False
 
 
-def run_case(orch: Orchestrator, spec: dict) -> Case:
+def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
     c = Case(question=spec["q"], expect=spec["expect"], project=spec.get("project"))
     answer = ""
-    for ev in orch.answer(AnswerRequest(question=c.question, max_tokens=400)):
+    for ev in orch.answer(
+        AnswerRequest(question=c.question, max_tokens=400, language=language)
+    ):
         t = ev["type"]
         if t == "retrieval":
             c.sufficiency = ev["sufficiency"]
@@ -110,7 +117,9 @@ def run_case(orch: Orchestrator, spec: dict) -> Case:
         elif t == "error":
             c.failures.append(f"错误 {ev['stage']}: {ev['message']}")
 
-    c.declined = _DECLINED.search(answer) is not None and len(answer.strip()) < 80
+    # T-022：判据与生产路径同一个函数（`answering.declined()`），不是本脚本
+    # 另起一套散文正则——散文判据换语言就失效，且两套判据分叉迟早互相打脸。
+    c.declined = declined(answer)
 
     if c.expect == "answered":
         if c.sources == 0 and not c.declined:
@@ -167,6 +176,9 @@ def main() -> int:
     ap.add_argument("--offline", action="store_true",
                      help="强制走本地兜底，不尝试云端 Claude（省钱/可复现；"
                           "不传时按生产路由跑：有 ANTHROPIC_API_KEY 就走云端）")
+    ap.add_argument("--language", choices=SUPPORTED_LANGUAGES, default="zh",
+                     help="回答语言（T-022）。问题文本本身仍是中文，只切生成阶段的"
+                          "提示词与本地常驻前缀预热语言——检索是跨语言的，不受影响。")
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
 
@@ -174,8 +186,9 @@ def main() -> int:
     if args.limit:
         specs = specs[: args.limit]
 
+    prompt = system_prompt(args.language)
     engine = InferenceEngine(DEFAULT_MODEL)
-    engine.load(SYSTEM_PROMPT)
+    engine.load(prompt)
     if not engine.status.loaded:
         print(f"模型加载失败: {engine.status.error}", file=sys.stderr)
         return 2
@@ -184,14 +197,16 @@ def main() -> int:
     # T-028：与生产同一套路由（services/inference/router.py），而不是直接绑死本地
     # InferenceEngine——回归脚本要能看出真实生产会走哪个后端（served_by）。
     # --offline 强制本地，避免每次跑 50 题回归都产生云端调用开销。
-    router = Router(LocalBackend(engine), ClaudeBackend(SYSTEM_PROMPT), offline=args.offline)
-    orch = Orchestrator(store, embedder, router)
+    router = Router(LocalBackend(engine), ClaudeBackend(prompt), offline=args.offline)
+    orch = Orchestrator(
+        store, embedder, router, config=AnswerConfig(default_language=args.language)
+    )
 
-    print(f"运行 {len(specs)} 题（模板 {template_version()}）\n")
+    print(f"运行 {len(specs)} 题（模板 {template_version()}，语言 {args.language}）\n")
     cases: list[Case] = []
     t0 = time.perf_counter()
     for i, spec in enumerate(specs, 1):
-        c = run_case(orch, spec)
+        c = run_case(orch, spec, args.language)
         cases.append(c)
         mark = "✓" if c.ok else "✗"
         if c.retrieval_miss or c.declined_with_evidence:
@@ -259,6 +274,7 @@ def main() -> int:
     path = REPORTS / f"eval-basic-{stamp}.json"
     path.write_text(json.dumps({
         "template_version": template_version(),
+        "language": args.language,
         "model": DEFAULT_MODEL,
         "index_chunks": store.count(),
         "dictionary_version": store.meta.get("dictionary_version"),

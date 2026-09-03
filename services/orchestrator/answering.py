@@ -1,25 +1,30 @@
 """问答编排：检索 → 判定证据充分性 → 构建上下文 → 生成带引用的答案。
 
-三条约束贯穿本模块，都来自前两个迭代的实测：
+四条约束贯穿本模块：
 
 1. **预算约束在 prefill token 上，不是总 token**（I0：prefill 352 tok/s）。
-   系统提示词的 KV 常驻复用（2026-09-02 实测 341 token，套 chat template 后 354），
-   因此它不计入 prefill。I2 为提高引用依从率扩写过提示词，此处原记的 190 是扩写前的值。
-   2.5 秒预算 ≈ 880 个待 prefill 的 token，扣除问题与模板收尾约 40 token，
-   证据可用约 840 个真实 token。切块的 token_estimate 对英文平均高估约 11%
-   （200 块抽样，实际/估算中位 0.888），故估算口径的预算取 700 留出余量。
+   本地路径的系统提示词 KV 常驻复用，不计入 prefill；云端路径靠 provider 的
+   prompt cache，同样不占用这次请求的"证据预算"额度，但云端 prefill 本身
+   不受本机算力线性约束（architecture.md §6.6 第 1 条），因此本地/云端两条
+   路径的证据预算不再共用一个数字——见 `AnswerConfig.evidence_budget` /
+   `evidence_budget_cloud` 与 `Orchestrator._evidence_budget()`。
 
 2. **"证据不足"不能靠空结果判定**（I1）。FTS 用 OR 查询以容忍语音转写的错字，
    代价是几乎任何中文提问都会返回结果。必须用相关性阈值判定。
 
 3. **固定前缀排在最前**（I0）。系统提示词的 KV 常驻复用，证据与问题随请求变化。
+
+4. **拒答判据是语言无关的固定标记，不是散文正则**（T-022，development-notes.md
+   2026-09-02「双语输出的架构影响」）。中文散文字面量匹配在英文回答下必然失效——
+   界面会一边说"无依据"一边列来源。`declined()` 只做一次 `startswith` 比较，
+   不为每种语言各维护一套判据。
 """
 
 from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Iterator
 
@@ -28,7 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.prompts.answer import (  # noqa: E402
-    INSUFFICIENT_PROMPT, Evidence, render_user_message, template_version,
+    DECLINE_TOKEN, SUPPORTED_LANGUAGES, Evidence, Language, insufficient_prompt,
+    render_user_message, system_prompt, template_version,
 )
 from packages.schemas.chunk import estimate_tokens  # noqa: E402
 from services.inference.router import Router  # noqa: E402
@@ -39,17 +45,19 @@ from services.retrieval.tokenize import detect_technology  # noqa: E402
 
 
 _CITATION = re.compile(r"\[(\d{1,2})\]")
-# 模型明确表示证据不支撑作答的措辞
-_DECLINED = re.compile(r"证据未涵盖|现有证据不足|证据不足以")
 
 
 def declined(answer: str) -> bool:
-    """模型是否明确表示证据不支撑作答。
+    """模型是否用固定标记表明证据不支撑作答。
 
-    检索给错证据时，模型说"证据未涵盖"是正确行为。此时展示来源会误导用户——
+    判据是 `packages/prompts/answer.DECLINE_TOKEN`——一个语言无关的固定 token，
+    两版提示词都要求模型在证据不支撑结论时把整个回答替换成这一行。
+    不匹配散文内容：模型换一种语言、换一种措辞都不影响这个判据。
+
+    检索给错证据时，模型输出这个标记是正确行为。此时展示来源会误导用户——
     界面上一边写着"没有依据"，一边列出五条链接，读者会以为那些就是依据。
     """
-    return bool(_DECLINED.search(answer)) and len(answer.strip()) < 120
+    return answer.strip().startswith(DECLINE_TOKEN)
 
 
 def citation_coverage(answer: str, evidence_count: int) -> list[int]:
@@ -81,20 +89,43 @@ class AnswerConfig:
 
     代价是极少数超范围问题会落入中间档、带警示作答而非直接拒答
     （实测「怎么用 Rust 写词法分析器」为 0.7463）。这是有意的取舍：
-    **误拒有效问题的代价高于多答一句带警示的话**，且模型自身的"证据未涵盖"
-    是第二道防线——50 题回归中它 6 次正确拒绝了基于错误证据编造。
+    **误拒有效问题的代价高于多答一句带警示的话**，且模型自身输出
+    `DECLINE_TOKEN`（见 `packages/prompts/answer.py`）是第二道防线——
+    50 题回归中它 6 次正确拒绝了基于错误证据编造（彼时判据仍是散文正则，
+    T-022 换成固定标记后语义不变，仍是同一道防线）。
 
     **样本量仍小，属暂定值，应由 I3 评测集重新标定。**
     """
 
-    # 预算以**真实 token** 计（见 select_evidence）。
-    # 复用前缀后实测 prefill 约 342 tok/s，2.5 秒对应 855 token；
-    # 扣除问题与模板收尾约 60 token，证据预算取 680 并留出余量。
-    evidence_budget: int = 680
+    # 预算以**真实 token** 计（见 select_evidence），本地/云端两条路径分开算——
+    # T-022 重写提示词后重算（旧值 680/700 是按六段式 341 token 系统提示词反推的，
+    # 且未区分本地/云端）。
+    #
+    # **本地（严格档，`evidence_budget`）**：系统提示词是常驻前缀，复用时不占
+    # prefill 预算，因此提示词变短本身不改变本地证据上限——真正的依据是
+    # architecture.md §6.5 已验证的本地生成子预算：证据 ≤~879 token 时
+    # 3.0 秒内出首字。实测 render_user_message 的模板收尾+问题开销约 25–30
+    # token，而 select_evidence 按证据正文计数、不含 render_evidence 拼的
+    # "[N] 引用串\n"前缀（citation 串实测约 31 token/条，max_evidence=5 条
+    # 最多再吃掉约 155 token 未被计入）。879 减去两项开销上限（约 185）
+    # 只剩约 694，取整并再留一点余量定为 650。
+    evidence_budget: int = 650
+    # **云端（宽松档，`evidence_budget_cloud`）**：云端 prefill 不随上下文
+    # 线性增长（architecture.md §6.6 第 1 条）——T-026 实测 4096 token 证据
+    # 上下文冷启动 TTFT 仍只有 2.9553s，在 3.6s 云端生成子预算内。
+    # 3200 留出约 900 token 余量覆盖引用串开销与该实测点之上的方差，
+    # 同时远高于 max_evidence=5 条证据在实践中通常达到的总量——对云端路径，
+    # 这个数字的作用基本是"不再是约束"，而不是一个需要精确卡线的上限。
+    evidence_budget_cloud: int = 3200
     max_evidence: int = 5
     sufficient_distance: float = 0.72
     limited_distance: float = 0.76
-    max_tokens: int = 700
+    # 输出长度上限，不是 prefill 预算，两条路径共用一个数字。
+    # 简洁契约下实测（真实本地生成，4B 模型）：两条证据、需要结论+步骤+前提的
+    # 回答 99–116 token；四段式（诊断+修复+验证+回滚风险）复杂回答 176 token。
+    # 350 留约 2 倍余量，仍显著小于旧六段式模板的 700——旧值是按"六节都要写满"
+    # 的最坏情况反推的，新契约下这不再是典型情况。
+    max_tokens: int = 350
     candidates: int = 30
     # 首 token 时延超过此值即记录告警，用于发现预算漂移。
     # 3.0 秒来自 architecture.md 第 6.2 节按实测重新分配后的生成预算：
@@ -107,6 +138,15 @@ class AnswerConfig:
     # 与 ttft_budget_s 分开是因为两条路径的预算不同——用同一个阈值判 claude 的
     # ttft_over_budget 会把落在 3.0–3.6s 之间、完全达标的云端响应误判为超预算。
     cloud_ttft_budget_s: float = 3.6
+    # 本地常驻前缀预热用的语言（见 apps/gateway/main.py 的 engine.load() 调用），
+    # 也是 ClaudeBackend 构造时默认携带的 system prompt 语言。请求语言与这个值
+    # 一致时，Orchestrator 对 sufficient/limited 分支传 system_override=None，
+    # 让本地引擎复用常驻前缀 KV（云端语义不受影响：ClaudeBackend 的默认值同样
+    # 来自这个语言，None 与显式传入同一段文本效果相同）；不一致时才显式传入
+    # 对应语言的提示词，此时本地按 T-027 的既定取舍走完整 prefill，不重新实现
+    # 多槽常驻前缀（development-notes.md「双语输出的架构影响」：本地已降级为
+    # 断网/失败兜底，多语言常驻前缀的收益不值当）。
+    default_language: Language = "zh"
 
 
 @dataclass
@@ -190,6 +230,11 @@ class AnswerRequest:
     module: str | None = None
     symbol: str | None = None
     max_tokens: int | None = None
+    # scope.md 开头：会话开始前选定，同一会话内界面、转写提示与回答语言一致，
+    # 不在会话内自动猜测或切换——因此这里是逐请求字段而非进程级配置。
+    # 类型用 packages.prompts.answer.Language 的字面量集合（"zh"/"en"），
+    # 未知值在 answer() 里显式拒绝，不静默回退到某个默认语言。
+    language: Language = "zh"
 
 
 class Orchestrator:
@@ -208,9 +253,36 @@ class Orchestrator:
         self.router = router
         self.cfg = config or AnswerConfig()
 
+    def _evidence_budget(self, cloud_allowed: bool) -> int:
+        """按这次请求大概率会走的路径选证据预算档位。
+
+        与 `Router.generate()` 内部判断 `use_cloud` 的三个条件保持一致
+        （见 `services/inference/router.py`）——这里只读属性，不产生副作用，
+        为的是"这次多半走云端"这个预判要在选证据、构建 prompt 之前就做出来，
+        证据集合定型之后才真正开始生成，不可能等生成开始了再回头改证据。
+
+        真正走到本地兜底、却仍用了云端档预算的少数情形（比如判断时云端可用，
+        真正发请求时网络在最后一刻失败）是接受的降级：本地兜底路径本就不再是
+        产品主 SLA（architecture.md §6.6 第 4 条），慢一次不算错，只是不达标。
+        """
+        will_use_cloud = (
+            not self.router.offline
+            and cloud_allowed
+            and self.router.cloud is not None
+            and self.router.cloud.available()
+        )
+        return self.cfg.evidence_budget_cloud if will_use_cloud else self.cfg.evidence_budget
+
     def answer(self, req: AnswerRequest) -> Iterator[dict]:
         """产出事件流。事件类型在 I2 定死，后续迭代只加不改语义。"""
         t0 = time.perf_counter()
+
+        if req.language not in SUPPORTED_LANGUAGES:
+            yield {
+                "type": "error", "stage": "request",
+                "message": f"不支持的语言 {req.language!r}，仅支持 {SUPPORTED_LANGUAGES}",
+            }
+            return
 
         try:
             vector = self.embedder.encode_one(req.question)
@@ -249,14 +321,21 @@ class Orchestrator:
 
         if verdict.level is Sufficiency.INSUFFICIENT:
             yield {"type": "status", "message": "本地知识库未覆盖该问题"}
+            # 证据不足分支用的是另一套短提示词，占比很小，从不复用常驻前缀
+            # （见 engine.stream：system_override 非 None 即放弃复用），
+            # 因此这里始终显式传入对应语言版本，没有 None 优化可谈。
             yield from self._generate(
-                req.question, max_tokens=220, system_override=INSUFFICIENT_PROMPT,
+                req.question, max_tokens=220,
+                system_override=insufficient_prompt(req.language),
                 started=t0, sufficiency=verdict.level, cloud_allowed=cloud_allowed,
             )
             yield {"type": "sources", "items": []}
             return
 
-        evidence = select_evidence(hits, self.cfg, self.router.count_tokens)
+        # 证据预算按这次请求实际会走哪条路径分档（本地严格 / 云端宽松，
+        # 见 AnswerConfig.evidence_budget / evidence_budget_cloud 的注释）。
+        budget_cfg = replace(self.cfg, evidence_budget=self._evidence_budget(cloud_allowed))
+        evidence = select_evidence(hits, budget_cfg, self.router.count_tokens)
         if not evidence:
             # 命中了但每一条都超出预算——属于切块异常，不应静默降级为无证据作答
             yield {"type": "error", "stage": "context",
@@ -270,12 +349,18 @@ class Orchestrator:
             "evidence_tokens": sum(estimate_tokens(e.text) for e in evidence),
         }
 
-        user_msg = render_user_message(req.question, evidence)
+        user_msg = render_user_message(req.question, evidence, req.language)
+        # 请求语言与本地常驻前缀预热语言一致时传 None，让本地引擎（若被选中）
+        # 复用常驻前缀；不一致时才显式传入——见 AnswerConfig.default_language。
+        override = (
+            None if req.language == self.cfg.default_language
+            else system_prompt(req.language)
+        )
         answer = ""
         for ev in self._generate(
             user_msg, max_tokens=req.max_tokens or self.cfg.max_tokens,
             started=t0, sufficiency=verdict.level, evidence_count=len(evidence),
-            cloud_allowed=cloud_allowed,
+            cloud_allowed=cloud_allowed, system_override=override,
         ):
             if ev["type"] == "answer_delta":
                 answer += ev["text"]

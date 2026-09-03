@@ -24,13 +24,15 @@ from pydantic import BaseModel, Field
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from packages.config.env import load_dotenv  # noqa: E402
-from packages.prompts.answer import SYSTEM_PROMPT, template_version  # noqa: E402
+from packages.prompts.answer import (  # noqa: E402
+    SUPPORTED_LANGUAGES, Language, system_prompt, template_version,
+)
 from services.inference.backend import LocalBackend  # noqa: E402
 from services.inference.claude_backend import ClaudeBackend  # noqa: E402
 from services.inference.engine import DEFAULT_MODEL, InferenceEngine  # noqa: E402
 from services.inference.router import Router  # noqa: E402
 from services.orchestrator.answering import (  # noqa: E402
-    AnswerRequest, Orchestrator,
+    AnswerConfig, AnswerRequest, Orchestrator,
 )
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
@@ -55,6 +57,22 @@ _router: Router | None = None
 _OFFLINE_TRUE = {"1", "true", "yes"}
 _offline_mode = os.environ.get("BLINK_OFFLINE", "").strip().lower() in _OFFLINE_TRUE
 
+# T-022：本地引擎只有单槽常驻前缀（T-027 已裁决不重新做多槽——本地已降级为
+# 断网/失败兜底，多语言常驻前缀的收益不值当），启动时必须选定一个语言把它
+# 预热进 KV cache。这个环境变量就是那个选择，同时也是 ClaudeBackend 默认携带
+# 的 system prompt 语言、以及 AnswerConfig.default_language（Orchestrator 靠
+# 它判断请求语言是否命中常驻前缀，见 services/orchestrator/answering.py）。
+# scope.md：语言在会话开始前由用户选定，但会话/语音客户端要到 I3/I4 才接入，
+# 本轮 API 层还没有会话概念——因此这里只提供进程级默认值，单次请求可以在
+# POST /v1/answers 里用 `language` 字段覆盖它（覆盖值不影响本地常驻前缀，
+# 只影响这一次传给生成后端的 system_override，见 Orchestrator.answer()）。
+_DEFAULT_LANGUAGE = os.environ.get("BLINK_DEFAULT_LANGUAGE", "zh").strip().lower()
+if _DEFAULT_LANGUAGE not in SUPPORTED_LANGUAGES:
+    raise RuntimeError(
+        f"BLINK_DEFAULT_LANGUAGE={_DEFAULT_LANGUAGE!r} 不受支持，"
+        f"仅支持 {SUPPORTED_LANGUAGES}"
+    )
+
 # 待取的问答会话。单用户本地服务，用内存字典即可；
 # 未被消费的会话在下次创建时按容量上限淘汰，避免长时间运行后无限增长。
 _pending: dict[str, AnswerRequest] = {}
@@ -69,7 +87,9 @@ async def lifespan(app: FastAPI):
         global _store, _store_error, _orchestrator, _router
         # 模型冷加载与索引打开都放在启动阶段：I0 实测冷启动 TTFT 是热态的两倍，
         # 不能让第一个真实用户承担这个代价。
-        engine.load(SYSTEM_PROMPT)
+        # 常驻前缀只有一槽（T-027），预热哪个语言由 _DEFAULT_LANGUAGE 决定。
+        default_prompt = system_prompt(_DEFAULT_LANGUAGE)
+        engine.load(default_prompt)
         embedder.load()
         try:
             _store = ChunkStore()
@@ -81,9 +101,16 @@ async def lifespan(app: FastAPI):
             # ClaudeBackend 总是构造出来——它的 available() 只查环境变量，
             # 缺 ANTHROPIC_API_KEY 时路由自然只会用本地，不需要在这里判空后
             # 传 None（传 None 也可以，但会在两处维护"有没有配凭据"的判断）。
-            cloud = ClaudeBackend(SYSTEM_PROMPT)
+            # 构造时携带与本地常驻前缀相同语言的默认 system prompt——
+            # 请求语言与其不同时，Orchestrator 会逐请求传 system_override 覆盖它
+            # （见 services/orchestrator/answering.py，ClaudeBackend.stream() 本就
+            # 支持 per-call 覆盖，不需要为云端另建多份常驻状态）。
+            cloud = ClaudeBackend(default_prompt)
             _router = Router(local, cloud, offline=_offline_mode)
-            _orchestrator = Orchestrator(_store, embedder, _router)
+            _orchestrator = Orchestrator(
+                _store, embedder, _router,
+                config=AnswerConfig(default_language=_DEFAULT_LANGUAGE),
+            )
 
     await asyncio.to_thread(boot)
     yield
@@ -106,6 +133,7 @@ async def healthz():
                 "ready": s.loaded, "model": s.model_id,
                 "load_seconds": s.load_seconds, "warmup_seconds": s.warmup_seconds,
                 "resident_prefix_tokens": s.prefix_tokens,
+                "resident_prefix_language": _DEFAULT_LANGUAGE,
                 "template_version": template_version(),
                 "error": s.error,
             },
@@ -138,6 +166,13 @@ class AskBody(BaseModel):
     module: str | None = Field(default=None, description="用户项目模块精确过滤")
     symbol: str | None = Field(default=None, description="用户项目符号精确过滤")
     max_tokens: int | None = Field(default=None, ge=32, le=2048)
+    # T-022：会话/语音客户端到 I3/I4 才接入（scope.md：语言在会话开始前选定），
+    # 本轮 API 层还没有会话概念，因此逐请求可选——不传时落回
+    # BLINK_DEFAULT_LANGUAGE（即本地常驻前缀预热的语言）。类型用 pydantic 对
+    # Literal 的原生校验，非法值直接 422，不会流到 Orchestrator 里才发现。
+    language: Language | None = Field(
+        default=None, description="回答语言，不传则用服务端默认语言"
+    )
 
 
 @app.post("/v1/answers", status_code=201)
@@ -154,6 +189,7 @@ async def create_answer(body: AskBody):
         question=body.question, technology=body.technology,
         project=body.project, project_id=body.project_id,
         module=body.module, symbol=body.symbol, max_tokens=body.max_tokens,
+        language=body.language or _DEFAULT_LANGUAGE,
     )
     return {"answer_id": aid, "stream_url": f"/v1/answers/{aid}/stream"}
 
