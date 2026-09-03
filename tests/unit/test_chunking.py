@@ -81,6 +81,22 @@ def test_fenced_example_is_not_merged_with_neighboring_prose():
     assert fenced[0].strip().startswith("```") and fenced[0].strip().endswith("```")
 
 
+def test_definition_list_with_inline_snippets_is_not_over_fragmented():
+    """CR-019：定义列表里逐条内联的短示例（单块内开合的完整围栏）不应被强制
+    独立成块。旧逻辑对任何含围栏的块一律先封口、再单独切出，把这类小节拆成
+    "引言 1 块 + 每条定义 2 块"（本例会拆成 12 块）；修复后应随常规大小控制
+    合并成远少于这个数字的证据块。
+    """
+    intro = "以下字段用于配置存活探针。" * 3
+    items = "\n\n".join(
+        f"`field{i}` (int)：说明字段 {i} 的用途和取值范围，用于控制探测行为。"
+        f"\n\n```\nfield{i}: 1\n```"
+        for i in range(6)
+    )
+    pieces = _split_body(f"{intro}\n\n{items}")
+    assert len(pieces) <= 3, f"定义列表被过度碎片化: {len(pieces)} 块"
+
+
 def test_long_prose_is_split_near_target():
     body = "\n\n".join("这是一段中文技术说明文字，用于验证切块长度控制。" * 3 for _ in range(30))
     pieces = _split_body(body)
