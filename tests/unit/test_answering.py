@@ -13,7 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.orchestrator.answering import (  # noqa: E402
-    AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, assess, citation_coverage, select_evidence,
+    AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, assess, citation_coverage,
+    declined, select_evidence,
 )
 from services.retrieval.search import Hit  # noqa: E402
 
@@ -145,6 +146,15 @@ class FakeEngine:
                "prefilled_tokens": 10, "prefix_reused": True, "decode_tps": 20.0}
 
 
+class FakeCloudBackend:
+    """`_evidence_budget()` 只需要 `available()`——足够用的最小假货。"""
+
+    name = "claude"
+
+    def available(self) -> bool:
+        return True
+
+
 class FakeRouter:
     """T-028：把 FakeEngine 适配成 Router 的最小接口（count_tokens + generate）。
 
@@ -157,6 +167,10 @@ class FakeRouter:
     def __init__(self, engine: FakeEngine, served_by: str = "local") -> None:
         self._engine = engine
         self._served_by = served_by
+        # T-022：Orchestrator._evidence_budget() 读这两个属性来预判走哪条路径
+        # （与真 Router 的判断条件保持一致，见 answering.py 的注释）。
+        self.offline = False
+        self.cloud = FakeCloudBackend() if served_by == "claude" else None
 
     def count_tokens(self, text: str) -> int:
         return self._engine.count_tokens(text)
@@ -223,6 +237,172 @@ def test_project_cloud_ban_forces_cloud_allowed_false(monkeypatch):
     list(Orchestrator(None, FakeEmbedder(), RecordingRouter(FakeEngine()))
          .answer(AnswerRequest("怎么预留库存")))
     assert captured_cloud_allowed["value"] is False
+
+
+# ---------- T-022：拒答标记（语言无关） ----------
+
+def test_declined_matches_marker_at_start():
+    assert declined("NO_EVIDENCE") is True
+    assert declined("  NO_EVIDENCE\n") is True  # 允许前后空白
+
+
+def test_declined_matches_marker_followed_by_more_text():
+    """插入式使用（INSUFFICIENT_PROMPT 要求先出标记再补充说明）也算拒答。"""
+    assert declined("NO_EVIDENCE\n\n本地知识库未覆盖……") is True
+
+
+def test_declined_false_when_marker_not_at_start():
+    """标记必须在开头；模型把它当收尾语气词粘在正文末尾，不该被判定为拒答——
+    那种情况下正文本身可能是编造内容，展示来源反而更危险，需要人工可见。
+    """
+    assert declined("消费者未提交偏移量导致重复消费 [1]。\n\nNO_EVIDENCE") is False
+
+
+def test_declined_false_for_normal_cited_answer():
+    assert declined("结论：需要手动提交偏移量 [1]。") is False
+
+
+def test_declined_ignores_translated_prose():
+    """回归 T-022 之前的缺陷：中文散文正则在英文回答下必然不命中。
+
+    换成固定标记后，中英文的"正常措辞"都不应被误判为拒答——
+    这里用两种语言里含有"证据不足"字面含义的句子做反例。
+    """
+    assert declined("现有证据不足以支撑这个结论，建议查阅官方文档。") is False
+    assert declined("The evidence is insufficient to support a conclusion.") is False
+
+
+# ---------- T-022：双语请求的语言选择 ----------
+
+def test_answer_rejects_unsupported_language(monkeypatch):
+    """未知语言必须在检索前就被拒绝，不能悄悄落到某个默认语言上。"""
+    called = {"retrieval": False}
+
+    def fake_search(*_a, **_kw):
+        called["retrieval"] = True
+        return [hit()]
+
+    monkeypatch.setattr("services.orchestrator.answering.hybrid_search", fake_search)
+    events = list(Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine()))
+                  .answer(AnswerRequest("怎么预留库存", language="fr")))
+    assert called["retrieval"] is False
+    assert events == [{
+        "type": "error", "stage": "request",
+        "message": "不支持的语言 'fr'，仅支持 ('zh', 'en')",
+    }]
+
+
+class RecordingRouter(FakeRouter):
+    """记录每次 `generate()` 调用收到的 content 与 system_override。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.calls: list[dict] = []
+
+    def generate(self, content, *, max_tokens, system_override=None, cloud_allowed=True):
+        self.calls.append({"content": content, "system_override": system_override})
+        yield from super().generate(
+            content, max_tokens=max_tokens, system_override=system_override,
+            cloud_allowed=cloud_allowed,
+        )
+
+
+def test_english_request_renders_english_user_message_labels(monkeypatch):
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    router = RecordingRouter(FakeEngine())
+    list(Orchestrator(None, FakeEmbedder(), router)
+         .answer(AnswerRequest("How to reserve inventory", language="en")))
+    assert "[Evidence]" in router.calls[0]["content"]
+    assert "[Question]" in router.calls[0]["content"]
+    assert "【证据】" not in router.calls[0]["content"]
+
+
+def test_chinese_request_renders_chinese_user_message_labels(monkeypatch):
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    router = RecordingRouter(FakeEngine())
+    list(Orchestrator(None, FakeEmbedder(), router).answer(AnswerRequest("怎么预留库存")))
+    assert "【证据】" in router.calls[0]["content"]
+    assert "【问题】" in router.calls[0]["content"]
+
+
+def test_system_override_is_none_when_request_language_matches_default(monkeypatch):
+    """请求语言与本地常驻前缀预热语言一致时传 None，才能让本地引擎复用前缀。"""
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    router = RecordingRouter(FakeEngine())
+    list(Orchestrator(None, FakeEmbedder(), router, config=AnswerConfig(default_language="zh"))
+         .answer(AnswerRequest("怎么预留库存", language="zh")))
+    assert router.calls[0]["system_override"] is None
+
+
+def test_system_override_is_explicit_when_request_language_differs_from_default(monkeypatch):
+    """请求语言与常驻前缀语言不一致时必须显式传入对应语言提示词（T-027：
+    本地遇到语言切换直接完整 prefill，不重新实现多槽常驻前缀）。
+    """
+    from packages.prompts.answer import system_prompt
+
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit()]
+    )
+    router = RecordingRouter(FakeEngine())
+    list(Orchestrator(None, FakeEmbedder(), router, config=AnswerConfig(default_language="zh"))
+         .answer(AnswerRequest("How to reserve inventory", language="en")))
+    assert router.calls[0]["system_override"] == system_prompt("en")
+
+
+# ---------- T-022：证据预算按路径分档 ----------
+
+class OfflineRouter(FakeRouter):
+    def __init__(self, *, offline=False, cloud=None):
+        self.offline = offline
+        self.cloud = cloud
+
+    def count_tokens(self, text):
+        return len(text) // 4
+
+
+def test_evidence_budget_prefers_cloud_when_cloud_will_serve():
+    orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=FakeCloudBackend()))
+    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget_cloud
+
+
+def test_evidence_budget_falls_back_to_local_when_offline():
+    orch = Orchestrator(
+        None, FakeEmbedder(), OfflineRouter(offline=True, cloud=FakeCloudBackend())
+    )
+    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget
+
+
+def test_evidence_budget_falls_back_to_local_when_project_bans_cloud():
+    orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=FakeCloudBackend()))
+    assert orch._evidence_budget(cloud_allowed=False) == orch.cfg.evidence_budget
+
+
+def test_evidence_budget_falls_back_to_local_when_no_cloud_backend_configured():
+    orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=None))
+    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget
+
+
+def test_evidence_budget_falls_back_to_local_when_cloud_unavailable():
+    class UnavailableCloud(FakeCloudBackend):
+        def available(self) -> bool:
+            return False
+
+    orch = Orchestrator(None, FakeEmbedder(), OfflineRouter(cloud=UnavailableCloud()))
+    assert orch._evidence_budget(cloud_allowed=True) == orch.cfg.evidence_budget
+
+
+def test_cloud_and_local_evidence_budgets_are_distinct_and_ordered():
+    """云端档必须明显宽松于本地档，否则拆分没有意义（architecture.md §6.6 第 1 条：
+    云端 prefill 不随上下文线性增长，本地仍受限）。
+    """
+    cfg = AnswerConfig()
+    assert cfg.evidence_budget_cloud > cfg.evidence_budget
 
 
 # ---------- CR-002: 未加载时的错误路径不依赖 MLX ----------
