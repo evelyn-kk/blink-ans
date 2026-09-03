@@ -38,6 +38,9 @@ def build_url(src: Source, rel_path: Path, anchor: str | None, page_id: str | No
     if src.url_strip_prefix and p.startswith(src.url_strip_prefix):
         p = p[len(src.url_strip_prefix):]
 
+    if src.url_path_drop_chars:
+        p = p.translate(str.maketrans("", "", src.url_path_drop_chars))
+
     # 显式模板优先：上游站点结构与仓库目录结构不一定对应
     # （Kafka 的仓库已迁到 Hugo，但官网仍是单页锚点形式）
     if src.url_template:

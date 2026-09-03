@@ -20,6 +20,7 @@ _REQUIRED = (
     "license", "license_file", "format", "locale", "base_url", "paths",
 )
 _FORMATS = {"markdown", "asciidoc", "html", "docbook"}
+_MARKDOWN_ANCHOR_STYLES = {"generic", "kafka", "kubernetes"}
 
 
 class RegistryError(ValueError):
@@ -41,6 +42,10 @@ class Source:
     paths: tuple[str, ...]
     url_template: str | None = None   # 可用 {path} 与 {anchor} 占位
     url_strip_prefix: str | None = None
+    # Hugo/Docsy 并没有统一的标题 id 规则；这里明确记录已实测的发布器规则。
+    markdown_anchor_style: str = "generic"
+    # 少数上游文件名含发布路径不保留的字符，例如 Kafka 的括号。
+    url_path_drop_chars: str = ""
     ingest: bool = True
     ingest_blocked_reason: str | None = None
     sync_frequency: str = "monthly"
@@ -60,6 +65,14 @@ def _one(raw: dict[str, Any]) -> Source:
     if raw["format"] not in _FORMATS:
         raise RegistryError(f"来源 {raw['id']!r} 的 format {raw['format']!r} 不受支持")
 
+    anchor_style = raw.get("markdown_anchor_style", "generic")
+    if anchor_style not in _MARKDOWN_ANCHOR_STYLES:
+        raise RegistryError(
+            f"来源 {raw['id']!r} 的 markdown_anchor_style {anchor_style!r} 不受支持"
+        )
+    if anchor_style != "generic" and raw["format"] != "markdown":
+        raise RegistryError(f"来源 {raw['id']!r} 的 markdown_anchor_style 只适用于 markdown")
+
     if not str(raw["repo"]).startswith("https://"):
         raise RegistryError(f"来源 {raw['id']!r} 的 repo 必须是 https 地址")
 
@@ -71,7 +84,7 @@ def _one(raw: dict[str, Any]) -> Source:
 
     known = set(_REQUIRED) | {
         "ingest", "ingest_blocked_reason", "sync_frequency",
-        "url_template", "url_strip_prefix",
+        "url_template", "url_strip_prefix", "markdown_anchor_style", "url_path_drop_chars",
     }
     return Source(
         id=raw["id"],
@@ -87,6 +100,8 @@ def _one(raw: dict[str, Any]) -> Source:
         paths=tuple(raw["paths"]),
         url_template=raw.get("url_template"),
         url_strip_prefix=raw.get("url_strip_prefix"),
+        markdown_anchor_style=anchor_style,
+        url_path_drop_chars=raw.get("url_path_drop_chars", ""),
         ingest=ingest,
         ingest_blocked_reason=raw.get("ingest_blocked_reason"),
         sync_frequency=raw.get("sync_frequency", "monthly"),

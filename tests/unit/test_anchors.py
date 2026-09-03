@@ -88,3 +88,20 @@ def test_md_slug_drops_slashes_without_leaving_separators():
     src = "## Common monitoring metrics for producer/consumer/connect/streams\n\n正文内容足够长以免被丢弃。\n"
     secs = parse_markdown(src, "Doc")
     assert _anchors(secs) == ["common-monitoring-metrics-for-producerconsumerconnectstreams"]
+
+
+def test_kafka_docsy_slug_preserves_underscores_and_emphasis_markers():
+    """官网 4.3 的 config 与 ACL 页分别实测为这两个 id。"""
+    src = (
+        "### rack.aware.assignment.non_overlap_cost\n\n正文足够长。\n\n"
+        "### _Behavior Without ACLs:_\n\n正文足够长。\n"
+    )
+    assert _anchors(parse_markdown(src, "Doc", "kafka")) == [
+        "rackawareassignmentnon_overlap_cost", "_behavior-without-acls_",
+    ]
+
+
+def test_kubernetes_blackfriday_slug_decodes_entities_before_separating():
+    """官网 v1.36 的 add-ons 页使用 id=visualization-control。"""
+    secs = parse_markdown("## Visualization &amp; Control\n\n正文足够长。\n", "Doc", "kubernetes")
+    assert _anchors(secs) == ["visualization-control"]
