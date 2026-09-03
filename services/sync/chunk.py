@@ -172,11 +172,16 @@ def _split_body(body: str) -> list[str]:
             continue
         fences = len(_CODE_FENCE.findall(b))
         t = estimate_tokens(b)
+        # 奇数围栏：本块结束后进入跨块 in_code 状态，后续块会绕过 MAX_TOKENS
+        # 检查无限累加（见下方追加逻辑的 `in_code or ...` 短路）。偶数围栏是
+        # 单块内自行开合的完整示例，不会绕过检查，本身已受常规大小控制。
+        opens_multiblock_fence = fences % 2 == 1
 
-        # 围栏中的示例（尤其是 ASCII 数据流图）与相邻散文合并后很容易跨过
-        # 上下文硬上限。代码/图本身不切开，但在边界处先把已有散文封口；这样既
-        # 保留完整示例，又不会让它拖着前一段一起成为无法选入 prompt 的大块。
-        if fences and not in_code and buf:
+        # 只在真正会跨块累积的场景先封口：即将进入 in_code 的散文缓冲区必须
+        # 提前封口，否则整段散文会被拖进不受控增长的多块代码/图示。单块内
+        # 开合的完整围栏（偶数）不做强制封口——曾经对所有含围栏的块一律封口，
+        # 把 Kubernetes 定义列表里逐条内联的短示例切成了孤立碎片（CR-019）。
+        if opens_multiblock_fence and not in_code and buf:
             out.append("\n\n".join(buf))
             buf, buf_tokens = [], 0
 
@@ -188,11 +193,14 @@ def _split_body(body: str) -> list[str]:
             out.append("\n\n".join(buf))
             buf, buf_tokens = [b], t
 
+        was_in_code = in_code
         if fences % 2 == 1:
             in_code = not in_code
 
-        # 一个完整围栏也独立成块，后续解释不要和它再次拼接。
-        if fences and not in_code:
+        # 只有真正跨块的围栏结束时才强制独立成块，避免后续解释被再次拼接；
+        # 单块内开合的完整示例留给下面的常规 TARGET_TOKENS 触发，允许和相邻
+        # 散文合并成正常大小的证据块，不再被强制拆成一块一个短示例。
+        if was_in_code and not in_code:
             out.append("\n\n".join(buf))
             buf, buf_tokens = [], 0
         elif not in_code and buf_tokens >= TARGET_TOKENS:
