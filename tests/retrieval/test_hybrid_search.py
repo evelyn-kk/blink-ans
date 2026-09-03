@@ -50,6 +50,16 @@ def store(tmp_path_factory) -> ChunkStore:
                 content_type="prose", locale="zh", text=text,
             ))
             vecs.append(_vec(i))
+        chunks.append(Chunk(
+            source_url="project://orders-prod/services/orders/checkout.py#reserve_stock",
+            source_project="project:orders-prod", version_or_commit="v1", license="Proprietary",
+            retrieved_at=utc_now(), title_path=["orders-prod", "orders", "reserve_stock"],
+            technology="java", content_type="code", locale="en",
+            text="void reserve_stock() { inventory.reserve(); }", source_path="services/orders/checkout.py",
+            project_id="orders-prod", module="orders", symbol="reserve_stock",
+            cloud_generation_allowed=False,
+        ))
+        vecs.append(_vec(5))
         for c in chunks:
             c.validate()
         assert b.add(chunks, vecs) == len(chunks)
@@ -111,6 +121,18 @@ def test_technology_filter_applies_to_both_paths(store):
 def test_project_filter(store):
     hits = hybrid_search(store, "Kafka", _vec(0), limit=10, project="kafka")
     assert all(h.source_project == "kafka" for h in hits)
+
+
+def test_project_id_filters_both_paths_and_exposes_boundary_metadata(store):
+    """T-103：用户项目必须与外部来源按 project_id 严格隔离。"""
+    hits = hybrid_search(
+        store, "reserve_stock inventory", _vec(5), limit=5,
+        project_id="orders-prod", module="orders", symbol="reserve_stock",
+    )
+    assert hits
+    assert all(h.project_id == "orders-prod" for h in hits)
+    assert all(h.module == "orders" and h.symbol == "reserve_stock" for h in hits)
+    assert all(h.cloud_generation_allowed is False for h in hits)
 
 
 def test_project_metadata_survives_index_write_and_merge(tmp_path, monkeypatch):

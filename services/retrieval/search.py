@@ -53,6 +53,12 @@ class Hit:
     content_type: str
     token_estimate: int
     score: float
+    # 项目过滤不应只依赖 source_project（它是外部来源的历史字段）。
+    # 以下字段让调用方能明确把一次查询限制在某个用户项目及其代码边界内。
+    project_id: str | None = None
+    module: str | None = None
+    symbol: str | None = None
+    cloud_generation_allowed: bool | None = None
     keyword_rank: int | None = None
     vector_rank: int | None = None
     # 向量距离是判定"证据是否充分"的主要信号（见 orchestrator/answering.py）。
@@ -71,7 +77,13 @@ def _pack(vec: Sequence[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-def _where(technology: str | None, project: str | None) -> tuple[str, list]:
+def _where(
+    technology: str | None,
+    project: str | None,
+    project_id: str | None,
+    module: str | None,
+    symbol: str | None,
+) -> tuple[str, list]:
     clauses, params = [], []
     if technology:
         clauses.append("c.technology = ?")
@@ -79,16 +91,26 @@ def _where(technology: str | None, project: str | None) -> tuple[str, list]:
     if project:
         clauses.append("c.source_project = ?")
         params.append(project)
+    if project_id:
+        clauses.append("c.project_id = ?")
+        params.append(project_id)
+    if module:
+        clauses.append("c.module = ?")
+        params.append(module)
+    if symbol:
+        clauses.append("c.symbol = ?")
+        params.append(symbol)
     return (" AND " + " AND ".join(clauses) if clauses else ""), params
 
 
 def keyword_search(
     store: ChunkStore, query: str, limit: int = 30,
     technology: str | None = None, project: str | None = None,
+    *, project_id: str | None = None, module: str | None = None, symbol: str | None = None,
 ) -> list[tuple[int, float]]:
     from .tokenize import to_fts_query
 
-    cond, params = _where(technology, project)
+    cond, params = _where(technology, project, project_id, module, symbol)
     sql = f"""
         SELECT c.id AS rowid, bm25(chunks_fts) AS score
         FROM chunks_fts
@@ -114,9 +136,11 @@ def keyword_search(
 def vector_search(
     store: ChunkStore, vector: Sequence[float], limit: int = 30,
     technology: str | None = None, project: str | None = None,
+    *, project_id: str | None = None, module: str | None = None, symbol: str | None = None,
 ) -> list[tuple[int, float]]:
     # vec0 的 KNN 不支持与业务表 JOIN 后再过滤，因此先取更多候选再在外层过滤
-    over = limit * 4 if (technology or project) else limit
+    has_filter = any((technology, project, project_id, module, symbol))
+    over = limit * 4 if has_filter else limit
     rows = store.execute(
         "SELECT rowid, distance FROM chunks_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
         (_pack(vector), over),
@@ -124,8 +148,8 @@ def vector_search(
     if not rows:
         return []
 
-    if technology or project:
-        cond, params = _where(technology, project)
+    if has_filter:
+        cond, params = _where(technology, project, project_id, module, symbol)
         ids = [r["rowid"] for r in rows]
         keep = {
             r["id"] for r in store.execute(
@@ -171,6 +195,9 @@ def hybrid_search(
     token_budget: int | None = None,
     technology: str | None = None,
     project: str | None = None,
+    project_id: str | None = None,
+    module: str | None = None,
+    symbol: str | None = None,
     candidates: int = 30,
 ) -> list[Hit]:
     """关键词与向量并行检索后 RRF 融合，可选按 token 预算截断。
@@ -178,8 +205,14 @@ def hybrid_search(
     token_budget 不为空时，按融合得分依次取块直到预算耗尽——
     这是把 I0 的时延约束落到检索层的地方。
     """
-    kw = keyword_search(store, query, candidates, technology, project)
-    vec = vector_search(store, query_vector, candidates, technology, project) if query_vector else []
+    kw = keyword_search(
+        store, query, candidates, technology, project,
+        project_id=project_id, module=module, symbol=symbol,
+    )
+    vec = vector_search(
+        store, query_vector, candidates, technology, project,
+        project_id=project_id, module=module, symbol=symbol,
+    ) if query_vector else []
     distances = dict(vec)
     fused = rrf_fuse(kw, vec)
     if not fused:
@@ -210,6 +243,11 @@ def hybrid_search(
                 version_or_commit=r["version_or_commit"], retrieved_at=r["retrieved_at"],
                 technology=r["technology"], content_type=r["content_type"],
                 token_estimate=r["token_estimate"], score=score,
+                project_id=r["project_id"], module=r["module"], symbol=r["symbol"],
+                cloud_generation_allowed=(
+                    bool(r["cloud_generation_allowed"])
+                    if r["cloud_generation_allowed"] is not None else None
+                ),
                 keyword_rank=krank, vector_rank=vrank,
                 vector_distance=distances.get(rid),
             )
