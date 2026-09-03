@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -452,6 +453,72 @@ def test_clear_resets_state_but_keeps_id_and_language():
     session.clear()
     assert session.session_id == "s1"
     assert session.language == "en"
+    assert session.active_project_id is None
+    assert session.active_version is None
+    assert session.last_turn is None
+
+
+def test_clear_cannot_interleave_between_epoch_check_and_stream_state_writeback():
+    """CR-032 判别性回归：SSE 生产在线程池，clear 在事件循环线程。
+
+    让流线程在它**已经读到旧 epoch、尚未提交状态**时停住；随后发起 clear。
+    修复后 clear 必须等待同一把会话锁，流先提交后 clear 最终清空；旧实现没有
+    临界段，clear 会先完成、流恢复后再把 orders/v1 写回，最终状态错误地复活。
+    """
+    comparison_started = threading.Event()
+    allow_comparison = threading.Event()
+    clear_started = threading.Event()
+
+    class _EpochSnapshot(int):
+        def __ne__(self, other):
+            comparison_started.set()
+            assert allow_comparison.wait(timeout=2)
+            return super().__ne__(other)
+
+    class _RaceSession(SessionState):
+        def __getattribute__(self, name):
+            if name == "epoch" and threading.current_thread().name == "stream":
+                return _EpochSnapshot(super().__getattribute__(name))
+            return super().__getattribute__(name)
+
+    class _FakeOrchestrator:
+        def answer(self, req):
+            yield {"type": "retrieval", "sufficiency": "sufficient"}
+            yield {"type": "answer_delta", "text": "答案 [1]"}
+            yield {"type": "done", "cited_evidence": [1]}
+            yield {"type": "sources", "items": [
+                {"index": 1, "chunk_id": 1, "citation": "来源"},
+            ]}
+
+    session = _RaceSession(
+        session_id="s1", language="zh", active_project_id="prior", active_version="old",
+    )
+    req = AnswerRequest("订单怎么预留库存", project_id="orders", version="v1")
+    resolved = ResolvedTurn(TurnKind.PROJECT_EXPLICIT, "orders", carry_forward=False)
+
+    stream = threading.Thread(
+        target=lambda: list(stream_and_record(
+            _FakeOrchestrator(), req, session, resolved, req.question,
+            turn_seq=1, created_epoch=0,
+        )),
+        name="stream",
+    )
+    clear = threading.Thread(
+        target=lambda: (clear_started.set(), session.clear()), name="clear",
+    )
+    stream.start()
+    assert comparison_started.wait(timeout=2)
+    clear.start()
+    assert clear_started.wait(timeout=2)
+
+    # 放行工作线程：修复后它先原子提交并释放锁，clear 随后清空；旧实现中 clear
+    # 已经抢先完成，工作线程会把旧项目写回。
+    allow_comparison.set()
+    stream.join(timeout=2)
+    clear.join(timeout=2)
+    assert not stream.is_alive()
+    assert not clear.is_alive()
+    assert session.epoch == 1
     assert session.active_project_id is None
     assert session.active_version is None
     assert session.last_turn is None
