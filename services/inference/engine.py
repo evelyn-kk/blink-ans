@@ -50,10 +50,15 @@ class InferenceEngine:
     # ---------- 生命周期 ----------
 
     def load(self, system_prompt: str | None = None) -> None:
-        from mlx_lm import load
-
+        # CR-035：导入本身要和真正的模型加载用同一段 try/except——没有 Metal 设备
+        # 的机器上 `import mlx_lm` 就会直接抛 ImportError，如果导入留在 try 之外，
+        # 这个异常会一路冲出 load()，调用方（apps/gateway boot()、
+        # tests/integration 的 module fixture）设计好的"读 status.error/
+        # pytest.skip"退化路径根本没机会跑到，会变成启动崩溃或 pytest setup error
+        # 而不是一个可观测、可测试的降级状态。
         t0 = time.perf_counter()
         try:
+            from mlx_lm import load
             self._model, self._tokenizer = load(self.status.model_id)
         except Exception as exc:
             self.status.error = f"{type(exc).__name__}: {exc}"

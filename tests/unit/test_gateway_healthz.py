@@ -131,6 +131,30 @@ def test_healthz_error_when_local_engine_not_loaded(monkeypatch):
     assert body["components"]["inference"]["ready"] is False
 
 
+def test_healthz_error_when_embedder_failed_to_load(monkeypatch):
+    """CR-035：嵌入模型加载失败必须和本地引擎/索引没就绪一样是硬错误——检索/
+    嵌入永远走本地（architecture.md §7），本地引擎、索引、云端凭据再正常，
+    没有嵌入模型也做不了检索，不该被 `_healthz_status()` 漏判成 "ok"/"degraded"。
+    """
+    monkeypatch.setattr(gw.engine, "status", _loaded_status())
+    monkeypatch.setattr(gw, "_store", FakeStore())
+    monkeypatch.setattr(gw, "_store_error", None)
+    monkeypatch.setattr(gw, "_router", FakeRouter(cloud=FakeCloudBackend(available=True)))
+    monkeypatch.setattr(gw.embedder, "error", "ModuleNotFoundError: No module named 'mlx_embeddings'")
+    monkeypatch.setattr(gw, "probe_network_floor", lambda: {
+        "host": "api.anthropic.com", "tcp_connect_s": 0.02, "tcp_tls_s": 0.05, "error": None,
+    })
+
+    body = _run(gw.healthz())
+
+    assert body["status"] == "error"
+    assert body["components"]["embedding"]["ready"] is False
+    assert body["components"]["embedding"]["error"] is not None
+    # 本地引擎/索引/云端本身没问题——问题精确定位在嵌入组件，不该被混报成别的。
+    assert body["components"]["inference"]["ready"] is True
+    assert body["components"]["index"]["ready"] is True
+
+
 def test_healthz_error_when_index_not_ready_with_store_error(monkeypatch):
     monkeypatch.setattr(gw.engine, "status", _loaded_status())
     monkeypatch.setattr(gw, "_store", None)
