@@ -107,13 +107,22 @@ async def lifespan(app: FastAPI):
         # 常驻前缀只有一槽（T-027），预热哪个语言由 _DEFAULT_LANGUAGE 决定。
         default_prompt = system_prompt(_DEFAULT_LANGUAGE)
         engine.load(default_prompt)
+        # CR-035：engine.load()/embedder.load() 现在都只把失败写进各自的
+        # error 状态、不再抛——没有 Metal 设备的机器（例如这个审查沙箱）以前
+        # 会在这两行直接崩掉整个 boot()，_store/_orchestrator/_router 全部
+        # 建不起来，/healthz 也没机会呈现"本地推理/嵌入不可用"，只能眼看
+        # 进程启动失败。现在两者失败都会继续往下走，让 /healthz 能报出具体
+        # 哪个组件坏了。
         embedder.load()
         try:
             _store = ChunkStore()
         except Exception as exc:
             _store_error = f"{type(exc).__name__}: {exc}"
             return
-        if engine.status.loaded:
+        # 检索/嵌入永远走本地（architecture.md §7）：embedder 没加载成功，
+        # Orchestrator 拿到手也是个每次检索都抛异常的半成品，不如干脆不建——
+        # /healthz 已经能从 embedder.error 单独报出这个组件坏了。
+        if engine.status.loaded and embedder.error is None:
             local = LocalBackend(engine)
             # ClaudeBackend 总是构造出来——它的 available() 只查环境变量，
             # 缺 ANTHROPIC_API_KEY 时路由自然只会用本地，不需要在这里判空后
@@ -138,20 +147,25 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="blink-ans gateway", lifespan=lifespan)
 
 
-def _healthz_status(core_ready: bool, cloud_ready: bool, s, store_error: str | None) -> str:
+def _healthz_status(
+    core_ready: bool, cloud_ready: bool, s, store_error: str | None,
+    embedder_error: str | None = None,
+) -> str:
     """T-029：三档状态——`/healthz` 要能区分"完全正常"和"云端挂了但本地能兜底"，
     不能把这两种都报成同一个 `"error"`（检索/嵌入永远走本地，architecture.md §7）。
 
-    - **硬错误（"error"）**：本地引擎或索引没就绪——这两个不 ready 服务就完全
-      不能用，与云端状态无关，判断条件不变（沿用原来的 `ready = s.loaded and
-      index_ready`）。
-    - **降级可用（"degraded"）**：本地 + 索引都 ready，但云端不可用/未配置——
-      服务仍然可用（本地兜底），不该跟硬错误混在一起报。这是本轮新增的一档。
-    - **正常（"ok"）**：本地 + 索引 + 云端都 ready。
-    - **"loading"**：本地/索引尚未就绪，但也没有记录错误——还在启动过程中，
+    - **硬错误（"error"）**：本地引擎、索引或嵌入模型没就绪——这三个不 ready
+      服务就完全不能用，与云端状态无关（CR-035：嵌入模型加载失败此前不会走到
+      这里判断——它会让 boot() 直接崩溃，进程都起不来，`/healthz` 无从谈起；
+      现在 embedder.load() 失败只置 error 不再抛，这里才第一次真正需要把它
+      纳入硬错误判断）。
+    - **降级可用（"degraded"）**：本地 + 索引 + 嵌入都 ready，但云端不可用/
+      未配置——服务仍然可用（本地兜底），不该跟硬错误混在一起报。
+    - **正常（"ok"）**：本地 + 索引 + 嵌入 + 云端都 ready。
+    - **"loading"**：核心组件尚未就绪，但也没有记录错误——还在启动过程中，
       沿用原有语义。
     """
-    core_error = bool(s.error or store_error)
+    core_error = bool(s.error or store_error or embedder_error)
     if core_ready and cloud_ready:
         return "ok"
     if core_ready:
@@ -163,7 +177,10 @@ def _healthz_status(core_ready: bool, cloud_ready: bool, s, store_error: str | N
 async def healthz():
     s = engine.status
     index_ready = _store is not None
-    core_ready = s.loaded and index_ready
+    # CR-035：检索/嵌入永远走本地——embedder 没加载成功，服务和本地引擎没
+    # 加载成功一样，都是不能用，必须一起进 core_ready，不能只看 engine/index。
+    embedding_ready = embedder.error is None
+    core_ready = s.loaded and index_ready and embedding_ready
     # "ready" 只反映凭据是否配置（ClaudeBackend.available()），语义不变——
     # 探测过真实连通性的结果单独放进 network_floor，不混进这个字段。
     cloud_ready = bool(_router and _router.cloud and _router.cloud.available())
@@ -186,7 +203,7 @@ async def healthz():
                               "error": f"{type(exc).__name__}: {exc}"}
 
     return {
-        "status": _healthz_status(core_ready, cloud_ready, s, _store_error),
+        "status": _healthz_status(core_ready, cloud_ready, s, _store_error, embedder.error),
         "components": {
             "inference": {
                 "ready": s.loaded, "model": s.model_id,
@@ -195,6 +212,15 @@ async def healthz():
                 "resident_prefix_language": _DEFAULT_LANGUAGE,
                 "template_version": template_version(),
                 "error": s.error,
+            },
+            # CR-035：检索/嵌入永远走本地，加载失败此前是个没人能观测到的裸
+            # 异常（boot() 直接崩溃）——现在 embedder.load() 只置 error，这里
+            # 单独报出来，不再混进 index 组件（index 报的是索引文件本身的
+            # 状态，和"负责查询期间把问题转成向量的这个模型是否加载成功"是
+            # 两回事）。
+            "embedding": {
+                "ready": embedding_ready, "model": embedder.model_id,
+                "error": embedder.error,
             },
             "index": {
                 "ready": index_ready,

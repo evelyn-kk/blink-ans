@@ -189,3 +189,28 @@ def test_stream_before_load_raises_runtime_error_without_mlx():
     """CR-002 的门禁性质：未加载时的错误路径不得依赖 Metal/MLX。"""
     with pytest.raises(RuntimeError, match="尚未加载"):
         next(InferenceEngine("fake-model").stream("测试"))
+
+
+# ---------- CR-035：load() 里 mlx_lm 导入失败必须落进 status.error，不能裸抛 ----------
+
+def test_load_captures_mlx_lm_import_failure_instead_of_raising(monkeypatch):
+    """在没有 Metal 设备的机器上，`import mlx_lm` 本身就会抛 `ImportError`——
+    这条判别性回归不依赖真实缺 Metal，而是用 `sys.modules["mlx_lm"] = None`
+    这个标准手法强制下一次 `import mlx_lm`/`from mlx_lm import ...` 抛
+    `ImportError`（见 Python 官方文档：模块名在 `sys.modules` 里映射到 `None`
+    时触发这个行为），在任何机器上都能确定性复现。
+
+    旧实现（`from mlx_lm import load` 在 `try` 之外）会让这个异常直接冲出
+    `load()`；调用方（`apps/gateway` 的 `boot()`、
+    `tests/integration/test_prefix_reuse.py` 的 module fixture）设计好的
+    "读 status.error/pytest.skip" 退化路径根本没机会跑到。修复后 `load()`
+    必须正常返回，并把这次导入失败写进 `status.error`。
+    """
+    monkeypatch.setitem(sys.modules, "mlx_lm", None)
+
+    eng = InferenceEngine("fake-model")
+    eng.load()  # 不能抛
+
+    assert eng.status.loaded is False
+    assert eng.status.error is not None
+    assert "mlx_lm" in eng.status.error or "ImportError" in eng.status.error
