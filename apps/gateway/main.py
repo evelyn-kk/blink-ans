@@ -287,17 +287,20 @@ class SessionCreateBody(BaseModel):
 
 
 def _session_view(s: SessionState) -> dict:
+    # CR-033：三个字段必须来自同一次 read_state()，不能分开单独读——否则可能
+    # 在另一线程的写回中途读到"项目已经切换，last_turn 却还是旧项目"的撕裂组合。
+    snap = s.read_state()
     return {
         "session_id": s.session_id,
         "language": s.language,
-        "active_project_id": s.active_project_id,
-        "active_version": s.active_version,
-        "last_turn": None if s.last_turn is None else {
-            "question": s.last_turn.question,
-            "entities": s.last_turn.entities,
-            "brief_conclusion": s.last_turn.brief_conclusion,
-            "cited_chunk_ids": s.last_turn.cited_chunk_ids,
-            "open_issue": s.last_turn.open_issue,
+        "active_project_id": snap.active_project_id,
+        "active_version": snap.active_version,
+        "last_turn": None if snap.last_turn is None else {
+            "question": snap.last_turn.question,
+            "entities": snap.last_turn.entities,
+            "brief_conclusion": snap.last_turn.brief_conclusion,
+            "cited_chunk_ids": snap.last_turn.cited_chunk_ids,
+            "open_issue": snap.last_turn.open_issue,
         },
     }
 

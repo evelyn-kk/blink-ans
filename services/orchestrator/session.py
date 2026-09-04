@@ -51,6 +51,15 @@ class TurnContext:
     open_issue: str | None = None         # 上一轮充分性不是 sufficient 时的简短标记，供追问参考
 
 
+@dataclass(frozen=True)
+class SessionSnapshot:
+    """`SessionState.read_state()` 的返回值：一次性、内部一致的三字段组合。"""
+
+    active_project_id: str | None
+    active_version: str | None
+    last_turn: TurnContext | None
+
+
 @dataclass
 class SessionState:
     """服务端持有的会话状态。内存字典存储，参照 apps/gateway/main.py 的 `_pending`
@@ -86,6 +95,19 @@ class SessionState:
     _state_lock: threading.RLock = field(
         default_factory=threading.RLock, init=False, repr=False, compare=False,
     )
+
+    def read_state(self) -> "SessionSnapshot":
+        """原子读取 active_project_id/active_version/last_turn 这一组字段。
+
+        CR-032 之后，clear() 与 stream_and_record() 的写回把这三个字段当一组
+        一起改（同一把 `_state_lock`）；但逐字段单独读（`s.active_project_id`
+        再 `s.last_turn`……）仍可能在两次读取之间被另一线程的写回穿插，读到
+        "部分新、部分旧"的撕裂组合——例如 `active_project_id` 已经是新项目，
+        `last_turn` 却还是旧项目的（CR-033）。读侧只需要一次性拿到内部一致的
+        快照，不需要在整个调用期间持锁，因此临界段和 clear()/写回一样短。
+        """
+        with self._state_lock:
+            return SessionSnapshot(self.active_project_id, self.active_version, self.last_turn)
 
     def clear(self) -> None:
         """清空会话上下文：保留 session_id 与 language，其余全部重置。
@@ -195,12 +217,16 @@ def resolve_turn(
     """
     if body_project_id is not None:
         return ResolvedTurn(TurnKind.PROJECT_EXPLICIT, body_project_id, carry_forward=False)
+    # CR-033：active_project_id 与 last_turn 必须来自同一个时刻——分两次单独
+    # 读取，可能被并发的 clear()/stream_and_record() 写回穿插，读到"项目已经
+    # 换了，但 last_turn 还是旧项目的"这种撕裂组合。
+    snap = session.read_state()
     if new_topic:
-        return ResolvedTurn(TurnKind.NEW_TOPIC, session.active_project_id, carry_forward=False)
-    if session.last_turn is not None and looks_like_followup(question):
-        return ResolvedTurn(TurnKind.FOLLOWUP, session.active_project_id, carry_forward=True)
-    if session.active_project_id is not None:
-        return ResolvedTurn(TurnKind.PROJECT_CONTINUED, session.active_project_id, carry_forward=False)
+        return ResolvedTurn(TurnKind.NEW_TOPIC, snap.active_project_id, carry_forward=False)
+    if snap.last_turn is not None and looks_like_followup(question):
+        return ResolvedTurn(TurnKind.FOLLOWUP, snap.active_project_id, carry_forward=True)
+    if snap.active_project_id is not None:
+        return ResolvedTurn(TurnKind.PROJECT_CONTINUED, snap.active_project_id, carry_forward=False)
     return ResolvedTurn(TurnKind.GENERAL, None, carry_forward=False)
 
 
@@ -248,15 +274,20 @@ def build_followup_request(
     module/symbol/version**，绝不放开 project_id——切换/清空之外，追问不能突破
     项目边界。
     """
-    last = session.last_turn
+    # CR-033：整段函数要跑 embedding + 检索，耗时不是几条字节码指令——如果像
+    # 旧代码那样逐次现读 session.xxx，中途完全可能撞上另一个 turn 并发完成的
+    # 写回，读到"project_id 已经是新的、last_turn 却还是旧的"这种撞车组合。
+    # 一次性在函数入口拿到内部一致的快照，后面全程只用这份快照，不再现读。
+    snap = session.read_state()
+    last = snap.last_turn
     assert last is not None
     vector = embedder.encode_one(question)
 
-    effective_version = body_version or last.entities.get("version") or session.active_version
+    effective_version = body_version or last.entities.get("version") or snap.active_version
 
     tight_kwargs: dict[str, str | None] = {
         "technology": last.entities.get("technology"),
-        "project_id": session.active_project_id,
+        "project_id": snap.active_project_id,
         "module": last.entities.get("module"),
         "symbol": last.entities.get("symbol"),
         "version": effective_version,
@@ -273,7 +304,7 @@ def build_followup_request(
         chosen, widened = tight_kwargs, False
     else:
         chosen, widened = {
-            "technology": None, "project_id": session.active_project_id,
+            "technology": None, "project_id": snap.active_project_id,
             "module": None, "symbol": None, "version": None,
         }, True
 

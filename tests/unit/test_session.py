@@ -524,6 +524,130 @@ def test_clear_cannot_interleave_between_epoch_check_and_stream_state_writeback(
     assert session.last_turn is None
 
 
+def test_read_state_blocks_until_writeback_fully_commits_not_a_partial_view():
+    """CR-033 判别性回归：`read_state()` 与 stream_and_record() 的写回共享
+    `_state_lock`——不能在写回临界段"active_project_id/active_version 已提交、
+    last_turn 还没提交"的中途返回一份撕裂快照。
+
+    在这个暂停点上直接现读 `session.active_project_id`/`active_version`
+    （旧代码在 resolve_turn()/build_followup_request()/_session_view() 里就是
+    这样逐字段读的）会看到撕裂组合：project 已经是新的，但 last_turn 还是
+    旧的（初始为 None）。`read_state()` 必须等同一把锁释放才返回，因此拿到的
+    只能是完整提交后的那一组。
+    """
+    paused = threading.Event()
+    resume = threading.Event()
+
+    class _RaceSession(SessionState):
+        def __setattr__(self, name, value):
+            if name == "last_turn" and threading.current_thread().name == "stream":
+                paused.set()
+                assert resume.wait(timeout=2)
+            object.__setattr__(self, name, value)
+
+    class _FakeOrchestrator:
+        def answer(self, req):
+            yield {"type": "retrieval", "sufficiency": "sufficient"}
+            yield {"type": "answer_delta", "text": "答案 [1]"}
+            yield {"type": "done", "cited_evidence": [1]}
+            yield {"type": "sources", "items": [
+                {"index": 1, "chunk_id": 1, "citation": "来源"},
+            ]}
+
+    session = _RaceSession(
+        session_id="s1", language="zh", active_project_id="prior", active_version="old",
+    )
+    req = AnswerRequest("订单怎么预留库存", project_id="orders", version="v1")
+    resolved = ResolvedTurn(TurnKind.PROJECT_EXPLICIT, "orders", carry_forward=False)
+
+    stream = threading.Thread(
+        target=lambda: list(stream_and_record(
+            _FakeOrchestrator(), req, session, resolved, req.question,
+            turn_seq=1, created_epoch=0,
+        )),
+        name="stream",
+    )
+    stream.start()
+    assert paused.wait(timeout=2)
+
+    # 撕裂点：project/version 已提交，last_turn 还没有——这就是旧的逐字段读取
+    # 方式（resolve_turn()/build_followup_request()/_session_view() 修复前）
+    # 会读到的具体撞车组合。
+    assert session.active_project_id == "orders"
+    assert session.active_version == "v1"
+    assert session.last_turn is None
+
+    # read_state() 此刻会因为拿不到锁而阻塞（锁被暂停中的写回线程持有）——
+    # 放到另一个线程里发起，避免它在主线程上把测试本身锁死；resume.set()
+    # 之后无论 reader 是先排到队还是后排到队，都只会在写回整体提交、锁释放
+    # 之后才拿到值，不影响下面的断言。
+    result: dict = {}
+    reader = threading.Thread(
+        target=lambda: result.__setitem__("snap", session.read_state()), name="reader",
+    )
+    reader.start()
+    resume.set()
+    stream.join(timeout=2)
+    reader.join(timeout=2)
+    assert not stream.is_alive()
+    assert not reader.is_alive()
+
+    snap = result["snap"]
+    assert snap.active_project_id == "orders"
+    assert snap.active_version == "v1"
+    assert snap.last_turn is not None  # 要么和上面一样等到齐全，要么该测试本身先超时失败
+
+
+def test_followup_request_uses_snapshot_taken_at_entry_not_interleaved_reads(monkeypatch):
+    """CR-033：build_followup_request() 做 embedding + 检索期间不能现读
+    session——这段时间足够长，另一个 turn 完全可能并发完成并写回新项目。
+    旧代码分四次单独读 session.last_turn/active_version/active_project_id
+    （其中两次分别在 embedding 前后），如果中途被切了项目，会把新项目的
+    project_id 和旧项目的 last_turn.cited_chunk_ids 拼进同一个请求——两个
+    项目的材料混进一次检索。这里用一个会在 encode_one() 里"抢跑"写回的假
+    embedder 模拟这个时序，断言返回的 req 整组字段必须来自调用时刻的项目，
+    不能是新旧混合。
+    """
+    last = TurnContext(
+        question="消费者为什么重复消费",
+        entities={"technology": "kafka", "project_id": None, "module": "consumer",
+                  "symbol": None, "version": None},
+        brief_conclusion="消费者未提交偏移量导致重复消费。",
+        cited_chunk_ids=[7, 9],
+    )
+    session = _session(active_project_id="orders", last_turn=last, active_version="v1")
+
+    class _InterleavingEmbedder:
+        def encode_one(self, _question):
+            # 模拟另一个 turn 恰好在这次 embedding 期间并发完成写回。
+            session.active_project_id = "checkout"
+            session.active_version = "v2"
+            session.last_turn = TurnContext(
+                question="换项目了", entities={}, brief_conclusion="换项目了",
+                cited_chunk_ids=[99],
+            )
+            return [0.0]
+
+    monkeypatch.setattr(
+        "services.orchestrator.session.hybrid_search",
+        lambda *a, **kw: [hit(i=7, dist=0.6)],
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.session.hits_by_rowid",
+        lambda *a, **kw: [hit(i=7, dist=0.6)],
+    )
+
+    req, widened = build_followup_request(
+        None, _InterleavingEmbedder(), session, "那要怎么验证修好了", "zh", CFG,
+    )
+
+    # 调用时刻是 orders——即便 embedding 期间会话已经被换成 checkout，
+    # 这一次追问请求也必须整组保持 orders（连带它的 cited_chunk_ids），
+    # 不能出现 project_id=checkout 却带着 orders 引用块这种混合。
+    assert req.project_id == "orders"
+    assert req.extra_hit_rowids == [7, 9]
+
+
 def test_clear_prevents_followup_classification_on_next_turn():
     session = SessionState(
         session_id="s1", language="zh", active_project_id="orders",
