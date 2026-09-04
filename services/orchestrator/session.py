@@ -202,6 +202,7 @@ class ResolvedTurn:
 
 def resolve_turn(
     question: str, body_project_id: str | None, new_topic: bool, session: SessionState,
+    *, snapshot: SessionSnapshot | None = None,
 ) -> ResolvedTurn:
     """按 architecture.md §3 的优先级判定这一轮的范围：
 
@@ -214,13 +215,20 @@ def resolve_turn(
     "离开项目回到通用知识库"——那需要用户显式清空或切换，见 SessionState.clear()——
     因此细分出 PROJECT_CONTINUED；真正的"通用知识库独立问题"只在会话从未
     选定过项目（或已被清空）时才成立。
+
+    `snapshot`：CR-034——`build_request_for_turn()` 在判完范围之后往往还要调用
+    `build_followup_request()`、或者读一次版本回落，如果各自独立 `read_state()`，
+    两次锁获取之间仍可能被并发写回插入，读到"这里判定的项目"和"那里用来检索/
+    回落版本的项目"对不上的组合。调用方应该在自己的入口只取一次快照，这里传进来
+    直接用；只有独立调用 `resolve_turn()`（不关心和后续步骤是否同一时刻）时才省略，
+    退化为自己现取一次。
     """
     if body_project_id is not None:
         return ResolvedTurn(TurnKind.PROJECT_EXPLICIT, body_project_id, carry_forward=False)
     # CR-033：active_project_id 与 last_turn 必须来自同一个时刻——分两次单独
     # 读取，可能被并发的 clear()/stream_and_record() 写回穿插，读到"项目已经
     # 换了，但 last_turn 还是旧项目的"这种撕裂组合。
-    snap = session.read_state()
+    snap = snapshot if snapshot is not None else session.read_state()
     if new_topic:
         return ResolvedTurn(TurnKind.NEW_TOPIC, snap.active_project_id, carry_forward=False)
     if snap.last_turn is not None and looks_like_followup(question):
@@ -256,7 +264,7 @@ def _enrich_question(question: str, brief_conclusion: str | None, language: Lang
 def build_followup_request(
     store: ChunkStore, embedder: Embedder, session: SessionState,
     question: str, language: Language, cfg: AnswerConfig,
-    body_version: str | None = None,
+    body_version: str | None = None, *, snapshot: SessionSnapshot | None = None,
 ) -> tuple[AnswerRequest, bool]:
     """追问的检索范围与证据来源。
 
@@ -273,12 +281,17 @@ def build_followup_request(
     只影响传给它的过滤条件，不重复生成流程）。放开限制**只丢弃 technology/
     module/symbol/version**，绝不放开 project_id——切换/清空之外，追问不能突破
     项目边界。
+
+    `snapshot`：CR-034——`resolve_turn()` 判定为 FOLLOWUP 用的是哪一份快照，
+    这里就该用同一份，否则"判定追问时看到的项目"和"这里实际拿去检索、拼
+    extra_hit_rowids 的项目"可能来自并发写回前后两个不同时刻。省略时退化为
+    自己现取一次（独立调用/测试场景）。
     """
     # CR-033：整段函数要跑 embedding + 检索，耗时不是几条字节码指令——如果像
     # 旧代码那样逐次现读 session.xxx，中途完全可能撞上另一个 turn 并发完成的
     # 写回，读到"project_id 已经是新的、last_turn 却还是旧的"这种撞车组合。
     # 一次性在函数入口拿到内部一致的快照，后面全程只用这份快照，不再现读。
-    snap = session.read_state()
+    snap = snapshot if snapshot is not None else session.read_state()
     last = snap.last_turn
     assert last is not None
     vector = embedder.encode_one(question)
@@ -328,11 +341,21 @@ def build_request_for_turn(
     范围判定的优先级链在 resolve_turn() 里；这里只根据判定结果分流到
     "追问"（复用上一轮证据/范围）或"非追问"（这一轮的显式过滤条件，
     与上一轮完全无关——避免切换项目/开始新问题时意外带出旧材料）两条路径。
+
+    CR-034：范围判定、追问请求构建、非追问分支的版本回落——这三步都要读
+    session 的 active_project_id/active_version/last_turn，如果各自独立
+    `read_state()`，两次锁获取之间足够另一个 turn 的写回完整插入进来，
+    读到"resolve_turn() 判定用的项目"和"build_followup_request() 实际检索、
+    或者版本回落用的项目"不是同一时刻的组合（CR-033 关掉的是单次调用内部的
+    撕裂，这里关的是同一次 build_request_for_turn() 里两次调用之间的撕裂）。
+    因此只在入口取一次快照，后面全程复用。
     """
-    resolved = resolve_turn(question, project_id, new_topic, session)
+    snap = session.read_state()
+    resolved = resolve_turn(question, project_id, new_topic, session, snapshot=snap)
     if resolved.kind is TurnKind.FOLLOWUP:
         req, widened = build_followup_request(
-            store, embedder, session, question, session.language, cfg, body_version=version,
+            store, embedder, session, question, session.language, cfg,
+            body_version=version, snapshot=snap,
         )
         if max_tokens is not None:
             req = replace(req, max_tokens=max_tokens)
@@ -347,7 +370,7 @@ def build_request_for_turn(
     elif resolved.kind is TurnKind.PROJECT_EXPLICIT:
         effective_version = None
     else:
-        effective_version = session.active_version
+        effective_version = snap.active_version
 
     req = AnswerRequest(
         question=question, language=session.language,
