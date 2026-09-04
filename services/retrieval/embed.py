@@ -7,7 +7,12 @@ I0 实测（bge-m3-mlx-8bit，1024 维）：
 
 from __future__ import annotations
 
+import sys
 import threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from services import mlx_runtime  # noqa: E402
 
 DEFAULT_MODEL = "mlx-community/bge-m3-mlx-8bit"
 DIM = 1024
@@ -27,6 +32,18 @@ class Embedder:
         with self._lock:
             if self._model is not None:
                 return
+            # CR-037：每次尝试都先清掉上一次的 error——不然重试成功之后旧的
+            # 错误消息会永远滞留，/healthz 报出一个已经不存在的故障。
+            self.error = None
+            # CR-036：`mlx_lm`/`mlx_embeddings` 底层共用同一份 mlx.core 原生
+            # 扩展。如果 InferenceEngine 那边已经导入失败过（可能是 nanobind
+            # 的 C++ 类型注册表停在半路），这里再导入一次会被判定为类型重复
+            # 注册，直接 fatal error 中止整个进程——不是 Python 异常，
+            # try/except 拦不住。见 services/mlx_runtime.py，检查这个进程级
+            # 哨兵，已经破损就不再尝试。
+            if mlx_runtime.broken:
+                self.error = f"跳过加载：{mlx_runtime.broken_reason}"
+                return
             try:
                 from mlx_embeddings import load
                 self._model, self._tok = load(self.model_id)
@@ -36,6 +53,8 @@ class Embedder:
                 # 整个网关起不来——即便云端生成本可用，检索这一步也是本地
                 # 强制的，所以这里必须能被上层观测到，而不是让进程直接退出。
                 self.error = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, ImportError):
+                    mlx_runtime.mark_broken(self.error)
 
     def encode(self, texts: list[str]) -> list[list[float]]:
         self.load()
