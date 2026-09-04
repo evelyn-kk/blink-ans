@@ -20,11 +20,26 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from services import mlx_runtime  # noqa: E402
 from services.inference.engine import InferenceEngine  # noqa: E402
 
 SYSTEM = "你是一名 Java 后端工程师，依据证据作答。"
 QUESTION = "Kafka 消费者重复消费的常见原因是什么？"
 TIMEOUT_S = 5.0
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mlx_runtime_broken_flag(monkeypatch):
+    """CR-036：`mlx_runtime.broken` 是进程级全局哨兵，一旦被某条测试通过
+    `mark_broken()` 置位就不会自己复原（这是它故意的设计——见
+    services/mlx_runtime.py），会一直污染同一个 pytest 进程里后面所有测试，
+    包括真实 Metal 环境下的 `tests/integration/test_prefix_reuse.py`。
+    `monkeypatch.setattr` 记录的是调用时刻的值，不管测试期间这两个全局
+    变量被 `mark_broken()` 怎么改，teardown 时都会强制恢复成这里设的值，
+    因此本文件每条测试都在干净状态下开始、结束后也不留痕迹。
+    """
+    monkeypatch.setattr(mlx_runtime, "broken", False)
+    monkeypatch.setattr(mlx_runtime, "broken_reason", None)
 
 
 class _Arr:
@@ -214,3 +229,66 @@ def test_load_captures_mlx_lm_import_failure_instead_of_raising(monkeypatch):
     assert eng.status.loaded is False
     assert eng.status.error is not None
     assert "mlx_lm" in eng.status.error or "ImportError" in eng.status.error
+
+
+# ---------- CR-036：mlx_runtime.broken 时绝不能再尝试导入原生扩展 ----------
+
+def test_load_skips_import_when_mlx_runtime_already_broken(monkeypatch):
+    """`mlx_runtime.broken` 已经被别的组件（比如 `Embedder`）置位时，
+    `InferenceEngine.load()` 绝不能再尝试 `import mlx_lm`——同一进程里对
+    共享的 mlx 原生扩展做第二次导入，会被 nanobind 判定为 C++ 类型重复注册，
+    直接调用 fatal error handler 中止整个进程（不是能在测试里安全触发、
+    用 `pytest.raises` 接住的 Python 异常）。这里放一个"被调用就报错"的
+    哨兵模块验证 `load()` 确实没有走到 import 这一步，而不是走了但侥幸没坏。
+    """
+    trap = types.ModuleType("mlx_lm")
+
+    def _trap_load(*_a, **_kw):
+        raise AssertionError("mlx_runtime.broken 时不该再尝试导入/加载")
+
+    trap.load = _trap_load
+    monkeypatch.setitem(sys.modules, "mlx_lm", trap)
+    monkeypatch.setattr(mlx_runtime, "broken", True)
+    monkeypatch.setattr(mlx_runtime, "broken_reason", "ImportError: 模拟 Embedder 先失败")
+
+    eng = InferenceEngine("fake-model")
+    eng.load()  # 不能抛，也不能碰 trap.load
+
+    assert eng.status.loaded is False
+    assert eng.status.error is not None
+    assert "跳过加载" in eng.status.error
+
+
+# ---------- CR-037：重试成功后不能留着上一次的旧 error ----------
+
+def test_status_error_clears_after_a_later_successful_load(monkeypatch):
+    """第一次 `load()` 失败之后，如果是非导入类失败（比如权重文件损坏——
+    这种失败发生在原生扩展已经导入成功之后，不触发 `mlx_runtime.mark_broken()`，
+    重试在原理上是安全的），后续重试成功时旧的 `status.error` 不能永远滞留，
+    否则 `/healthz` 会永久报一个已经不存在的故障。
+    """
+    _install_fake_mlx(monkeypatch, can_trim=True)
+    fake_mlx_lm = sys.modules["mlx_lm"]
+    calls = {"n": 0}
+
+    def fake_model(arr, cache=None):
+        if cache is not None:
+            cache[0].offset += len(arr.data)
+
+    def fake_load(_model_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("模拟权重文件损坏")
+        return fake_model, _Tokenizer()
+
+    fake_mlx_lm.load = fake_load
+
+    eng = InferenceEngine("fake-model")
+    eng.load()
+    assert eng.status.loaded is False
+    assert eng.status.error is not None
+    assert mlx_runtime.broken is False  # 非导入类失败，不该触发进程级哨兵
+
+    eng.load()  # 重试
+    assert eng.status.loaded is True
+    assert eng.status.error is None
