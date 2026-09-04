@@ -648,6 +648,74 @@ def test_followup_request_uses_snapshot_taken_at_entry_not_interleaved_reads(mon
     assert req.extra_hit_rowids == [7, 9]
 
 
+def test_build_request_for_turn_shares_one_snapshot_across_resolve_and_followup(monkeypatch):
+    """CR-034 判别性回归：resolve_turn() 判定范围用的快照，和
+    build_followup_request() 实际拿去检索的快照，必须是 build_request_for_turn()
+    入口那唯一一次 read_state()，不能各自现取。旧代码（CR-033 修复之后、
+    CR-034 修复之前）里 resolve_turn() 和 build_followup_request() 各自独立调用
+    `session.read_state()`，两次调用之间足够另一个 turn 的写回完整插入——判定
+    用的 `resolved.project_id` 和实际检索用的 `req.project_id`/`extra_hit_rowids`
+    可能来自并发写回前后两个不同时刻，彼此矛盾。
+
+    这里不用线程，直接给 `SessionState.read_state` 打一个"第一次调用返回旧值、
+    但顺带把底层字段写成新值"的补丁，模拟"两次 read_state() 之间，另一个 turn
+    抢先完成并写回"这个时序——不依赖具体调用点（embedding 前/后），对
+    resolve_turn() 和 build_followup_request() 各自独立取快照这件事本身有
+    判别力：只要调用了两次 `read_state()`，第二次就会看到补丁后的新值；只调用
+    一次（本轮修复后的行为）则两处结果必然一致。
+    """
+    last = TurnContext(
+        question="消费者为什么重复消费",
+        entities={"technology": "kafka", "project_id": None, "module": "consumer",
+                  "symbol": None, "version": None},
+        brief_conclusion="消费者未提交偏移量导致重复消费。",
+        cited_chunk_ids=[7, 9],
+    )
+    session = _session(active_project_id="orders", last_turn=last, active_version="v1")
+
+    orig_read_state = SessionState.read_state
+    calls = {"n": 0}
+
+    def patched_read_state(self):
+        calls["n"] += 1
+        snap = orig_read_state(self)
+        if calls["n"] == 1:
+            # 模拟这次 read_state() 返回之后、下一次 read_state() 之前，
+            # 另一个 turn 的写回完整插入进来。
+            self.active_project_id = "checkout"
+            self.active_version = "v2"
+            self.last_turn = TurnContext(
+                question="换项目了", entities={}, brief_conclusion="换项目了",
+                cited_chunk_ids=[99],
+            )
+        return snap
+
+    monkeypatch.setattr(SessionState, "read_state", patched_read_state)
+    monkeypatch.setattr(
+        "services.orchestrator.session.hybrid_search",
+        lambda *a, **kw: [hit(i=7, dist=0.6)],
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.session.hits_by_rowid",
+        lambda *a, **kw: [hit(i=7, dist=0.6)],
+    )
+
+    req, resolved, _ = build_request_for_turn(
+        None, FakeEmbedder(), session,
+        question="那要怎么验证修好了", project_id=None, technology=None,
+        module=None, symbol=None, version=None, new_topic=False,
+        max_tokens=None, cfg=CFG,
+    )
+
+    assert calls["n"] == 1  # 本轮修复后只应该有入口那一次调用
+    # 范围判定和实际检索必须来自同一时刻：都还是入口快照里的 orders，
+    # 不能出现 resolved.project_id 和 req.project_id 各说各话的组合。
+    assert resolved.kind is TurnKind.FOLLOWUP
+    assert resolved.project_id == "orders"
+    assert req.project_id == "orders"
+    assert req.extra_hit_rowids == [7, 9]
+
+
 def test_clear_prevents_followup_classification_on_next_turn():
     session = SessionState(
         session_id="s1", language="zh", active_project_id="orders",
