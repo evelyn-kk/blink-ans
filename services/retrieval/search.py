@@ -18,6 +18,26 @@ from .store import ChunkStore
 # 使两路检索都能对最终排序产生影响。
 RRF_K = 60
 
+# CR-041：`kafka` 与 `spring-kafka` 是同一技术栈的两层（broker 协议 / Spring
+# 客户端封装），互为对方问题的合理证据来源，但不能把它们塞进同一次 SQL
+# `technology = ?` 过滤——CR-040 证实那会让 `vector_search()` 全局 KNN
+# 预取阶段的候选名额被一方挤占。做法是每个技术域独立跑一遍关键词/向量检索、
+# 各自拿到不受另一方干扰的公平候选，再用 RRF 合并——见 hybrid_search() 的
+# technology 分组处理。
+#
+# 组内第二项（副技术域）按缩权重合并，而非与主技术域同权：实测（CR-041）
+# 同权合并会让 spring-kafka 的候选反过来压过 kafka 的正确答案——
+# 「Kafka 消费者重复消费怎么排查」「Kafka 分区副本的同步机制是什么」这类
+# broker 协议/设计问题，spring-kafka 语料量大（799 块，大量提到 consumer/
+# producer），同权 RRF 下会把本该第 1~7 名的正确块挤到第 15/3 名。缩权重
+# （0.4）后二者兼顾：DLQ/重试这类真正需要 spring-kafka 的问题排名从
+# 20 名提升到个位数，broker 设计类问题的排名基本不受影响（1→1、7→7）。
+_RELATED_TECH_WEIGHT = 0.4
+TECHNOLOGY_GROUPS: dict[str, tuple[tuple[str, float], ...]] = {
+    "kafka": (("kafka", 1.0), ("spring-kafka", _RELATED_TECH_WEIGHT)),
+    "spring-kafka": (("spring-kafka", 1.0), ("kafka", _RELATED_TECH_WEIGHT)),
+}
+
 # 两路等权（2026-09-02 / T-017 重新标定）。
 #
 # I1 定为 0.5 的理由是"语料全英文、提问全中文，bm25 只能靠 ASCII 词排序"，
@@ -170,6 +190,17 @@ def vector_search(
     return [(r["rowid"], r["distance"]) for r in rows[:limit]]
 
 
+def _rrf_accumulate(
+    scores: dict[int, list], ranked: list[tuple[int, float]],
+    weight: float, k: int, slot: int,
+) -> None:
+    """把一路排名累加进共享的 RRF 分数表；`slot` 是 1（关键词名次）或 2（向量名次）。"""
+    for rank, (rid, _) in enumerate(ranked, 1):
+        entry = scores.setdefault(rid, [0.0, None, None])
+        entry[0] += weight / (k + rank)
+        entry[slot] = rank
+
+
 def rrf_fuse(
     keyword: list[tuple[int, float]],
     vector: list[tuple[int, float]],
@@ -183,14 +214,8 @@ def rrf_fuse(
     per-query 归一化，既脆弱又难调。RRF 只看名次，对分数分布不敏感。
     """
     scores: dict[int, list] = {}
-    for rank, (rid, _) in enumerate(keyword, 1):
-        scores.setdefault(rid, [0.0, None, None])
-        scores[rid][0] += keyword_weight / (k + rank)
-        scores[rid][1] = rank
-    for rank, (rid, _) in enumerate(vector, 1):
-        scores.setdefault(rid, [0.0, None, None])
-        scores[rid][0] += vector_weight / (k + rank)
-        scores[rid][2] = rank
+    _rrf_accumulate(scores, keyword, keyword_weight, k, 1)
+    _rrf_accumulate(scores, vector, vector_weight, k, 2)
     return {rid: tuple(v) for rid, v in scores.items()}
 
 
@@ -213,17 +238,30 @@ def hybrid_search(
 
     token_budget 不为空时，按融合得分依次取块直到预算耗尽——
     这是把 I0 的时延约束落到检索层的地方。
+
+    `technology` 落在 `TECHNOLOGY_GROUPS`（例如 kafka / spring-kafka）时，
+    组内每个技术域各自独立跑一遍检索、各自拿公平的 `candidates` 名额，
+    再一起做 RRF；不是把组内技术域一次性 OR 进同一条 SQL 过滤，那样会在
+    `vector_search()` 的全局 KNN 预取阶段互相挤占候选（CR-040/CR-041）。
     """
-    kw = keyword_search(
-        store, query, candidates, technology, project,
-        project_id=project_id, module=module, symbol=symbol, version=version,
-    )
-    vec = vector_search(
-        store, query_vector, candidates, technology, project,
-        project_id=project_id, module=module, symbol=symbol, version=version,
-    ) if query_vector else []
-    distances = dict(vec)
-    fused = rrf_fuse(kw, vec)
+    techs = TECHNOLOGY_GROUPS.get(technology, ((technology, 1.0),)) if technology else ((None, 1.0),)
+
+    scores: dict[int, list] = {}
+    distances: dict[int, float] = {}
+    for tech, tech_weight in techs:
+        kw = keyword_search(
+            store, query, candidates, tech, project,
+            project_id=project_id, module=module, symbol=symbol, version=version,
+        )
+        vec = vector_search(
+            store, query_vector, candidates, tech, project,
+            project_id=project_id, module=module, symbol=symbol, version=version,
+        ) if query_vector else []
+        distances.update(vec)
+        _rrf_accumulate(scores, kw, KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
+        _rrf_accumulate(scores, vec, VECTOR_WEIGHT * tech_weight, RRF_K, 2)
+
+    fused = {rid: tuple(v) for rid, v in scores.items()}
     if not fused:
         return []
 

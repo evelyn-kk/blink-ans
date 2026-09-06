@@ -60,6 +60,17 @@ def store(tmp_path_factory) -> ChunkStore:
             cloud_generation_allowed=False,
         ))
         vecs.append(_vec(5))
+        # CR-041：technology="kafka" 与 "spring-kafka" 是一组（见
+        # search.TECHNOLOGY_GROUPS），不放进上面按下标自动编号的 DOCS，
+        # 避免与已有断言依赖的下标（_vec(0)/_vec(3)/_vec(5) 等）产生冲突。
+        chunks.append(Chunk(
+            source_url="https://docs.spring.io/spring-kafka/reference/4.1/x.html",
+            source_project="spring-kafka", version_or_commit="v4.1.1", license="Apache-2.0",
+            retrieved_at=utc_now(), title_path=["Spring Kafka", "死信队列"],
+            technology="spring-kafka", content_type="prose", locale="en",
+            text="Configure a DeadLetterPublishingRecoverer to route failed records to a dead letter topic.",
+        ))
+        vecs.append(_vec(6))
         for c in chunks:
             c.validate()
         assert b.add(chunks, vecs) == len(chunks)
@@ -114,6 +125,37 @@ def test_vector_only_query_returns_expected_doc(store):
 # ---------- 过滤与预算 ----------
 
 def test_technology_filter_applies_to_both_paths(store):
+    hits = hybrid_search(store, "配置", _vec(0), limit=10, technology="kubernetes")
+    assert hits and all(h.technology == "kubernetes" for h in hits)
+
+
+# ---------- 技术域分组（CR-040/CR-041） ----------
+
+def test_technology_group_includes_related_technology(store):
+    """`technology="kafka"` 不应把 spring-kafka 的证据整个排除掉——
+    CR-041 独立复现过"纯 Kafka 问题系统性排除 Spring Kafka 文档"这个缺陷。"""
+    hits = hybrid_search(store, "死信队列", _vec(6), limit=10, technology="kafka")
+    assert any(h.technology == "spring-kafka" for h in hits)
+
+
+def test_technology_group_secondary_has_lower_weight_than_primary():
+    """组内主技术域权重必须大于副技术域（CR-041 实测数据驱动的取舍）：
+    同权合并实测会让 spring-kafka 挤占 kafka 协议类问题的候选（CR-040 那种
+    退步的翻版，见 development-notes.md 2026-09-06 的权重扫描数据），
+    因此这条关系本身要有回归保护，不能在调参时被无意改掉。"""
+    from services.retrieval.search import TECHNOLOGY_GROUPS
+
+    for primary_tech, members in TECHNOLOGY_GROUPS.items():
+        weights = dict(members)
+        assert weights[primary_tech] == 1.0
+        for other_tech, weight in weights.items():
+            if other_tech != primary_tech:
+                assert 0 < weight < 1.0
+
+
+def test_technology_without_group_membership_is_unaffected(store):
+    """不在 `TECHNOLOGY_GROUPS` 里的技术域（如 kubernetes）行为不变——
+    分组机制只是 hybrid_search 内部对特定技术域的额外处理，不能影响其他域。"""
     hits = hybrid_search(store, "配置", _vec(0), limit=10, technology="kubernetes")
     assert hits and all(h.technology == "kubernetes" for h in hits)
 

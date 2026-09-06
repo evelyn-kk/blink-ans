@@ -125,23 +125,51 @@ probes:
   - q: Spring Kafka 消费失败怎么配置重试和死信队列
     project: spring-kafka
     gold: "Retry Config › Configuration › Using the `@RetryableTopic` annotation"
-    baseline: 20
+    baseline: 6
     known_open: true
     note: |
       2026-09-06（CR-039）：人工打开 `retrytopic/retry-config.adoc` 源文件
       确认该小节正文是"给 `@KafkaListener` 方法加 `@RetryableTopic` 注解即可
-      自动搭建重试与死信主题"——对这个问题最直接、最常规的回答。判别性
-      验证（与生产 `probe_ranking.py` 同口径 `limit=20`）：把
-      `source_project IN ('spring-kafka','debezium')` 的行从索引删除后
-      重放同一查询，`rank=None`；含新来源的真实索引上为第 20 名（top_k=5
-      的候选窗口边缘）——确认这是"有没有新语料"决定的，不是探针编号误差。
-      如实记录一个新发现：`detect_technology()`（`services/retrieval/
-      tokenize.py`）对同时出现"spring"与"kafka"的问题判定为跨技术域、
-      放弃过滤，于是这条查询要在全部 14581 块里和其余技术域竞争 30 个候选
-      名额，而不是在 spring-kafka 自己的 799 块里竞争；手工强制加
-      `technology=spring-kafka` 过滤后重测，同一 gold 能排到第 7 名。说明
-      "spring"+"kafka"同时出现时的歧义放弃对"Spring Kafka 这个库本身"这类
-      其实并不歧义的常见问法反而是伤害而非保护——这个问题不在本轮
-      （T-018/CR-039/CR-040）处理范围内，留给下一轮改进 `detect_technology()`
-      的歧义判定（例如识别"spring"与"kafka"同时出现且无第三个技术词时，
-      应优先判定为 spring-kafka 单一技术域）时再解决。
+      自动搭建重试与死信主题"——对这个问题最直接、最常规的回答。
+      2026-09-06（CR-041，处理 codex R36 复审意见）：R36 指出上一版基线
+      （20）的成因——`detect_technology()` 对同时出现"spring"与"kafka"的
+      问题判定为跨技术域放弃过滤——不该留到下一轮，因为它本身就是本任务
+      "让 Spring Kafka 场景可检索"的核心目标没达成。已处理：
+      1) `detect_technology()` 新增组合判定，"spring"+"kafka"同时出现
+         （且没有第三个技术域词）时直接判定为 `spring-kafka` 单一技术域，
+         不再退化为不加过滤的全库检索。
+      2) `services/retrieval/search.py` 新增 `TECHNOLOGY_GROUPS`：
+         `kafka`/`spring-kafka` 视为一组，检索时两个技术域各自独立跑一遍
+         关键词/向量检索（各自拿公平的候选名额，不共用同一次 SQL 过滤），
+         再按主/副权重（1.0 / 0.4）用 RRF 合并——主技术域权重更高，避免
+         重演 CR-040 那种"副技术域挤占主技术域候选"的退步。
+      本题按新逻辑排到第 6 名（此前 7 名），判别性验证：删除
+      `source_project IN ('spring-kafka','debezium')` 的对照索引上仍为
+      `rank=None`。同组的两条 Kafka broker 协议探针（"消费者重复消费怎么
+      排查"“分区副本的同步机制”）分别保持第 7、第 1 名，不受影响——权重
+      取值 0.4 是在这两类问题之间实测扫描 [0.4, 0.6, 0.7, 0.8, 1.0] 选出的，
+      过程记录见 `development-notes.md`。
+
+  # ---- CR-041：不提"Spring"也不能系统性排除 Spring Kafka（codex R36 复现的具体案例） ----
+  - q: Kafka 消费失败怎么配置重试和死信队列
+    project: spring-kafka
+    gold: "Retry Config › Configuration › Using the `@RetryableTopic` annotation"
+    baseline: 12
+    known_open: true
+    note: |
+      2026-09-06（CR-041）：与上一条金标准探针问的是同一件事，唯一区别是
+      **不提"Spring"**——这正是 codex R36 复审独立复现的具体反例："纯 Kafka
+      重试/DLQ 问题会过滤为 kafka，排除 Spring Kafka 文档"。死信队列/DLQ
+      在 Kafka 生态里不是 broker 协议的原生概念，`detect_technology()` 新增
+      "死信"/"dlq"/"dead letter" 三个词直接判定为 `spring-kafka`（见
+      `services/retrieval/tokenize.py` PROJECT_TERMS），不要求用户显式说出
+      "Spring"。修复前（`technology` 判定为纯 `kafka`，spring-kafka 完全
+      被排除在候选之外）：`rank=None`，`hybrid_search(limit=20)` 返回的
+      20 条候选 100% 来自 kafka（0 条 spring-kafka）；修复后：第 12 名。
+      未进 top5，如实
+      记为 known_open——`TECHNOLOGY_GROUPS` 的权重机制保证了"不被系统性
+      排除"，但排序质量本身还不够好（这是与上一条探针共享的同一个残留
+      gap：spring-kafka 自己 799 块内部对这个问题的排序也没有把
+      `@RetryableTopic` 一节排到很前，见上一条探针的 note）。判别性验证：
+      `git stash` 换回 CR-041 之前的 `tokenize.py`/`search.py`，重放同一
+      查询确认退化为 `technology=kafka`、`rank=None`。

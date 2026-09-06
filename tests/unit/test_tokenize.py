@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.retrieval.tokenize import (  # noqa: E402
-    dictionary_version, to_fts_document, to_fts_query, tokenize,
+    dictionary_version, detect_technology, to_fts_document, to_fts_query, tokenize,
 )
 
 
@@ -248,3 +248,40 @@ def test_order_is_not_globally_stopworded():
     一刀切会让「ORDER BY 怎么用」这类提问失去唯一的有效检索词。
     停用词表每加一个词都是一次取舍，不能因为某个场景里它是噪声就全局封杀。"""
     assert '"order"' in to_fts_query("ORDER BY 怎么用")
+
+
+# ---------- detect_technology（CR-041） ----------
+
+def test_plain_technology_word_resolves_to_single_domain():
+    """没有任何组合触发条件时，单个技术词按原样返回——broker 协议类问题
+    （不提 Spring、不提死信队列）必须继续严格限定在 kafka 这一个域，
+    这是 CR-040 的修复要保住的行为。"""
+    assert detect_technology("Kafka 分区副本的同步机制是什么") == "kafka"
+    assert detect_technology("Kubernetes liveness probe 配置参数有哪些") == "kubernetes"
+
+
+def test_spring_and_kafka_together_resolves_to_spring_kafka():
+    """「Spring Kafka 怎么配置重试」不是跨技术域问题——用户说的就是
+    spring-kafka 这一个库，不应该退化成不加过滤的全库检索（CR-041 前的
+    行为）。"""
+    assert detect_technology("Spring Kafka 消费失败怎么配置重试和死信队列") == "spring-kafka"
+    assert detect_technology("Spring Boot 集成 Kafka 该怎么配置消费者") == "spring-kafka"
+
+
+@pytest.mark.parametrize("q", [
+    "Kafka 消费失败怎么配置重试和死信队列",
+    "Kafka 的 DLQ 怎么配置",
+    "kafka dead letter 怎么处理",
+])
+def test_dead_letter_queue_wording_resolves_to_spring_kafka_without_mentioning_spring(q):
+    """死信队列/DLQ 在 Kafka 生态里不是 broker 协议的原生概念，而是消费端框架
+    （本产品语料范围内即 spring-kafka）的错误处理模式——不能因为用户没有
+    显式说"Spring"，就把这类问题过滤成纯 kafka 域，系统性排除 Spring Kafka
+    的证据（CR-041 独立复现的具体案例）。"""
+    assert detect_technology(q) == "spring-kafka"
+
+
+def test_genuine_cross_domain_question_still_returns_none():
+    """真正涉及三个技术域的问题不能被 CR-041 的组合规则误伤——
+    这里没有一个"更具体的单一域"可以收敛到，必须继续放弃过滤。"""
+    assert detect_technology("Spring Boot 怎么集成 Kafka 和 Redis 做缓存穿透保护") is None

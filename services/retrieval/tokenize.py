@@ -89,6 +89,26 @@ PROJECT_TERMS = {
     "redis": "redis",
     "spring": "spring", "springboot": "spring",
     "debezium": "debezium",
+    # CR-041：死信队列/DLQ 在 Kafka 生态里不是 broker 协议的原生概念，
+    # 而是消费端框架（本产品语料范围内即 spring-kafka）的错误处理模式；
+    # 提到它就该直接判定为 spring-kafka，不必等用户说出"Spring"两个字。
+    "死信": "spring-kafka", "dlq": "spring-kafka", "dead letter": "spring-kafka",
+}
+
+
+# CR-041：以下技术域组合不算真正的跨技术域歧义，而是应该收敛到一个更具体的
+# 单一技术域：
+# - `kafka` + `spring`：用户说的就是 spring-kafka 这一个库（"Spring Kafka
+#   怎么配置重试"、"Spring Boot 集成 Kafka"），不是要同时检索两个域。
+# - `kafka` + `spring-kafka`（例如同时提到 "kafka" 与 "死信队列"）：
+#   spring-kafka 已经是更具体的判定依据，`kafka` 只是背景术语。
+# 真正跨域的问题（例如同时提到 spring/kafka/redis 三个域）不在这张表里，
+# 找不到就落回一般规则返回 None。
+_COMBO_RESOLUTIONS: dict[frozenset[str], str] = {
+    frozenset({"spring", "kafka"}): "spring-kafka",
+    frozenset({"spring", "kafka", "spring-kafka"}): "spring-kafka",
+    frozenset({"kafka", "spring-kafka"}): "spring-kafka",
+    frozenset({"spring", "spring-kafka"}): "spring-kafka",
 }
 
 
@@ -96,10 +116,12 @@ def detect_technology(text: str) -> str | None:
     """从提问中识别技术域，用于检索过滤。
 
     返回第一个匹配到的技术域；匹配到多个时返回 None，
-    因为跨技术域的问题（如"Spring Boot 连 Kafka"）不应被单域过滤掉。
+    因为跨技术域的问题（如"Spring Boot 连 Kafka 和 Redis"）不应被单域过滤掉。
     """
     low = text.lower()
     found = {tech for term, tech in PROJECT_TERMS.items() if term in low}
+    if (resolved := _COMBO_RESOLUTIONS.get(frozenset(found))) is not None:
+        return resolved
     return found.pop() if len(found) == 1 else None
 
 
