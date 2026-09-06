@@ -25,7 +25,10 @@ from services.sync.registry import load_registry  # noqa: E402
 def cmd_sources(args) -> int:
     for s in load_registry():
         mark = "入库" if s.ingest else "仅链接"
-        print(f"{s.id:<20} {s.license:<18} {s.format:<9} {mark:<7} {s.repo}")
+        # authored 来源（场景卡片）没有独立仓库/许可——见 knowledge/sources.yaml 的说明。
+        license_ = s.license or "(继承自引用来源)"
+        repo = s.repo or "(无上游仓库，人工撰写)"
+        print(f"{s.id:<20} {license_:<18} {s.format:<9} {mark:<7} {repo}")
         if not s.ingest:
             print(f"  └─ {' '.join(s.ingest_blocked_reason.split())}")
     return 0

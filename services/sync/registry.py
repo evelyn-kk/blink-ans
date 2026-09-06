@@ -15,11 +15,12 @@ import yaml
 
 REGISTRY_PATH = Path(__file__).resolve().parents[2] / "knowledge" / "sources.yaml"
 
-_REQUIRED = (
-    "id", "project", "technology", "repo", "ref",
-    "license", "license_file", "format", "locale", "base_url", "paths",
-)
-_FORMATS = {"markdown", "asciidoc", "html", "docbook"}
+# 通用必填字段，两类来源都要有。
+_REQUIRED = ("id", "project", "technology", "format", "locale", "paths")
+# 只对"从远程仓库拉取"的来源才适用；authored 来源（人工撰写的场景卡片）
+# 没有上游仓库、没有独立许可，这些字段对它没有意义。
+_FETCHED_REQUIRED = ("repo", "ref", "license", "license_file", "base_url")
+_FORMATS = {"markdown", "asciidoc", "html", "docbook", "authored"}
 _MARKDOWN_ANCHOR_STYLES = {"generic", "kafka", "kubernetes"}
 
 
@@ -32,14 +33,15 @@ class Source:
     id: str
     project: str
     technology: str
-    repo: str
-    ref: str
-    license: str
-    license_file: str
     format: str
     locale: str
-    base_url: str
     paths: tuple[str, ...]
+    # 仅"从远程仓库拉取"的来源会填这些；authored 来源留 None。
+    repo: str | None = None
+    ref: str | None = None
+    license: str | None = None
+    license_file: str | None = None
+    base_url: str | None = None
     url_template: str | None = None   # 可用 {path} 与 {anchor} 占位
     url_strip_prefix: str | None = None
     # Hugo/Docsy 并没有统一的标题 id 规则；这里明确记录已实测的发布器规则。
@@ -65,6 +67,27 @@ def _one(raw: dict[str, Any]) -> Source:
     if raw["format"] not in _FORMATS:
         raise RegistryError(f"来源 {raw['id']!r} 的 format {raw['format']!r} 不受支持")
 
+    is_authored = raw["format"] == "authored"
+
+    if is_authored:
+        # authored 来源（人工撰写的场景卡片）没有上游仓库、没有独立许可——
+        # 每个小节的许可/版本在构建时从它引用的真实来源继承（见 services/sync/cards.py）。
+        # 写了这些字段就是伪造"这是从某仓库拉取、有独立许可"的元数据，必须拒绝而非静默忽略。
+        present = [k for k in _FETCHED_REQUIRED if raw.get(k)]
+        if present:
+            raise RegistryError(
+                f"来源 {raw['id']!r} 是 authored 格式，不适用 {', '.join(present)}；"
+                f"这些字段只对拉取式来源有意义"
+            )
+    else:
+        missing_fetched = [k for k in _FETCHED_REQUIRED if not raw.get(k)]
+        if missing_fetched:
+            raise RegistryError(
+                f"来源 {raw.get('id', '?')!r} 缺少必填字段: {', '.join(missing_fetched)}"
+            )
+        if not str(raw["repo"]).startswith("https://"):
+            raise RegistryError(f"来源 {raw['id']!r} 的 repo 必须是 https 地址")
+
     anchor_style = raw.get("markdown_anchor_style", "generic")
     if anchor_style not in _MARKDOWN_ANCHOR_STYLES:
         raise RegistryError(
@@ -73,16 +96,13 @@ def _one(raw: dict[str, Any]) -> Source:
     if anchor_style != "generic" and raw["format"] != "markdown":
         raise RegistryError(f"来源 {raw['id']!r} 的 markdown_anchor_style 只适用于 markdown")
 
-    if not str(raw["repo"]).startswith("https://"):
-        raise RegistryError(f"来源 {raw['id']!r} 的 repo 必须是 https 地址")
-
     ingest = bool(raw.get("ingest", True))
     if not ingest and not raw.get("ingest_blocked_reason"):
         raise RegistryError(
             f"来源 {raw['id']!r} 标记为不入库，必须写明 ingest_blocked_reason 以便审计"
         )
 
-    known = set(_REQUIRED) | {
+    known = set(_REQUIRED) | set(_FETCHED_REQUIRED) | {
         "ingest", "ingest_blocked_reason", "sync_frequency",
         "url_template", "url_strip_prefix", "markdown_anchor_style", "url_path_drop_chars",
     }
@@ -90,14 +110,14 @@ def _one(raw: dict[str, Any]) -> Source:
         id=raw["id"],
         project=raw["project"],
         technology=raw["technology"],
-        repo=raw["repo"].rstrip("/"),
-        ref=raw["ref"],
-        license=raw["license"],
-        license_file=raw["license_file"],
         format=raw["format"],
         locale=raw["locale"],
-        base_url=raw["base_url"],
         paths=tuple(raw["paths"]),
+        repo=(raw["repo"].rstrip("/") if not is_authored else None),
+        ref=raw.get("ref") if not is_authored else None,
+        license=raw.get("license") if not is_authored else None,
+        license_file=raw.get("license_file") if not is_authored else None,
+        base_url=raw.get("base_url") if not is_authored else None,
         url_template=raw.get("url_template"),
         url_strip_prefix=raw.get("url_strip_prefix"),
         markdown_anchor_style=anchor_style,

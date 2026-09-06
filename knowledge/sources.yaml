@@ -174,6 +174,25 @@ sources:
     ingest: true
     sync_frequency: monthly
 
+  # 2026-09-06（T-007）：场景卡片，人工撰写的英文说明，把分散在多个官方
+  # 来源里的结论组织成一篇连贯文档（例如 Outbox 模式横跨 debezium 与
+  # kafka）。format: authored 表示没有上游仓库、没有独立许可——卡片每个
+  # 小节必须显式引用一个已登记来源的真实 URL，落库时该块的
+  # source_url/source_project/version_or_commit/license/technology 全部
+  # 照抄被引用来源的真实值（见 services/sync/cards.py），因此这里不需要
+  # 也不允许填 repo/ref/license/license_file/base_url。
+  # 必须放在本文件最后：--mode full 按注册表顺序处理来源，排最后才能让
+  # 卡片引用到"本轮刚同步"的最新版本号，而不是上一次激活索引的旧值。
+  - id: scenario-cards
+    project: scenario-cards
+    technology: scenario-cards   # 仅用于本来源自身的登记展示，不写入任何 Chunk
+    format: authored
+    locale: en
+    paths:
+      - knowledge/scenarios
+    ingest: true
+    sync_frequency: on-edit
+
   # ---- 仅实时链接检索，正文不入库 ----
 
   - id: redis-official

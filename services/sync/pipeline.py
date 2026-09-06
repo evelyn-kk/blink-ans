@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -20,8 +19,10 @@ from services.retrieval.embed import DEFAULT_MODEL, Embedder  # noqa: E402
 from services.retrieval.search import hybrid_search  # noqa: E402
 from services.retrieval.store import CURRENT, ChunkStore, EmbeddingCache, IndexBuilder  # noqa: E402
 
+from . import cards  # noqa: E402
 from .chunk import sections_to_chunks  # noqa: E402
 from .fetch import LicenseError, collect_files, fetch, head_commit  # noqa: E402
+from .models import SourceResult, SyncReport  # noqa: E402
 from .parse import parse_file  # noqa: E402
 from .registry import Source, ingestible, load_registry  # noqa: E402
 
@@ -29,34 +30,16 @@ REGRESSION_PATH = Path(__file__).resolve().parents[2] / "knowledge" / "regressio
 EMBED_BATCH = 16
 
 
-@dataclass
-class SourceResult:
-    source_id: str
-    commit: str = ""
-    files: int = 0
-    chunks: int = 0
-    rejected: int = 0
-    reject_reasons: dict[str, int] = field(default_factory=dict)
-    error: str | None = None
+def collect_chunks(
+    src: Source,
+    log: Callable[[str], None],
+    versions: dict[str, str] | None = None,
+) -> tuple[list[Chunk], SourceResult]:
+    if src.format == "authored":
+        # 场景卡片没有上游仓库，完全不走下面的 fetch/许可校验/通用解析——
+        # 见 services/sync/cards.py 顶部说明。
+        return cards.collect_chunks(src, log, versions)
 
-
-@dataclass
-class SyncReport:
-    sources: list[SourceResult] = field(default_factory=list)
-    mode: str = "full"
-    total_chunks: int = 0        # 本次同步实际写入的块（不含合并时搬运的）
-    index_chunks: int = 0        # 暂存索引内的总块数
-    carried_chunks: int = 0      # 合并更新时从当前索引搬运的块
-    regression_passed: bool = False
-    regression_failures: list[str] = field(default_factory=list)
-    regression_skipped: list[str] = field(default_factory=list)
-    activated: bool = False
-    incomplete: bool = False     # 有来源未能同步，索引缺内容
-    index_path: Path | None = None
-    staging_path: Path | None = None
-
-
-def collect_chunks(src: Source, log: Callable[[str], None]) -> tuple[list[Chunk], SourceResult]:
     res = SourceResult(source_id=src.id)
     try:
         fetched = fetch(src)
@@ -228,13 +211,23 @@ def sync(
             # 先搬底座再写新来源：底座里若还留着这些来源的旧块，
             # (source_url, checksum) 唯一键会把新块当重复丢掉，
             # 结果是"更新了却没变"。exclude 掉本次同步的项目即可。
+            #
+            # authored 来源（场景卡片）的块 source_project 是它引用的真实
+            # 来源，不是卡片自己的项目名，所以按 source_project 排除认不出
+            # 旧卡片块——额外按卡片目录的路径前缀排除一遍（见
+            # store.carry_over() 与 services/sync/cards.py 的说明）。
+            exclude_paths = tuple(
+                p for s in sources if s.format == "authored" for p in s.paths
+            )
             versions = builder.existing_versions(CURRENT)
-            moved = builder.carry_over(CURRENT, projects, DEFAULT_MODEL)
+            moved = builder.carry_over(CURRENT, projects, DEFAULT_MODEL, exclude_paths)
             report.carried_chunks = moved
             log(f"  从当前索引搬运 {moved} 块（{', '.join(sorted(projects))} 之外的来源）")
 
         for src in sources:
-            chunks, res = collect_chunks(src, log)
+            # authored 来源（场景卡片）用它来把引用解析成"本轮/当前索引里
+            # 该来源的真实版本"；拉取式来源忽略这个参数。
+            chunks, res = collect_chunks(src, log, versions)
             report.sources.append(res)
             if res.error:
                 log(f"  {src.id}: 跳过 —— {res.error}")

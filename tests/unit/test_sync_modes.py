@@ -60,12 +60,13 @@ def test_unknown_mode_rejected():
 
 # ---------- 合并更新：搬运底座 ----------
 
-def _chunk(proj: str, tech: str, n: int, text: str) -> Chunk:
+def _chunk(proj: str, tech: str, n: int, text: str, source_path: str | None = None) -> Chunk:
     return Chunk(
         source_url=f"https://example.com/{proj}/{n}.html#s",
         source_project=proj, version_or_commit="v1", license="Apache-2.0",
         retrieved_at=utc_now(), title_path=[proj.title(), f"节 {n}"],
         technology=tech, content_type="prose", locale="zh", text=text,
+        source_path=source_path,
     )
 
 
@@ -126,6 +127,50 @@ def test_carried_rows_stay_searchable(base_index, tmp_path):
     s = ChunkStore(tmp_path / "merged2.db")
     try:
         assert keyword_search(s, "执行计划", limit=5), "搬运后关键词索引丢失"
+    finally:
+        s.close()
+
+
+def test_carry_over_excludes_authored_chunks_by_source_path_not_project(tmp_path, monkeypatch):
+    """场景卡片的块 source_project 是它引用的真实来源（如 kafka），不是
+    "scenario-cards"——单靠 exclude_projects 认不出旧卡片块，必须靠
+    source_path 前缀。这里直接复现过一次真实的合入前 bug：只传
+    exclude_projects={"scenario-cards"} 时，一条 source_project="kafka"
+    的旧卡片块会被误当"未参与本次同步"搬运下去，与新写入的同 URL 新块
+    共存成两条——加上 exclude_source_path_prefixes 才会被正确排除。
+    """
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    b = IndexBuilder("cardbase")
+    old_card_chunk = _chunk(
+        "kafka", "kafka", 1, "旧版卡片正文。",
+        source_path="knowledge/scenarios/outbox-pattern.md",
+    )
+    native_kafka_chunk = _chunk("kafka", "kafka", 2, "kafka 官方文档正文。")
+    for c in (old_card_chunk, native_kafka_chunk):
+        c.validate()
+    b.add([old_card_chunk, native_kafka_chunk], [_vec(0), _vec(1)])
+    b.finalize({"kafka": "aaa", "scenario-cards": "old-fingerprint"}, "synthetic")
+    b.activate()
+    base = tmp_path / "cardbase.db"
+
+    # 不传 source_path 排除：旧卡片块被误当"其它来源"搬运下来（复现 bug）。
+    buggy = IndexBuilder("buggy")
+    moved = buggy.carry_over(base, {"scenario-cards"}, "synthetic")
+    assert moved == 2, "缺少 source_path 排除时，旧卡片块会被误搬运"
+
+    # 传了 source_path 前缀排除：旧卡片块被正确排除，kafka 原生块仍保留。
+    fixed = IndexBuilder("fixed")
+    moved = fixed.carry_over(
+        base, {"scenario-cards"}, "synthetic",
+        exclude_source_path_prefixes=("knowledge/scenarios",),
+    )
+    assert moved == 1, "只应搬运 kafka 官方文档那一块，旧卡片块必须被排除"
+    fixed.finalize({"kafka": "aaa"}, "synthetic")
+    fixed.activate()
+    s = ChunkStore(tmp_path / "fixed.db")
+    try:
+        rows = s.execute("SELECT text FROM chunks")
+        assert [r["text"] for r in rows] == ["kafka 官方文档正文。"]
     finally:
         s.close()
 
@@ -191,7 +236,7 @@ def _fake_sync_env(monkeypatch, tmp_path, failing: set[str]):
     monkeypatch.setattr(pl, "_embed_with_cache",
                         lambda chunks, *a: [_vec(i % DIM) for i in range(len(chunks))])
 
-    def fake_collect(src, log):
+    def fake_collect(src, log, versions=None):
         res = pl.SourceResult(source_id=src.id)
         if src.id in failing:
             res.error = "FetchError: 登记路径不存在于仓库中"

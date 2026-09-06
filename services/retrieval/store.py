@@ -151,7 +151,13 @@ class IndexBuilder:
         self.db.commit()
         return added
 
-    def carry_over(self, source_index: Path, exclude_projects: set[str], embedding_model: str) -> int:
+    def carry_over(
+        self,
+        source_index: Path,
+        exclude_projects: set[str],
+        embedding_model: str,
+        exclude_source_path_prefixes: tuple[str, ...] = (),
+    ) -> int:
         """从既有索引里搬运**不参与本次同步**的来源，用于合并更新（CR-004）。
 
         不用 DELETE 从副本里剔除，而是反过来把要保留的搬进空索引：
@@ -160,6 +166,15 @@ class IndexBuilder:
         词典改了，被搬运来源的分词也随之更新，不会留下按旧词典切的残余。
 
         向量不能重算（太慢），因此嵌入模型必须一致，否则拒绝合并。
+
+        `exclude_projects` 按 `source_project` 排除，对绝大多数来源足够——
+        但 authored 来源（场景卡片）的块 `source_project` 是它引用的真实来源
+        （如 debezium），不是卡片自己的来源 id，靠 `source_project` 认不出
+        "这条块属于哪张卡片"。`exclude_source_path_prefixes` 按 `source_path`
+        前缀补一道排除，卡片块的 `source_path` 是卡片文件自身的相对路径
+        （见 services/sync/cards.py），据此才能在重新同步卡片来源时正确排除
+        旧块，否则编辑或删除卡片小节后，旧版本会被当成"未参与本次同步"
+        永久搬运下去。
         """
         if not source_index.exists():
             raise IndexError_(f"合并更新需要一个已有索引作为底座，但 {source_index} 不存在")
@@ -183,6 +198,12 @@ class IndexBuilder:
             )
             for r in rows:
                 if r["source_project"] in exclude_projects:
+                    continue
+                path = r["source_path"]
+                if path and any(
+                    path == prefix or path.startswith(prefix.rstrip("/") + "/")
+                    for prefix in exclude_source_path_prefixes
+                ):
                     continue
                 # current.db 可能由项目元数据扩列之前的版本构建。合并项目资料时
                 # 不能因为旧官方块没有这些列就无法搬运；它们明确为 NULL，而不是
