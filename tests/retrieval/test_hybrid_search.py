@@ -153,6 +153,63 @@ def test_technology_group_secondary_has_lower_weight_than_primary():
                 assert 0 < weight < 1.0
 
 
+def test_technology_group_weight_actually_applies_in_rrf(tmp_path, monkeypatch):
+    """CR-042：副域权重必须真的乘进 `hybrid_search()` 的 RRF 打分，不能只是
+    读一下 `TECHNOLOGY_GROUPS` 常量本身的取值——那种检查在权重被应用逻辑
+    漏掉、或循环忘记传 `tech_weight` 时仍然全绿。
+
+    RRF 只看候选在自己所属检索里的排名，不看原始 bm25/向量分数的量级
+    （`_rrf_accumulate` 就是按 `enumerate(ranked, 1)` 的位置定分），所以
+    "两个技术域各自的候选排名相同"这个条件本身无法把权重是否生效逼出来——
+    权重不管是不是被应用，两条同为各自域内第 1 名的候选按当前实现顺序仍会
+    因插入顺序打平（已验证：故意把两个权重都设成 1.0 重放，之前一版只比较
+    `TECHNOLOGY_GROUPS` 常量、以及最初"两个技术域各一条同文本"的写法都不会
+    失败，属于假阳性）。
+
+    真正能把权重逼出来的构造：kafka 域内放一条关键词强命中的"诱饵"（域内
+    第 1 名）和一条较弱命中的"目标"（域内第 2 名），spring-kafka 域内只放
+    一条与目标关键词命中强度相当的候选（域内第 1 名）。分数：
+    诱饵 = 1.0/(60+1)，目标 = 1.0/(60+2)，副域候选 = weight/(60+1)。
+    只有 `weight < (60+1)/(60+2)` 时目标才会排在副域候选之前——0.4 满足，
+    1.0（去掉权重差异的退化情形）不满足，副域候选会反超目标。
+    """
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    decoy = Chunk(
+        source_url="https://kafka.apache.org/decoy.html#s", source_project="kafka",
+        version_or_commit="4.3.1", license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Kafka", "Decoy"], technology="kafka", content_type="prose", locale="zh",
+        text="重平衡策略配置 重平衡策略配置指南 重平衡 策略 配置 配置策略",
+    )
+    target = Chunk(
+        source_url="https://kafka.apache.org/target.html#s", source_project="kafka",
+        version_or_commit="4.3.1", license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Kafka", "Target"], technology="kafka", content_type="prose", locale="zh",
+        text="消费者组重平衡相关的一些配置说明",
+    )
+    secondary = Chunk(
+        source_url="https://docs.spring.io/spring-kafka/reference/4.1/y.html",
+        source_project="spring-kafka", version_or_commit="v4.1.1", license="Apache-2.0",
+        retrieved_at=utc_now(), title_path=["Spring Kafka", "Secondary"], technology="spring-kafka",
+        content_type="prose", locale="zh", text="消费者组重平衡相关的一些配置说明",
+    )
+    for c in (decoy, target, secondary):
+        c.validate()
+    b = IndexBuilder("weight-test")
+    b.add([decoy, target, secondary], [_vec(0), _vec(1), _vec(2)])
+    b.finalize({"t": "x"}, "synthetic")
+    b.activate()
+    s = ChunkStore(tmp_path / "weight-test.db")
+    try:
+        hits = hybrid_search(s, "重平衡策略配置", None, limit=10, technology="kafka")
+        positions = {h.title_path: i for i, h in enumerate(hits)}
+        assert positions["Kafka › Target"] < positions["Spring Kafka › Secondary"], (
+            "较弱的主域候选(权重 1.0)必须排在同等强度的副域候选(权重 0.4)之前，"
+            "否则说明 tech_weight 没有真的参与 RRF 打分"
+        )
+    finally:
+        s.close()
+
+
 def test_technology_without_group_membership_is_unaffected(store):
     """不在 `TECHNOLOGY_GROUPS` 里的技术域（如 kubernetes）行为不变——
     分组机制只是 hybrid_search 内部对特定技术域的额外处理，不能影响其他域。"""
