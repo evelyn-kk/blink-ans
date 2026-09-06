@@ -54,21 +54,26 @@ probes:
   - q: Kafka 消费者重复消费怎么排查
     project: kafka
     gold: "Design › Message Delivery Semantics"
-    baseline: 10
+    baseline: 7
     known_open: true
     note: |
       讲至少一次/精确一次投递语义的是 Design 这节，不是各处的配置提及。
       **既有缺口，非 T-025 引入**：top5 里第 4 名是 `rocksdb.config.setter`——
       progress.md「已知但尚未立项的质量问题」记的就是它，本探针第一次把它量化了。
-      2026-09-06（T-018）：新增 spring-kafka 来源后由 6 名退到 10 名，
-      再次更新基线。查询未提及 "spring"，`detect_technology()` 判定
-      `technology=kafka`；spring-kafka 的来源 technology 字段同样登记为
-      `kafka`（判断依据：真实用户问 Kafka 消费问题时，Spring 客户端侧的
-      重试/幂等消费文档与 Broker 端设计文档同样相关，不应被技术域过滤器
-      互相排除），二者因此被并入同一候选池竞争。核对 top5 明细，新排上来的
-      是 spring-kafka 的 `Kafka Queues (Share Consumer)` 等词面命中，并非
-      真的比 gold 更贴题——判定为语料扩大带来的 BM25 idf 漂移和候选池扩容
-      的正常副作用，而非新引入的检索缺陷，故如实更新基线而非改动检索逻辑。
+      2026-09-06（T-018/CR-040）：新增 spring-kafka 后一度由 6 名退到 10 名，
+      当时的处理记录误判为"语料扩大的正常副作用"（codex R35 审查指出证据不足，
+      见 CR-040）。反事实实验实测：把 `current.db` 复制一份、只把
+      `source_project='spring-kafka'` 的行的 `technology` 手工改成一个独立
+      值后重放同一查询，向量路排名从"未进候选"恢复到 22（与新增来源之前的
+      旧索引一致），RRF 名次从 10 回到 7。根因**不是** bm25 idf 漂移，而是
+      `services/retrieval/search.vector_search()` 的生产实现先在全局 vec0
+      做 KNN（`limit*4=120` 条，不分技术域）、再按 `technology` 过滤——
+      spring-kafka 与 kafka 共用 `technology=kafka` 标签时，实测占满未过滤
+      前 120 个坑位中的 64 个（原本 kafka 占 111 个），把 gold 块直接挤出
+      120 个候选之外。已改为给 spring-kafka 单独的 `technology` 值（见
+      `knowledge/sources.yaml`），本条基线相应更新为实测的 7（较改动前的
+      基线 6 仍有 1 名的残留 bm25 idf 级漂移，判定为可接受的语料规模副作用，
+      机制已通过同一反事实实验交叉验证）。
 
   - q: Kafka 分区副本的同步机制是什么
     project: kafka
@@ -85,8 +90,58 @@ probes:
       探针字段（periodSeconds / failureThreshold 等）集中在这一节。
       **既有缺口，非 T-025 引入**：该提问不含任何 term_map 键，展开为空，
       纯靠 `liveness`/`probe` 两个词竞争 200 多个含探针的 K8s 块。
-      2026-09-06（T-018）：新增 spring-kafka/debezium 后由 11 名退到 12 名。
-      查询判定 `technology=kubernetes`，与这两个新来源本身无候选池重叠，
-      核对是 SQLite FTS5 的 bm25() 按整表统计 idf、不按 WHERE 过滤子集
-      重新归一化——语料总量从 13496 增至 14581 块足以让无关技术域的排名
-      发生个位数漂移。判定为语料规模变化的正常副作用，如实更新基线。
+      2026-09-06（T-018/CR-040）：曾记为"新增 spring-kafka/debezium 后由
+      11 名退到 12 名，因 bm25 全表 idf 漂移"——**这个归因是错的**，已被
+      codex R35 审查指出证据不足（CR-040）并经反事实实验证伪：直接用
+      T-018 之前的备份索引 `data/index/current.previous.db`（13496 块，
+      不含 spring-kafka/debezium）与合入后的 `current.db`（14581 块）跑
+      完全相同的 query 向量，关键词路（14）、向量路（20）、RRF（12）三项
+      名次在两个索引上逐位完全相同，新来源对这条查询的候选池零介入
+      （全局未过滤 KNN top120 的来源分布两边都是 115 kubernetes + 5
+      spring-boot）。说明基线从 11 变成 12 发生在 T-018 之前的某次未知
+      改动，且从未被重新核对过——本轮只是如实把陈旧基线更正为当前实测值，
+      不代表 T-018 造成了任何退步。真正原因留待触碰 K8s 检索或排序时再查。
+
+  # ---- CR-039：T-018 新增来源必须有生产混合检索金标准探针，不能只靠关键词路对照 ----
+  - q: Debezium Outbox 表要包含哪些字段才能保证事件和业务数据一致
+    project: debezium
+    gold: "Outbox Event Router › Basic outbox table"
+    baseline: 9
+    known_open: true
+    note: |
+      2026-09-06（CR-039）：人工打开 `outbox-event-router.adoc` 源文件确认
+      该小节正文是 Outbox 表的标准列定义（id/aggregatetype/aggregateid/
+      type/payload 及各列语义），直接回答本题。判别性验证：把
+      `source_project IN ('spring-kafka','debezium')` 的行从 `current.db`
+      复制一份删除后，生产 `hybrid_search()`（technology='debezium'，与
+      `detect_technology()` 对这句话的判定一致）对同一查询返回 `rank=None`
+      （候选池为空）；在含新来源的真实索引上为第 9 名——证明这确实是因为
+      "有没有这批新入库的内容"，不是探针本身的编号误差。top5 全部是同一
+      Outbox Event Router 页面下的其他小节（payload 序列化、示例消息、
+      附加字段），均是该问题的合理旁证但不是最直接答案，故未进前 5，如实
+      记为 known_open：新语料"存在且大方向可召回"，但离"精确定位到最对的
+      那一节"还有差距，留待 T-007 写场景卡片、或后续排序调优时改进。
+
+  - q: Spring Kafka 消费失败怎么配置重试和死信队列
+    project: spring-kafka
+    gold: "Retry Config › Configuration › Using the `@RetryableTopic` annotation"
+    baseline: 20
+    known_open: true
+    note: |
+      2026-09-06（CR-039）：人工打开 `retrytopic/retry-config.adoc` 源文件
+      确认该小节正文是"给 `@KafkaListener` 方法加 `@RetryableTopic` 注解即可
+      自动搭建重试与死信主题"——对这个问题最直接、最常规的回答。判别性
+      验证（与生产 `probe_ranking.py` 同口径 `limit=20`）：把
+      `source_project IN ('spring-kafka','debezium')` 的行从索引删除后
+      重放同一查询，`rank=None`；含新来源的真实索引上为第 20 名（top_k=5
+      的候选窗口边缘）——确认这是"有没有新语料"决定的，不是探针编号误差。
+      如实记录一个新发现：`detect_technology()`（`services/retrieval/
+      tokenize.py`）对同时出现"spring"与"kafka"的问题判定为跨技术域、
+      放弃过滤，于是这条查询要在全部 14581 块里和其余技术域竞争 30 个候选
+      名额，而不是在 spring-kafka 自己的 799 块里竞争；手工强制加
+      `technology=spring-kafka` 过滤后重测，同一 gold 能排到第 7 名。说明
+      "spring"+"kafka"同时出现时的歧义放弃对"Spring Kafka 这个库本身"这类
+      其实并不歧义的常见问法反而是伤害而非保护——这个问题不在本轮
+      （T-018/CR-039/CR-040）处理范围内，留给下一轮改进 `detect_technology()`
+      的歧义判定（例如识别"spring"与"kafka"同时出现且无第三个技术词时，
+      应优先判定为 spring-kafka 单一技术域）时再解决。

@@ -121,7 +121,17 @@ sources:
 
   - id: spring-kafka
     project: spring-kafka
-    technology: kafka
+    # 2026-09-06（CR-040 反事实实验实测，见 development-notes.md）：曾登记为
+    # `kafka`，与 broker 端 kafka 来源共用候选池。实测证明这不是无害的
+    # "同域即相关"——查询「Kafka 消费者重复消费怎么排查」在生产向量路
+    # （全局 KNN 取 limit*4 再按 technology 过滤）里，spring-kafka 抢占了
+    # 未过滤前 120 个候选中的 64 个（原本 kafka 占 111 个），把 gold 块直接
+    # 挤出向量候选之外（原排名 22 → 未进候选），RRF 最终名次 5→10。改成独立
+    # 标签后向量路排名恢复到 22（与改动前一致），RRF 回到 7。跨技术域的问题
+    # （例如提问同时出现"spring"与"kafka"）本就因 detect_technology() 判定
+    # 有歧义而返回 None、不加过滤，spring-kafka 内容依然会被检索到，
+    # 不依赖这里的 technology 值。
+    technology: spring-kafka
     repo: https://github.com/spring-projects/spring-kafka
     # 固定发布 tag（与既有五个来源同规则）。
     ref: v4.1.1
