@@ -32,6 +32,10 @@ RRF_K = 60
 # producer），同权 RRF 下会把本该第 1~7 名的正确块挤到第 15/3 名。缩权重
 # （0.4）后二者兼顾：DLQ/重试这类真正需要 spring-kafka 的问题排名从
 # 20 名提升到个位数，broker 设计类问题的排名基本不受影响（1→1、7→7）。
+# CR-044：每一条双向映射都要在 tests/retrieval/test_hybrid_search.py 里
+# 两个方向各有一条行为测试和一条权重测试（用
+# `@pytest.mark.parametrize("primary_tech, secondary_tech", ...)`）——
+# 只测常量本身的形状（如"主项权重为 1"）测不出反向映射被误填或遗漏。
 _RELATED_TECH_WEIGHT = 0.4
 TECHNOLOGY_GROUPS: dict[str, tuple[tuple[str, float], ...]] = {
     "kafka": (("kafka", 1.0), ("spring-kafka", _RELATED_TECH_WEIGHT)),
