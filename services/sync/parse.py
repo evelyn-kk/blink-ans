@@ -179,6 +179,11 @@ _ADOC_HEADING = re.compile(
 _ADOC_ATTR = re.compile(r"^:[\w-]+:.*$", re.M)
 # 块属性行（[source,java] / [NOTE] 等）不是正文，但要保留语言信息给代码块
 _ADOC_SRC_ATTR = re.compile(r"^\[source[^\]]*\]\s*$", re.M)
+# 显式锚点的另一种写法：`[id="..."]`，与 `[[id]]` shorthand 等价（Debezium 全篇用这种，
+# Spring 用 [[id]]）。必须先归一化成 `[[id]]` 再进入通用块属性剥离，否则会被
+# `_ADOC_BLOCK_ATTR` 当成普通块属性整行删掉——它和 `[NOTE]` 一样，第一个字符是 `[` 后
+# 紧跟字母，两者语法上无法区分，只能在删除前先把携带锚点信息的这一种挑出来。
+_ADOC_ID_ATTR = re.compile(r'^\[id=["\']([\w.:$-]+)["\'][^\]]*\]\s*$', re.M)
 _ADOC_BLOCK_ATTR = re.compile(r"^\[[A-Za-z][^\]]*\]\s*$", re.M)
 _ADOC_FENCE = re.compile(r"^----+\s*$", re.M)
 
@@ -193,6 +198,7 @@ def parse_asciidoc(text: str, doc_title: str) -> list[Section]:
     for i in range(0, len(parts), 2):      # 偶数段在代码块之外
         parts[i] = _ADOC_ATTR.sub("", parts[i])
         parts[i] = _ADOC_SRC_ATTR.sub("", parts[i])
+        parts[i] = _ADOC_ID_ATTR.sub(r"[[\1]]", parts[i])
         parts[i] = _ADOC_BLOCK_ATTR.sub("", parts[i])
     text = "```".join(parts)
     def parts(m) -> tuple[int, str, str | None]:

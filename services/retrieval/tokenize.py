@@ -88,6 +88,7 @@ PROJECT_TERMS = {
     "postgresql": "postgresql", "postgres": "postgresql", "pg": "postgresql",
     "redis": "redis",
     "spring": "spring", "springboot": "spring",
+    "debezium": "debezium",
 }
 
 

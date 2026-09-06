@@ -9,6 +9,9 @@
 # 校验记录：所有 license 与 paths 均于 2026-08-31 经 GitHub API 核实。
 # 2026-09-01：五个入库来源全部固定到发布版本，base_url 与 ref 同版本（CR-005）；
 #            锚点与链接以 `kb verify-links --check-anchors` 实测核对。
+# 2026-09-06（T-018）：为 I3 场景卡片补消息可靠性投递（DLQ/重试）与 Outbox/CDC
+#            对账两类场景的权威出处，新增 spring-kafka、debezium 两个来源；
+#            决策记录见 development-notes.md。license/paths 经 GitHub API 核实。
 
 version: 1
 
@@ -113,6 +116,51 @@ sources:
     base_url: https://docs.spring.io/spring-data/redis/reference/4.1/
     paths:
       - src/main/antora/modules
+    ingest: true
+    sync_frequency: monthly
+
+  - id: spring-kafka
+    project: spring-kafka
+    technology: kafka
+    repo: https://github.com/spring-projects/spring-kafka
+    # 固定发布 tag（与既有五个来源同规则）。
+    ref: v4.1.1
+    license: Apache-2.0
+    # 注意拼写：这个仓库的许可文件是英式拼法 LICENCE.txt，不是 LICENSE.txt。
+    license_file: LICENCE.txt
+    format: asciidoc
+    locale: en
+    # 与 spring-data-redis 同一版本行为：/4.1/ 是当前未来版路径，
+    # 实测会 302 到无版本地址（4.2 发布前内容与之相同），4.0/3.3 等历史版本路径直接 200。
+    base_url: https://docs.spring.io/spring-kafka/reference/4.1/
+    paths:
+      - spring-kafka-docs/src/main/antora/modules
+    ingest: true
+    sync_frequency: monthly
+
+  - id: debezium
+    project: debezium
+    technology: debezium
+    repo: https://github.com/debezium/debezium
+    # 用最新 Final 稳定版（非 Alpha/Beta/CR），tags 无 GitHub Releases 需按 tag 列表核对。
+    ref: v3.6.2.Final
+    license: Apache-2.0
+    license_file: LICENSE.txt
+    format: asciidoc
+    locale: en
+    # 官网按 minor 线分目录，与仓库 tag 的 minor 一致（3.6）。
+    base_url: https://debezium.io/documentation/reference/3.6/
+    # 只取 transformations/（含 Outbox Event Router，本次决策的核心目标）。
+    # 2026-09-06 实测排除了 connectors/：postgresql.adoc、mysql.adoc 里大量小节
+    # 是 `include::{partialsdir}/modules/all-connectors/shared-mariadb-mysql.adoc[...]`
+    # 这类 Antora 局部引用，正文实际存放在未登记的 documentation/modules/ROOT/partials/
+    # 下，我们的 AsciiDoc 解析器不解析 include:: 指令——直接登记这两个文件会把 26%
+    # （92/351）的块变成裸的 include 指令文本入库，而不是真正的连接器说明。
+    # transformations/ 下的文件均为自包含正文，同样抽样验证 0/286 出现这一问题。
+    # 定位到具体数据库连接器的问题仍可用已入库的 PostgreSQL 官方文档 + Debezium 上游
+    # 站点检索覆盖，不因此阻塞该来源整体入库。
+    paths:
+      - documentation/modules/ROOT/pages/transformations
     ingest: true
     sync_frequency: monthly
 

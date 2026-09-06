@@ -54,12 +54,21 @@ probes:
   - q: Kafka 消费者重复消费怎么排查
     project: kafka
     gold: "Design › Message Delivery Semantics"
-    baseline: 6
+    baseline: 10
     known_open: true
     note: |
       讲至少一次/精确一次投递语义的是 Design 这节，不是各处的配置提及。
       **既有缺口，非 T-025 引入**：top5 里第 4 名是 `rocksdb.config.setter`——
       progress.md「已知但尚未立项的质量问题」记的就是它，本探针第一次把它量化了。
+      2026-09-06（T-018）：新增 spring-kafka 来源后由 6 名退到 10 名，
+      再次更新基线。查询未提及 "spring"，`detect_technology()` 判定
+      `technology=kafka`；spring-kafka 的来源 technology 字段同样登记为
+      `kafka`（判断依据：真实用户问 Kafka 消费问题时，Spring 客户端侧的
+      重试/幂等消费文档与 Broker 端设计文档同样相关，不应被技术域过滤器
+      互相排除），二者因此被并入同一候选池竞争。核对 top5 明细，新排上来的
+      是 spring-kafka 的 `Kafka Queues (Share Consumer)` 等词面命中，并非
+      真的比 gold 更贴题——判定为语料扩大带来的 BM25 idf 漂移和候选池扩容
+      的正常副作用，而非新引入的检索缺陷，故如实更新基线而非改动检索逻辑。
 
   - q: Kafka 分区副本的同步机制是什么
     project: kafka
@@ -70,9 +79,14 @@ probes:
   - q: Kubernetes liveness probe 配置参数有哪些
     project: kubernetes
     gold: "Liveness, Readiness, and Startup Probes › Configuration fields"
-    baseline: 11
+    baseline: 12
     known_open: true
     note: |
       探针字段（periodSeconds / failureThreshold 等）集中在这一节。
       **既有缺口，非 T-025 引入**：该提问不含任何 term_map 键，展开为空，
       纯靠 `liveness`/`probe` 两个词竞争 200 多个含探针的 K8s 块。
+      2026-09-06（T-018）：新增 spring-kafka/debezium 后由 11 名退到 12 名。
+      查询判定 `technology=kubernetes`，与这两个新来源本身无候选池重叠，
+      核对是 SQLite FTS5 的 bm25() 按整表统计 idf、不按 WHERE 过滤子集
+      重新归一化——语料总量从 13496 增至 14581 块足以让无关技术域的排名
+      发生个位数漂移。判定为语料规模变化的正常副作用，如实更新基线。

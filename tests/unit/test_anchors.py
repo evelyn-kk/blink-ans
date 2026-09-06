@@ -63,6 +63,39 @@ def test_adoc_block_attribute_is_not_mistaken_for_anchor():
     assert "NOTE" not in _anchors(secs)
 
 
+def test_adoc_id_attribute_form_is_also_recognized_as_explicit_anchor():
+    """T-018：Debezium 全篇用 `[id="..."]` 而非 `[[id]]` 声明显式锚点（两者语义等价）。
+
+    实测 debezium.io/.../transformations/outbox-event-router.html 上，源里的
+    `[id="options-for-applying-the-transformation-selectively"]` 确实原样发布为
+    <h2 id="options-for-applying-the-transformation-selectively">；这一形式此前
+    被 `_ADOC_BLOCK_ATTR` 当成普通块属性（如 [NOTE]）整行删除，锚点信息永久丢失，
+    退化为 Asciidoctor 默认自动 id（`_options_for_applying_the_transformation_
+    selectively`），实测该 id 在发布页面上不存在。
+    """
+    src = (
+        '= T\n\n引言。\n\n[id="options-for-applying-the-transformation-selectively"]\n'
+        "== Options for applying the transformation selectively\n\n"
+        "这是正文，长度足够成块，不会被丢弃掉。\n"
+    )
+    secs = parse_asciidoc(src, "T")
+    assert "options-for-applying-the-transformation-selectively" in _anchors(secs)
+    assert "_options_for_applying_the_transformation_selectively" not in _anchors(secs)
+
+
+def test_adoc_id_attribute_line_is_not_left_in_body_text():
+    src = '= T\n\n引言。\n\n[id="a-b"]\n== 标题\n\n这是正文，长度足够成块。\n'
+    secs = parse_asciidoc(src, "T")
+    assert not any('[id="a-b"]' in s.body for s in secs)
+
+
+def test_adoc_id_attribute_with_dollar_sign_matches_real_debezium_usage():
+    """实测 debezium.io 上 MongoDB `$unset` 一节确实是 <h2 id="mongodb-$unset-handling">。"""
+    src = '= T\n\n引言。\n\n[id="mongodb-$unset-handling"]\n== MongoDB `$unset` handling\n\n正文足够长成块。\n'
+    secs = parse_asciidoc(src, "T")
+    assert "mongodb-$unset-handling" in _anchors(secs)
+
+
 # ---------- Markdown / Hugo（Kubernetes、Kafka）----------
 
 def test_md_explicit_id_wins_and_leaves_title_clean():
