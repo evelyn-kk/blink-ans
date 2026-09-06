@@ -210,6 +210,63 @@ def test_technology_group_weight_actually_applies_in_rrf(tmp_path, monkeypatch):
         s.close()
 
 
+def test_technology_group_weight_actually_applies_to_vector_path(tmp_path, monkeypatch):
+    """CR-043：上一条测试传 `query_vector=None`，向量路的 `_rrf_accumulate`
+    调用从未执行——如果只有向量侧漏乘 `tech_weight`（关键词侧仍正确），
+    上一条测试照样会绿。这里反过来隔离关键词路（query 词不出现在任何
+    候选正文里，三个技术域的关键词检索全部返回空），只用向量距离制造
+    "主域域内第 2 名 vs 副域域内第 1 名"，专门考验向量路的权重乘法。
+    """
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+
+    def _graded_vec(*pairs: tuple[int, float]) -> list[float]:
+        out = [0.0] * DIM
+        for i, val in pairs:
+            out[i] = val
+        return out
+
+    query_vec = _graded_vec((0, 1.0))
+    decoy = Chunk(
+        source_url="https://kafka.apache.org/vec-decoy.html#s", source_project="kafka",
+        version_or_commit="4.3.1", license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Kafka", "VecDecoy"], technology="kafka", content_type="prose", locale="en",
+        text="qqqzzxxwwyy filler alpha",
+    )
+    target = Chunk(
+        source_url="https://kafka.apache.org/vec-target.html#s", source_project="kafka",
+        version_or_commit="4.3.1", license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Kafka", "VecTarget"], technology="kafka", content_type="prose", locale="en",
+        text="qqqzzxxwwyy filler beta",
+    )
+    secondary = Chunk(
+        source_url="https://docs.spring.io/spring-kafka/reference/4.1/vec-z.html",
+        source_project="spring-kafka", version_or_commit="v4.1.1", license="Apache-2.0",
+        retrieved_at=utc_now(), title_path=["Spring Kafka", "VecSecondary"], technology="spring-kafka",
+        content_type="prose", locale="en", text="qqqzzxxwwyy filler gamma",
+    )
+    for c in (decoy, target, secondary):
+        c.validate()
+    b = IndexBuilder("vec-weight-test")
+    b.add(
+        [decoy, target, secondary],
+        [_graded_vec((0, 1.0)), _graded_vec((0, 1.0), (1, 0.5)), _graded_vec((2, 1.0))],
+    )
+    b.finalize({"t": "x"}, "synthetic")
+    b.activate()
+    s = ChunkStore(tmp_path / "vec-weight-test.db")
+    try:
+        # 查询词不出现在任何候选正文里，关键词路对三个域都返回空——
+        # 排名完全由向量距离和 TECHNOLOGY_GROUPS 权重决定。
+        hits = hybrid_search(s, "asdfghjkl123", query_vec, limit=10, technology="kafka")
+        positions = {h.title_path: i for i, h in enumerate(hits)}
+        assert positions["Kafka › VecTarget"] < positions["Spring Kafka › VecSecondary"], (
+            "距离更远的主域候选(权重 1.0)必须排在副域候选(权重 0.4)之前，"
+            "否则说明向量路的 tech_weight 没有真的参与 RRF 打分"
+        )
+    finally:
+        s.close()
+
+
 def test_technology_without_group_membership_is_unaffected(store):
     """不在 `TECHNOLOGY_GROUPS` 里的技术域（如 kubernetes）行为不变——
     分组机制只是 hybrid_search 内部对特定技术域的额外处理，不能影响其他域。"""
