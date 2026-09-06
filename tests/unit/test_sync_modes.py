@@ -226,8 +226,15 @@ class _StubEmbedder:
 
 # ---------- 来源失败时不得激活 ----------
 
-def _fake_sync_env(monkeypatch, tmp_path, failing: set[str]):
-    """把 sync() 的网络与模型依赖换掉，只保留控制流。"""
+def _fake_sync_env(monkeypatch, tmp_path, failing: set[str], rejected: set[str] = frozenset()):
+    """把 sync() 的网络与模型依赖换掉，只保留控制流。
+
+    `rejected`：模拟 CR-046 场景——来源本轮返回 0 块且 `res.rejected>0`，
+    但 `res.error` 仍是 `None`（authored 来源格式/引用错误就是这样报告的，
+    好让同一来源里其它合法文件/小节仍能入库，见 services/sync/cards.py）。
+    与 `failing`（`res.error` 非空，模拟拉取/许可失败）是两种不同的失败
+    形状，CR-046 之前只有 `failing` 这种形状会被"有来源失败不得激活"拦住。
+    """
     from services.sync import pipeline as pl
 
     monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
@@ -236,10 +243,14 @@ def _fake_sync_env(monkeypatch, tmp_path, failing: set[str]):
     monkeypatch.setattr(pl, "_embed_with_cache",
                         lambda chunks, *a: [_vec(i % DIM) for i in range(len(chunks))])
 
-    def fake_collect(src, log, versions=None):
+    def fake_collect(src, log, versions=None, known_urls=None):
         res = pl.SourceResult(source_id=src.id)
         if src.id in failing:
             res.error = "FetchError: 登记路径不存在于仓库中"
+            return [], res
+        if src.id in rejected:
+            res.commit = "aaa"
+            res.rejected = 1
             return [], res
         res.commit = "aaa"
         c = _chunk(src.project, src.technology, 1, f"{src.project} 的一段说明文字。")
@@ -293,5 +304,53 @@ def test_merge_failure_does_not_delete_the_source(monkeypatch, tmp_path):
     after = ChunkStore(tmp_path / "current.db", check_dictionary=False)
     try:
         assert after.stats().get("kafka") == kafka_before, "当前索引不得被残缺的合并结果覆盖"
+    finally:
+        after.close()
+
+
+# ---------- CR-046：authored 来源的"拒绝"必须和硬错误一样拦下激活 ----------
+
+def test_authored_rejection_without_error_blocks_activation(monkeypatch, tmp_path):
+    """卡片格式/引用错误只累加 res.rejected、不设 res.error（好让同一
+    来源里其它合法文件/小节仍能入库）。修复前只有 `error` 会被"有来源
+    失败不得激活"这道门拦下，`rejected` 会被放过——一张格式错误的卡片
+    本轮零产出，仍会被当成"来源成功"直接激活。"""
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set(), rejected={"scenario-cards"})
+    rep = pl.sync(log=lambda *_: None)
+    assert rep.regression_passed and rep.incomplete
+    assert not rep.activated
+    assert not (tmp_path / "current.db").exists(), "authored 来源有拒绝时不得激活"
+
+
+def test_authored_rejection_allow_partial_still_opts_in(monkeypatch, tmp_path):
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set(), rejected={"scenario-cards"})
+    rep = pl.sync(allow_partial=True, log=lambda *_: None)
+    assert rep.activated and not rep.incomplete
+
+
+def test_merge_authored_rejection_does_not_wipe_existing_cards(monkeypatch, tmp_path):
+    """merge 模式下最危险的一幕（CR-046 复现的具体案例）：carry_over()
+    已经按路径前缀把旧卡片块整批排除，若新解析零产出的"拒绝"不算失败，
+    激活就等于把这张卡片从索引里静默删掉——回归的 6 条烟雾查询几乎不
+    可能覆盖到具体某张卡片，拦不住这种情况。"""
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    pl.sync(log=lambda *_: None)  # 先建一个包含 scenario-cards 的完整索引
+    before = ChunkStore(tmp_path / "current.db", check_dictionary=False)
+    cards_before = before.stats().get("scenario-cards")
+    before.close()
+    assert cards_before
+
+    monkeypatch.setattr(store_mod, "CURRENT", tmp_path / "current.db")
+    monkeypatch.setattr(pl, "CURRENT", tmp_path / "current.db")
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set(), rejected={"scenario-cards"})
+    monkeypatch.setattr(pl, "CURRENT", tmp_path / "current.db")
+    rep = pl.sync(["scenario-cards"], mode="merge", log=lambda *_: None)
+
+    assert rep.incomplete and not rep.activated
+    after = ChunkStore(tmp_path / "current.db", check_dictionary=False)
+    try:
+        assert after.stats().get("scenario-cards") == cards_before, (
+            "当前索引不得被清空了卡片内容的合并结果覆盖"
+        )
     finally:
         after.close()

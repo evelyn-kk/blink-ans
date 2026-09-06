@@ -77,6 +77,17 @@ source: widgetdocs https://example.com/docs/lifecycle.html#hooks
 Register a shutdown hook that calls drain() and waits for it to return.
 """
 
+# CR-045：URL 必须逐字匹配语料里已存在的真实块地址，不能凭空写一个。
+# 这里模拟"widgetdocs 语料实际已入库的两条真实地址"——CARD_OK 引用的
+# 就是这两条，供大多数测试传入证明"合法引用能通过"；专门测 CR-045 的
+# 用例会引用不在这个集合里的地址。
+KNOWN_URLS = {
+    "widgetdocs": {
+        "https://example.com/docs/lifecycle.html#draining",
+        "https://example.com/docs/lifecycle.html#hooks",
+    },
+}
+
 
 @pytest.fixture(autouse=True)
 def _stub_registry(monkeypatch):
@@ -89,7 +100,9 @@ def test_two_sections_produce_two_chunks_with_inherited_metadata(tmp_path):
     _write_card(tmp_path, "widget.md", CARD_OK)
     src = _authored_src(tmp_path)
 
-    chunks, res = cards.collect_chunks(src, lambda *_: None, versions={"widgetdocs": "abc123"})
+    chunks, res = cards.collect_chunks(
+        src, lambda *_: None, versions={"widgetdocs": "abc123"}, known_urls=KNOWN_URLS
+    )
 
     assert res.error is None
     assert res.rejected == 0
@@ -112,7 +125,8 @@ def test_version_prefers_this_run_over_current_index(tmp_path, monkeypatch):
     monkeypatch.setattr(cards, "_lookup_current_version", lambda project: "stale-from-disk")
 
     chunks, _res = cards.collect_chunks(
-        _authored_src(tmp_path), lambda *_: None, versions={"widgetdocs": "fresh-this-run"}
+        _authored_src(tmp_path), lambda *_: None,
+        versions={"widgetdocs": "fresh-this-run"}, known_urls=KNOWN_URLS,
     )
     assert all(c.version_or_commit == "fresh-this-run" for c in chunks)
 
@@ -121,7 +135,9 @@ def test_version_falls_back_to_current_index_when_absent_from_this_run(tmp_path,
     _write_card(tmp_path, "widget.md", CARD_OK)
     monkeypatch.setattr(cards, "_lookup_current_version", lambda project: "from-disk")
 
-    chunks, _res = cards.collect_chunks(_authored_src(tmp_path), lambda *_: None, versions={})
+    chunks, _res = cards.collect_chunks(
+        _authored_src(tmp_path), lambda *_: None, versions={}, known_urls=KNOWN_URLS
+    )
     assert all(c.version_or_commit == "from-disk" for c in chunks)
 
 
@@ -136,7 +152,8 @@ def test_section_citing_unregistered_project_is_rejected_without_killing_the_fil
     _write_card(tmp_path, "widget.md", text)
 
     chunks, res = cards.collect_chunks(
-        _authored_src(tmp_path), lambda *_: None, versions={"widgetdocs": "abc123"}
+        _authored_src(tmp_path), lambda *_: None,
+        versions={"widgetdocs": "abc123"}, known_urls=KNOWN_URLS,
     )
     assert len(chunks) == 1, "合法的第一节不该被第二节的错误拖累"
     assert res.rejected == 1
@@ -152,7 +169,8 @@ def test_section_citing_link_only_source_is_rejected_for_being_blocked(tmp_path)
     _write_card(tmp_path, "widget.md", text)
 
     chunks, res = cards.collect_chunks(
-        _authored_src(tmp_path), lambda *_: None, versions={"widgetdocs": "abc123"}
+        _authored_src(tmp_path), lambda *_: None,
+        versions={"widgetdocs": "abc123"}, known_urls=KNOWN_URLS,
     )
     assert len(chunks) == 1
     assert res.rejected == 1
@@ -168,8 +186,10 @@ def test_section_citing_a_disallowed_license_is_rejected_by_chunk_validate(tmp_p
     )
     _write_card(tmp_path, "widget.md", text)
 
+    known_urls = {**KNOWN_URLS, "mplsource": {"https://example.com/docs/lifecycle.html#hooks"}}
     chunks, res = cards.collect_chunks(
-        _authored_src(tmp_path), lambda *_: None, versions={"widgetdocs": "abc123", "mplsource": "v1"}
+        _authored_src(tmp_path), lambda *_: None,
+        versions={"widgetdocs": "abc123", "mplsource": "v1"}, known_urls=known_urls,
     )
     assert len(chunks) == 1
     assert res.rejected == 1
@@ -180,10 +200,62 @@ def test_section_without_resolvable_version_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(cards, "_lookup_current_version", lambda project: None)
     _write_card(tmp_path, "widget.md", CARD_OK)
 
-    chunks, res = cards.collect_chunks(_authored_src(tmp_path), lambda *_: None, versions={})
+    chunks, res = cards.collect_chunks(
+        _authored_src(tmp_path), lambda *_: None, versions={}, known_urls=KNOWN_URLS
+    )
     assert chunks == []
     assert res.rejected == 2
     assert any("无法确定引用版本" in k for k in res.reject_reasons)
+
+
+# ---------- CR-045：引用的 URL 必须是语料里已存在的真实块地址 ----------
+
+def test_section_citing_a_url_not_known_to_the_project_is_rejected(tmp_path):
+    """项目已登记、可入库，不代表这个具体 URL 是真的——独立复现 codex 的
+    构造：跨域 URL 必须被拒绝，同域但编造的路径同样必须被拒绝（证明这道
+    校验是"精确成员校验"而不是弱得多的"域名前缀匹配"）。"""
+    for bad_url in (
+        "https://attacker.invalid/not-widget",
+        "https://example.com/docs/totally-made-up-page.html",
+    ):
+        text = CARD_OK.replace(
+            "source: widgetdocs https://example.com/docs/lifecycle.html#hooks",
+            f"source: widgetdocs {bad_url}",
+        )
+        _write_card(tmp_path, "widget.md", text)
+
+        chunks, res = cards.collect_chunks(
+            _authored_src(tmp_path), lambda *_: None,
+            versions={"widgetdocs": "abc123"}, known_urls=KNOWN_URLS,
+        )
+        assert len(chunks) == 1, f"合法的第一节不该被 {bad_url!r} 这一节拖累"
+        assert res.rejected == 1, bad_url
+        assert any("已存在的真实块地址" in k for k in res.reject_reasons), bad_url
+
+
+def test_known_urls_prefers_this_run_over_current_index(tmp_path, monkeypatch):
+    """known_urls 参数（本轮同步内刚拿到的）优先于查当前已激活索引——
+    与 version 解析的优先级规则对称。"""
+    _write_card(tmp_path, "widget.md", CARD_OK)
+    monkeypatch.setattr(cards, "_lookup_current_urls", lambda project: {"https://stale.example/x"})
+
+    chunks, res = cards.collect_chunks(
+        _authored_src(tmp_path), lambda *_: None,
+        versions={"widgetdocs": "abc123"}, known_urls=KNOWN_URLS,
+    )
+    assert res.rejected == 0
+    assert len(chunks) == 2
+
+
+def test_known_urls_falls_back_to_current_index_when_absent_from_this_run(tmp_path, monkeypatch):
+    _write_card(tmp_path, "widget.md", CARD_OK)
+    monkeypatch.setattr(cards, "_lookup_current_urls", lambda project: set(KNOWN_URLS["widgetdocs"]))
+
+    chunks, res = cards.collect_chunks(
+        _authored_src(tmp_path), lambda *_: None, versions={"widgetdocs": "abc123"}, known_urls={}
+    )
+    assert res.rejected == 0
+    assert len(chunks) == 2
 
 
 # ---------- 卡片格式本身的拒绝（整份文件级别） ----------

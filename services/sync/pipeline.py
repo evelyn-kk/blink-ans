@@ -34,11 +34,12 @@ def collect_chunks(
     src: Source,
     log: Callable[[str], None],
     versions: dict[str, str] | None = None,
+    known_urls: dict[str, set[str]] | None = None,
 ) -> tuple[list[Chunk], SourceResult]:
     if src.format == "authored":
         # 场景卡片没有上游仓库，完全不走下面的 fetch/许可校验/通用解析——
         # 见 services/sync/cards.py 顶部说明。
-        return cards.collect_chunks(src, log, versions)
+        return cards.collect_chunks(src, log, versions, known_urls)
 
     res = SourceResult(source_id=src.id)
     try:
@@ -206,6 +207,9 @@ def sync(
         log(f"  {cache.rejected_reason}")
 
     versions: dict[str, str] = {}
+    # 只在本次同步内有效，不写入索引 meta——供 authored 来源的 URL 归属
+    # 校验用（CR-045），键与 versions 一样按来源 id。
+    known_urls: dict[str, set[str]] = {}
     try:
         if mode == "merge":
             # 先搬底座再写新来源：底座里若还留着这些来源的旧块，
@@ -225,14 +229,15 @@ def sync(
             log(f"  从当前索引搬运 {moved} 块（{', '.join(sorted(projects))} 之外的来源）")
 
         for src in sources:
-            # authored 来源（场景卡片）用它来把引用解析成"本轮/当前索引里
-            # 该来源的真实版本"；拉取式来源忽略这个参数。
-            chunks, res = collect_chunks(src, log, versions)
+            # authored 来源（场景卡片）用它们把引用解析成"本轮/当前索引里
+            # 该来源的真实版本/真实块地址"；拉取式来源忽略这两个参数。
+            chunks, res = collect_chunks(src, log, versions, known_urls)
             report.sources.append(res)
             if res.error:
                 log(f"  {src.id}: 跳过 —— {res.error}")
                 continue
             versions[src.id] = res.commit
+            known_urls[src.id] = {c.source_url for c in chunks}
 
             # 以 add() 的实际写入数为准：重复的块会被跳过，
             # 用 len(chunks) 会让同一条命令打印出两个不一致的总数。
@@ -259,14 +264,28 @@ def sync(
         # 有来源拉取或许可校验失败时不得激活。回归只有 6 条烟雾查询，
         # 少掉一整个来源它照样可能通过——merge 模式下更危险：
         # 旧块已在 carry_over 时排除，激活等于把这个来源从索引里静默删掉。
-        failed = [r.source_id for r in report.sources if r.error]
+        #
+        # authored 来源（场景卡片）额外把"有小节/文件被拒绝"也算作失败
+        # （CR-046）：卡片格式或引用错误只累加 res.rejected、不设
+        # res.error（好让同一文件里其它合法小节仍能入库），但 merge 模式
+        # 已经在采集前按路径前缀把这个来源的旧块整批排除了——如果新解析
+        # 出来的块比旧的少，激活就等于用一个内容缺失的版本覆盖旧内容，
+        # 且回归的 6 条烟雾查询几乎不可能覆盖到具体某张卡片。因此
+        # authored 来源必须"要么完整成功，要么和硬错误一样拒绝激活"，
+        # 不像拉取式来源那样容忍少量块级拒绝——它们规模小、是人工维护的
+        # 精确资产，没有"大体能用就行"的容忍空间。
+        authored_ids = {s.id for s in sources if s.format == "authored"}
+        failed = [
+            r.source_id for r in report.sources
+            if r.error or (r.source_id in authored_ids and r.rejected)
+        ]
         if failed and not allow_partial:
             report.incomplete = True
 
         if mode == "verify":
             log(f"局部验证模式不激活索引；暂存索引留在 {stats.path} 供检查与 kb search --index")
         elif report.incomplete:
-            log(f"{', '.join(failed)} 未能同步，索引不完整，拒绝激活；"
+            log(f"{', '.join(failed)} 未能完整同步，索引不完整，拒绝激活；"
                 f"确认要带着缺口上线请加 --allow-partial")
         elif ok and activate:
             report.index_path = builder.activate()

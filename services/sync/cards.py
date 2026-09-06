@@ -108,11 +108,29 @@ def _lookup_current_version(project: str) -> str | None:
         store.close()
 
 
+def _lookup_current_urls(project: str) -> set[str]:
+    """从当前已激活索引里找该来源既有块的全部 source_url，作为兜底。
+
+    CR-045：`source:` 指令光靠"项目已登记、可入库"完全挡不住引用一个真实
+    存在但内容风马牛不相及的 URL（甚至跨域 URL）——这道校验要求引用的
+    URL 必须逐字匹配语料里**已经存在**的某条真实块的 `source_url`（含
+    锚点），而不是"看起来像"这个项目的地址。"""
+    if not CURRENT.exists():
+        return set()
+    store = ChunkStore(CURRENT)
+    try:
+        rows = store.execute("SELECT DISTINCT source_url FROM chunks WHERE source_project = ?", (project,))
+        return {r["source_url"] for r in rows}
+    finally:
+        store.close()
+
+
 def _build_chunk(
     card_title: str,
     sec: _Section,
     by_project: dict[str, Source],
     version_by_project: dict[str, str],
+    known_urls_by_project: dict[str, set[str]],
     now: str,
     source_path: str,
 ) -> Chunk:
@@ -126,6 +144,21 @@ def _build_chunk(
         raise CardFormatError(
             f"§ {sec.heading}: {sec.project!r} 是不入库来源"
             f"（{cited.ingest_blocked_reason or '许可受限'}），不能作为卡片引用的出处"
+        )
+
+    # CR-045：project 已登记不代表这个具体 URL 是真的。要求逐字匹配语料里
+    # 已存在的某条真实块的 source_url（含锚点），拒绝任何编出来的、
+    # 甚至跨域的 URL——见 _lookup_current_urls 的说明。
+    known_urls = (
+        known_urls_by_project[sec.project]
+        if sec.project in known_urls_by_project
+        else _lookup_current_urls(sec.project)
+    )
+    if sec.url not in known_urls:
+        raise CardFormatError(
+            f"§ {sec.heading}: 引用的 URL {sec.url!r} 不是 {sec.project!r} 语料中"
+            f"已存在的真实块地址（含锚点需逐字匹配），拒绝——场景卡片只能引用"
+            f"已入库、可核验的真实证据，不能引用编造或跨域的地址"
         )
 
     version = version_by_project.get(sec.project) or _lookup_current_version(sec.project)
@@ -168,18 +201,20 @@ def collect_chunks(
     src: Source,
     log: Callable[[str], None],
     versions: dict[str, str] | None = None,
+    known_urls: dict[str, set[str]] | None = None,
 ) -> tuple[list[Chunk], SourceResult]:
     """authored 来源的采集入口，供 pipeline.collect_chunks() 按 format 分发调用。
 
     与拉取式来源的 collect_chunks 保持相同的返回形状（chunks, SourceResult），
     但完全不经过 fetch()/verify_license()——这两步对没有上游仓库的手写文件不适用。
 
-    `versions` 是 `pipeline.sync()` 里按 **来源 id** 记录的、本轮已同步来源的
-    提交号（合并模式下还包含从旧索引搬运来的既有版本）。当前注册表里所有
-    来源恰好 id == project，但这不是保证——这里显式按注册表把它转成按
-    **project** 索引，不依赖这个巧合。
+    `versions`/`known_urls` 都是 `pipeline.sync()` 里按 **来源 id** 记录的、
+    本轮已同步来源的提交号/真实块地址集合（合并模式下还包含从旧索引搬运
+    来的既有值）。当前注册表里所有来源恰好 id == project，但这不是
+    保证——这里显式按注册表把它们转成按 **project** 索引，不依赖这个巧合。
     """
     versions = versions or {}
+    known_urls = known_urls or {}
     res = SourceResult(source_id=src.id)
 
     # (相对路径前缀, 文件) 配对——carry_over() 要靠这个相对路径前缀识别
@@ -201,6 +236,7 @@ def collect_chunks(
     registry = load_registry()
     by_project = {s.project: s for s in registry}
     version_by_project = {s.project: versions[s.id] for s in registry if s.id in versions}
+    known_urls_by_project = {s.project: known_urls[s.id] for s in registry if s.id in known_urls}
     now = utc_now()
     chunks: list[Chunk] = []
 
@@ -216,7 +252,9 @@ def collect_chunks(
         rel_path = f"{rel.rstrip('/')}/{f.name}"
         for sec in sections:
             try:
-                chunk = _build_chunk(title, sec, by_project, version_by_project, now, rel_path)
+                chunk = _build_chunk(
+                    title, sec, by_project, version_by_project, known_urls_by_project, now, rel_path
+                )
                 chunk.validate()
             except (CardFormatError, MetadataError) as exc:
                 # CardFormatError 来自引用解析（未登记/受限来源、缺版本）；
