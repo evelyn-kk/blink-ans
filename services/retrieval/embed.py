@@ -46,15 +46,26 @@ class Embedder:
                 return
             try:
                 from mlx_embeddings import load
+            except Exception as exc:
+                # CR-038：只有导入语句本身失败才代表原生扩展可能半初始化——
+                # 不看异常类型，看发生的位置。原来把这一行和下面 load(model_id)
+                # 的调用放进同一个 try，导致 load(model_id) 内部抛的任何
+                # ImportError（比如某个可选依赖缺失，与 mlx.core 本身状态
+                # 无关）都被误判成原生扩展损坏，永久熔断这个进程之后所有
+                # 本地重试。没有 Metal 设备的机器上 `import mlx_embeddings`
+                # 会在这里直接抛 ImportError；不捕获的话会一路冲出 load()，
+                # 让 boot() 崩溃、整个网关起不来——即便云端生成本可用，检索
+                # 这一步也是本地强制的，所以这里必须能被上层观测到。
+                self.error = f"{type(exc).__name__}: {exc}"
+                mlx_runtime.mark_broken(self.error)
+                return
+            try:
                 self._model, self._tok = load(self.model_id)
             except Exception as exc:
-                # 没有 Metal 设备的机器上 `import mlx_embeddings` 直接抛
-                # ImportError；不捕获的话会一路冲出 load()，让 boot() 崩溃、
-                # 整个网关起不来——即便云端生成本可用，检索这一步也是本地
-                # 强制的，所以这里必须能被上层观测到，而不是让进程直接退出。
+                # 能走到这里说明上面的 import 已经成功，mlx 原生扩展本身
+                # 状态正常——这里的任何异常（哪怕碰巧也是 ImportError）都
+                # 只是"这次加载尝试"失败，不触发进程级熔断，保留可重试性。
                 self.error = f"{type(exc).__name__}: {exc}"
-                if isinstance(exc, ImportError):
-                    mlx_runtime.mark_broken(self.error)
 
     def encode(self, texts: list[str]) -> list[list[float]]:
         self.load()

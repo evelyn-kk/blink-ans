@@ -59,12 +59,14 @@ class InferenceEngine:
     # ---------- 生命周期 ----------
 
     def load(self, system_prompt: str | None = None) -> None:
-        # CR-035：导入本身要和真正的模型加载用同一段 try/except——没有 Metal 设备
-        # 的机器上 `import mlx_lm` 就会直接抛 ImportError，如果导入留在 try 之外，
-        # 这个异常会一路冲出 load()，调用方（apps/gateway boot()、
+        # CR-035：导入本身要有异常边界——没有 Metal 设备的机器上
+        # `import mlx_lm` 就会直接抛 ImportError，如果留在 try 之外，这个
+        # 异常会一路冲出 load()，调用方（apps/gateway boot()、
         # tests/integration 的 module fixture）设计好的"读 status.error/
         # pytest.skip"退化路径根本没机会跑到，会变成启动崩溃或 pytest setup error
-        # 而不是一个可观测、可测试的降级状态。
+        # 而不是一个可观测、可测试的降级状态。CR-038：导入语句和真正的模型
+        # 加载调用要用**两个独立**的 try/except（见下），不能合并成一个——
+        # 原因见下方注释。
         # CR-037：每次尝试都先清掉上一次的 error/import_failed——不然重试成功
         # 之后旧的错误消息会永远滞留在 status 里，/healthz 报出一个已经不存在
         # 的故障。
@@ -83,12 +85,24 @@ class InferenceEngine:
         t0 = time.perf_counter()
         try:
             from mlx_lm import load
+        except Exception as exc:
+            # CR-038：只有导入语句本身失败才代表原生扩展可能半初始化——
+            # 不看异常类型，看发生的位置。原来把这一行和下面 load(model_id)
+            # 的调用放进同一个 try，导致 load(model_id) 内部抛的任何
+            # ImportError（比如某个可选依赖缺失，与 mlx.core 本身状态无关）
+            # 都被误判成原生扩展损坏，永久熔断这个进程之后所有本地重试——
+            # 哪怕换一个不需要那个可选依赖的 model_id 也不行。
+            self.status.error = f"{type(exc).__name__}: {exc}"
+            self.status.import_failed = True
+            mlx_runtime.mark_broken(self.status.error)
+            return
+        try:
             self._model, self._tokenizer = load(self.status.model_id)
         except Exception as exc:
+            # 能走到这里说明上面的 import 已经成功，mlx 原生扩展本身状态
+            # 正常——这里的任何异常（哪怕碰巧也是 ImportError）都只是"这次
+            # 加载尝试"失败，不触发进程级熔断，保留可重试性。
             self.status.error = f"{type(exc).__name__}: {exc}"
-            if isinstance(exc, ImportError):
-                self.status.import_failed = True
-                mlx_runtime.mark_broken(self.status.error)
             return
         self.status.load_seconds = round(time.perf_counter() - t0, 2)
         self.status.loaded = True

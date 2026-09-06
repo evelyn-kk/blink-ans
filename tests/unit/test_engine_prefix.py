@@ -292,3 +292,45 @@ def test_status_error_clears_after_a_later_successful_load(monkeypatch):
     eng.load()  # 重试
     assert eng.status.loaded is True
     assert eng.status.error is None
+
+
+# ---------- CR-038：ImportError 只有发生在导入语句本身才算原生扩展损坏 ----------
+
+def test_import_error_from_load_call_itself_does_not_trip_the_process_sentinel(monkeypatch):
+    """`from mlx_lm import load` 这条导入语句已经成功——mlx 原生扩展本身状态
+    正常。如果紧接着 `load(model_id)` 这个调用内部（比如某个可选模型依赖、
+    分词器插件缺失）抛出 `ImportError`，这纯粹是"这次加载尝试"失败，跟原生
+    扩展有没有损坏毫无关系；不该触发 `mlx_runtime.mark_broken()`，更不该让
+    换一个 `model_id` 的后续重试都提前判死刑。
+
+    旧实现（CR-036/CR-037 之后、CR-038 之前）把导入语句和 `load(model_id)`
+    放进同一个 try，只按异常类型（`isinstance(exc, ImportError)`）判断要不要
+    熔断，分不清这两种情形——这条回归专门覆盖它们唯一的区别：`ImportError`
+    发生的位置。
+    """
+    _install_fake_mlx(monkeypatch, can_trim=True)
+    fake_mlx_lm = sys.modules["mlx_lm"]
+    calls = {"n": 0}
+
+    def fake_model(arr, cache=None):
+        if cache is not None:
+            cache[0].offset += len(arr.data)
+
+    def fake_load(_model_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ImportError("optional tokenizer plugin missing")
+        return fake_model, _Tokenizer()
+
+    fake_mlx_lm.load = fake_load
+
+    eng = InferenceEngine("fake-model")
+    eng.load()
+    assert eng.status.loaded is False
+    assert eng.status.error is not None
+    assert mlx_runtime.broken is False  # 导入语句本身没失败，不该熔断
+
+    eng.load()  # 换个"model_id"重试，本可成功，不该被提前拒绝
+    assert calls["n"] == 2, "旧实现里第二次调用会因 broken=True 而根本不会发生"
+    assert eng.status.loaded is True
+    assert eng.status.error is None
