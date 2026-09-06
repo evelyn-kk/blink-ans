@@ -1,0 +1,88 @@
+# T-011 场景评测雏形：只覆盖 Outbox 场景卡片（knowledge/scenarios/outbox-pattern.md）。
+#
+# 与 basic_questions.yaml 的区别：那份只验证"有没有引用、拒答对不对"，
+# 不判断答案的技术正确性。这里的 expect_keypoints 是人工核对过、
+# 卡片正文确实包含的具体事实点（正则，大小写不敏感），用来判断
+# "答案是否真的说中了关键点"，而不只是"有没有引用"——
+# 沿用 ranking_probe.yaml"金标准要人工核对"与 AGENTS.md §5.3
+# "判据不得承诺未测量的因果"的方法论：不引入未经验证的 LLM 判分。
+#
+# expect_sources：答案引用中必须出现的来源项目（全部需出现，不是任一）。
+#
+# **实测踩坑记录（务必读）**：第一版 keypoints 全部只写了英文短语（照抄卡片
+# 原文），用 --offline 本地后端实测后 8 题仅 1 个关键点命中。逐条核对答案原文
+# 发现根因不是模型换了种说法这么简单，而是**语言不匹配**——`--language zh`
+# 时模型用中文作答，英文概念词只有"本来就该保留原文的标识符"
+# （`aggregatetype`/`payload` 这类配置字段名）才会出现在答案里，
+# "same transaction"/"write side"/"not exactly once" 这类概念性短语
+# 模型会用中文表达（"同一个事务"/"写入侧"/"并非严格一次"）。因此每条概念性
+# keypoint 都改成中英文都能命中的模式；标识符类 keypoint 保持英文不变。
+# 另外发现第 1 题的问法过于间接（不含"Outbox"/"双写"字样），检索没有召回
+# 卡片、答案引用了 PostgreSQL 的 NOTIFY/LISTEN 机制——这是检索侧的真实缺口，
+# 不是这道题该测的东西（本轮范围明确排除"不提示关键词也要能召回卡片"这类
+# 检索鲁棒性调优，见 wait-for-review.md 自陈），已改写问法使其确实指向本卡片。
+#
+# **仍未做的验证**：以上校准全部只跑过本地兜底后端（`--offline`，Qwen 3-4B），
+# 没有用云端 Claude（生产主力后端）验证过——避免未经用户明确同意产生云端调用
+# 费用。本地生成质量明显弱于生产路径，这里的关键点阈值可能对云端答案偏松，
+# 需要后续显式授权跑一次云端评测后重新核对。
+#
+# 规模：本轮只验证框架能跑通 + 一个场景的关键点覆盖率，
+# 不是 I3 完整的 100 题评测集（那需要覆盖全部场景卡片，留给后续轮次）。
+
+version: 1
+
+questions:
+  - q: "为什么不能直接先写数据库、再单独调用消息队列发通知，而要引入 Outbox 表"
+    expect_keypoints:
+      # 拆成两条独立关键点而非一条带距离窗口的组合正则——Q7 踩过一次
+      # ".{0,60}" 距离估计过短导致真实回答被误判未命中的坑，独立关键点
+      # 各自匹配，不依赖对模型会把两个概念隔多远说完的猜测。
+      - "(?i)(dual.?writ|双写|两个独立|两次独立)"
+      - "(?i)(不一致|不强一致|无强一致性|inconsist)"
+    expect_sources: [debezium]
+
+  - q: "Outbox 模式怎么保证数据库写入和消息发布不会不一致"
+    expect_keypoints:
+      - "(?i)(same transaction|同一个?事务|同一笔事务)"
+      - "(?i)(outbox.{0,6}table|outbox\\s*表)"
+    expect_sources: [debezium]
+
+  - q: "Debezium 的 Outbox Event Router 是怎么把表里的一行数据变成 Kafka 消息的"
+    expect_keypoints:
+      - "(?i)aggregatetype"
+      - "(?i)payload"
+    expect_sources: [debezium]
+
+  - q: "Outbox 表的结构有什么讲究，是不是随便加个字段都行"
+    expect_keypoints:
+      - "(?i)(insert|队列|queue)"
+      - "(?i)(id|aggregatetype|payload)"
+    expect_sources: [debezium]
+
+  - q: "用了 Outbox 模式之后，消费者还需要自己处理重复消息吗"
+    expect_keypoints:
+      - "(?i)(idempoten|幂等)"
+      - "(?i)(more than once|not.{0,15}exactly once|重复|不止一次|不是.{0,10}严格一次)"
+    expect_sources: [debezium, kafka]
+
+  - q: "Outbox 模式解决的是消息发布的哪一半问题，Kafka 自己的投递保证解决的是另一半吗"
+    expect_keypoints:
+      - "(?i)(write side|写(入|端)?侧)"
+      - "(?i)(read side|读(取|端)?侧|消费(端|侧))"
+    expect_sources: [debezium, kafka]
+
+  - q: "如果 Outbox 的转发进程挂了一段时间，业务数据会丢吗"
+    expect_keypoints:
+      # 同样拆成两条独立关键点（见上面 Q1 的说明）：一条测"结论是不会丢"，
+      # 一条测"理由落在已提交/已持久化这个点上"，不假设两者出现的先后顺序
+      # 或彼此间隔多远——实测本地后端习惯先给结论再讲原因。
+      - "(?i)(不会丢|不丢失|not.{0,10}lost|never.{0,10}lost)"
+      - "(?i)(committed|commit|已提交|提交后|持久化|persist|事务)"
+    expect_sources: [debezium]
+
+  - q: "Kafka Streams 或事务型生产者能不能让 Outbox 事件端到端只处理一次"
+    expect_keypoints:
+      - "(?i)(not.{0,20}exactly once|并非.{0,10}(严格)?一次|不是.{0,10}(严格)?一次|不能保证.{0,10}一次)"
+      - "(?i)(read side|downstream|consumer|消费(端|者|侧)|下游)"
+    expect_sources: [kafka]
