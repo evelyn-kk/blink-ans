@@ -16,6 +16,8 @@ progress.md
 *.mlpackage
 knowledge/corpus/
 knowledge/cache/
+# 用户自行维护的项目说明资料；只在本地索引，绝不提交到仓库。
+knowledge/projects/
 *.sqlite
 *.sqlite3
 *.db
