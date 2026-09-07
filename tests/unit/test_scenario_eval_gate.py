@@ -26,9 +26,17 @@ CR-055 是 CR-054 修复上线后 R51 复审又发现的问题：`_is_negated()`
 条件检查，但**不只是**先读再写，仍然**只能用 Lua 脚本**。"里，"不只是"
 否定的是前一分句"先读再写"这个完全不同的命题，却落在"只能用 Lua 脚本"
 前 15 字符窗口内，被误当成后者的否定标记，放过了一条真实的排他性断言。
-修复：否定标记表去掉"不只/不仅/不止/not only"（这几个词语义上是"不仅…
-而且…"的递进关系，不是对紧邻命题的否定），并按标点/分句边界截断否定
-标记的搜索范围，只在触发词所在的同一分句内找否定标记。
+当时的修复：否定标记表去掉"不只/不仅/不止/not only"，并按标点/分句
+边界截断否定标记的搜索范围，只在触发词所在的同一分句内找否定标记。
+
+CR-056 是 CR-055 修复上线后 R52 复审又发现的问题：按标点分句边界截断
+治标不治本——"但是/不过"这类转折连词并不产生标点分句边界，"并非只能
+用 Lua **但是**仍然只能用 Lua 脚本。"里，"并非只能用 Lua"和"但是仍然
+只能用 Lua 脚本"因为中间没有标点，仍被判定成同一个分句，前一命题的
+"并非"照样泄漏给了后一个独立的真实排他性断言。真正的修复不是继续找
+更多种"分句边界"打补丁，而是换一个更严格的判定：否定标记必须**紧邻**
+它修饰的触发词本身（`str.endswith`，只留几个字符的宽松余量），不接受
+隔着任何别的命题——不管中间隔的是标点还是连词，这个检查天然不关心。
 
 这里只测纯判定函数 `_score`（及其内部用到的 `_is_negated`），不加载
 模型/索引，因此毫秒级，可进快速门禁。
@@ -110,6 +118,37 @@ def _is_negated_pre_cr055(answer: str, match_start: int, *, window: int = 15) ->
     """
     markers = ("不是", "并非", "不只", "不仅", "不止", "not only", "isn't", "is not")
     prefix = answer[max(0, match_start - window):match_start]
+    return any(marker in prefix for marker in markers)
+
+
+# CR-056 复现句（取自 codex R52 复审给出的具体构造例句）：没有标点、只用
+# "但是"这个转折连词分隔两个命题——"并非只能用 Lua"是对第一个命题的
+# 正确否定，"但是仍然只能用 Lua 脚本"是完全独立的第二个命题，是一条
+# 真实的排他性断言，不应该被前一个命题的"并非"连带豁免。
+_CR056_ANSWER_TRANSITION_WITHOUT_PUNCTUATION = (
+    "不能；没有条件检查，并非只能用 Lua 但是仍然只能用 Lua 脚本。"
+)
+
+# CR-056 附加案例：只有第一个命题、没有转折出的第二个命题——纯粹的
+# "并非只能用 Lua" 不该被误判为排他性断言。
+_CR056_ANSWER_ONLY_THE_NEGATED_CLAIM = (
+    "不能直接防止超卖，并非只能用 Lua，也可以考虑其它机制来补上条件判断。"
+)
+
+
+def _clause_boundary_negation_pre_cr056(
+    answer: str, match_start: int, *, window: int = 15
+) -> bool:
+    """CR-055 修复后、CR-056 修复前 `_is_negated()` 的行为快照：按标点
+    分句边界截断，但不识别"但是/不过"这类无标点的转折连词。仅用于下面
+    的判别性基线测试，不是生产代码的一部分。
+    """
+    markers = ("不是", "并非", "isn't", "is not")
+    clause_boundary = re.compile(r"[，。；！？、,.;!?\n]")
+    clause_start = 0
+    for m in clause_boundary.finditer(answer, 0, match_start):
+        clause_start = m.end()
+    prefix = answer[max(clause_start, match_start - window):match_start]
     return any(marker in prefix for marker in markers)
 
 
@@ -254,3 +293,48 @@ def test_finditer_polarity_check_still_catches_a_later_independent_violation():
     )
     assert forbidden, "第二个独立分句里的真实排他性断言不应被第一次的豁免连带放过"
     assert failures
+
+
+def test_pre_cr056_negation_check_wrongly_exempts_a_transition_word_violation():
+    """判别性基线：CR-055 刚上线时的否定检测按标点分句截断，但"但是"这类
+    转折连词不产生标点分句边界——"并非只能用 Lua"和"但是仍然只能用 Lua
+    脚本"因为中间没有标点，被判定成同一个分句，前一命题的"并非"泄漏
+    给了后一个独立的真实排他性断言，两次命中都被错误判定为已否定。
+    复现句取自 codex R52 复审给出的具体构造例句，不是臆造的场景。
+    """
+    lua_pattern = _FORBID_PATTERNS[1]
+    matches = list(re.finditer(lua_pattern, _CR056_ANSWER_TRANSITION_WITHOUT_PUNCTUATION))
+    assert len(matches) == 2, (
+        "复现句应包含两次字面命中：'并非只能用 Lua' 与 '但是仍然只能用 Lua 脚本'"
+    )
+    assert all(
+        _clause_boundary_negation_pre_cr056(
+            _CR056_ANSWER_TRANSITION_WITHOUT_PUNCTUATION, m.start()
+        )
+        for m in matches
+    ), "旧的按标点分句的否定检测应该（错误地）把两次命中都判定为已被否定——这正是 CR-056 的洞"
+
+
+def test_score_no_longer_exempts_the_transition_word_violation():
+    """CR-056 修复：否定标记必须紧邻触发词本身，不再因为"但是"这类转折
+    连词没有产生标点分句边界，就把前一命题的否定词泄漏给后一个独立的
+    真实排他性断言。
+    """
+    hit, missed, forbidden, failures = _score(
+        _CR056_ANSWER_TRANSITION_WITHOUT_PUNCTUATION, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert hit == _POSITIVE_KEYPOINTS
+    assert not missed
+    assert forbidden, "应正确识别出'但是仍然只能用 Lua 脚本'这条独立的真实排他性断言"
+    assert failures
+
+
+def test_forbid_patterns_still_pass_a_purely_negated_claim_without_a_real_violation():
+    """避免矫枉过正：只有"并非只能用 Lua"这一个被否定的命题、后面没有
+    独立的真实排他性断言时，不应该被误判为命中——修复 CR-056 不能把
+    否定检测收得太紧，连正常的否定语境都识别不出来。
+    """
+    _, _, forbidden, _ = _score(
+        _CR056_ANSWER_ONLY_THE_NEGATED_CLAIM, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert not forbidden, f"纯粹被否定的表述不应误判为越界断言，实际命中: {forbidden}"
