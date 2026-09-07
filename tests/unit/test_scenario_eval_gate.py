@@ -338,3 +338,17 @@ def test_forbid_patterns_still_pass_a_purely_negated_claim_without_a_real_violat
         _CR056_ANSWER_ONLY_THE_NEGATED_CLAIM, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
     )
     assert not forbidden, f"纯粹被否定的表述不应误判为越界断言，实际命中: {forbidden}"
+
+
+def test_forbid_patterns_do_not_misfire_on_negated_atomic_only_claim():
+    """R52 复审自陈第 3 点指出："仅支持原子增减"这条 forbid pattern 一直
+    没有专门的否定语境判别性测试，只手工验证过"不是仅支持原子增减，还有
+    其他操作"不会误判——本轮把这个手工验证固化成一条真正的回归测试，
+    确认 `_is_negated()` 的紧邻检查对这条 pattern 同样有效，不是只对
+    Lua 排他性那条 pattern 生效。
+    """
+    correct_answer = "不是仅支持原子增减，还有其他操作，只是这些细节不在已入库语料里。"
+    _, _, forbidden, _ = _score(
+        correct_answer, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert not forbidden, f"不应误判为越界断言，实际命中: {forbidden}"
