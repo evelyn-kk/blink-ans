@@ -87,6 +87,20 @@ def _project_of(citation: str) -> str:
     return citation.split(" ", 1)[0] if citation else ""
 
 
+# CR-054：一段答案里出现"只能用 Lua"这个字面串，不代表它在断言排他性——
+# "不是只能用 Lua，也可以采用其他机制"是明确推翻这个论断的正确表述，字面
+# 却包含同一个触发词组。只做字符串/正则命中判断不了极性，这里用一个简单
+# 但可验证的启发式：命中位置紧邻前文一小段窗口内如果出现否定标记，就不算
+# 命中——不是语义解析，只是防止最常见的这种反例被误伤。
+_NEGATION_MARKERS = ("不是", "并非", "不只", "不仅", "不止", "not only", "isn't", "is not")
+_NEGATION_WINDOW = 15
+
+
+def _is_negated(answer: str, match_start: int, *, window: int = _NEGATION_WINDOW) -> bool:
+    prefix = answer[max(0, match_start - window):match_start]
+    return any(marker in prefix for marker in _NEGATION_MARKERS)
+
+
 def _score(
     answer: str, expect_keypoints: list[str], forbid_patterns: list[str],
 ) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -102,6 +116,10 @@ def _score(
     引用来源的支撑范围，见 CR-052/CR-053）。`forbid_patterns` 是可选的
     负向判据，用来登记"已知这句话是错的，不能因为正向关键点凑巧命中就
     判通过"——命中任一条就判失败，不管正向关键点是否已经全部命中。
+
+    CR-054：命中判断按 `_is_negated()` 做极性过滤——一个 forbid pattern
+    在答案里出现多次时，只要有一次命中不是被否定的，就记为命中；如果
+    每一次命中前面都紧跟着否定标记，则不算命中这条 forbid pattern。
     """
     hit: list[str] = []
     missed: list[str] = []
@@ -114,7 +132,8 @@ def _score(
             missed.append(pattern)
             failures.append(f"未命中关键点: {pattern!r}")
     for pattern in forbid_patterns:
-        if re.search(pattern, answer):
+        matches = list(re.finditer(pattern, answer))
+        if any(not _is_negated(answer, m.start()) for m in matches):
             forbidden.append(pattern)
             failures.append(f"命中禁止模式（已知的越界/错误论断）: {pattern!r}")
     return hit, missed, forbidden, failures
