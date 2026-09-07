@@ -20,16 +20,23 @@
 完整教训见 `_score()` 上方注释：自动判断"这次命中是否被否定"在正则
 层面被反复证明做不对，与其继续加窗口/连词打补丁，不如老实交给人看）。
 
-每道题因此有三种状态（CR-061）：`passed`（无 failures，且没有未裁决的
-forbidden_hit）、`failed`（有 failures——缺关键点/缺来源/拒答/生成
-出错，与 forbidden_hit 无关）、`review_required`（无 failures，但有
-forbidden_hit 且找不到对应的人工复核确认）。`review_required` **不计入
-通过数，也不能让整次评测的退出码为 0**——只标记不追加实际约束等于
-没约束，CR-053 想堵住的"已知可疑断言被悄悄计入统计"会以另一种方式
-重新出现。人工复核结论持久化存放在 `knowledge/eval/scenario_review.
-yaml`，按 `(question, pattern)` 匹配；只有 `verdict: confirmed_ok` 才能
-把命中转为 `passed`，`confirmed_issue` 或没有记录都停留在
-`review_required`。
+每道题因此有三种状态（CR-061，CR-062/063 修正）：`passed`（无
+failures，且没有未裁决的 forbidden_hit）、`failed`（有
+failures——缺关键点/缺来源/拒答/生成出错；**或者** forbidden_hit 命中
+一条已被人工确认为真实问题的模式）、`review_required`（无 failures，
+有 forbidden_hit，但找不到匹配当前这次具体回答的人工复核结论）。
+`review_required` **不计入通过数，也不能让整次评测的退出码为 0**。
+人工复核结论持久化存放在 `knowledge/eval/scenario_review.yaml`，按
+`(question, pattern, answer_hash)` 三元组匹配——**必须连着这次具体
+回答的内容哈希一起匹配**（CR-063），不能只按题目和正则匹配：本地
+模型每次生成的措辞会变，同一个 pattern 这次命中的可能是一句正确的
+否定表述，下次命中的可能是一句真实的排他性断言，一条历史复核结论
+不能不看内容就放行未来所有命中。`verdict: confirmed_ok` 且哈希匹配
+才转为 `passed`；`verdict: confirmed_issue` 且哈希匹配转为
+**`failed`**（这是一个已经完成的人工判断，不是"还没人看过"，不该
+和 `review_required` 混为一谈——CR-062）；哈希不匹配（包括记录压根
+不存在）一律 `review_required`，需要针对这次新出现的具体内容重新
+复核。
 
 用法:
     python packages/evaltools/run_scenarios.py [--limit N] [--offline] [--language zh|en]
@@ -38,6 +45,7 @@ yaml`，按 `(question, pattern)` 匹配；只有 `verdict: confirmed_ok` 才能
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -151,36 +159,63 @@ def _score(
     return hit, missed, forbidden, failures
 
 
-def _lookup_review_verdict(question: str, pattern: str, reviews: list[dict]) -> str | None:
-    """在 `knowledge/eval/scenario_review.yaml` 的记录里找 `(question,
-    pattern)` 这个组合键对应的人工复核结论。找不到返回 `None`——按
-    `_case_status()` 的语义，`None` 和 `confirmed_issue` 效果一样，都
-    不能把命中转为 `passed`，只是理由不同（没人看过 vs 看过但确认有
-    问题）。
+def _answer_hash(answer: str) -> str:
+    """CR-063：复核结论必须绑定"人工实际看过的那次具体回答"，不能只按
+    题目和 pattern 匹配——本地模型每次生成的措辞会变，同一个 pattern
+    这次命中的可能是一句正确的否定表述，下次命中的可能是一句真实的
+    排他性断言。取 `answer_text` 的 SHA-256 前 16 位十六进制字符作为
+    这次回答的指纹，写进复核记录、也用来做查找时的匹配键。
+    """
+    return hashlib.sha256(answer.encode("utf-8")).hexdigest()[:16]
+
+
+def _lookup_review_verdict(
+    question: str, pattern: str, answer_hash: str, reviews: list[dict],
+) -> str | None:
+    """在 `knowledge/eval/scenario_review.yaml` 的记录里找
+    `(question, pattern, answer_hash)` 这个三元组对应的人工复核结论。
+    三者必须**同时**匹配——哪怕 question/pattern 都对得上，只要这次的
+    `answer_hash` 和记录里的不一样（说明模型这次生成了不同的内容），
+    就当作没有复核过，返回 `None`（CR-063）。
     """
     for r in reviews:
-        if r.get("question") == question and r.get("pattern") == pattern:
+        if (
+            r.get("question") == question
+            and r.get("pattern") == pattern
+            and r.get("answer_hash") == answer_hash
+        ):
             return r.get("verdict")
     return None
 
 
 def _case_status(c: ScenarioCase, reviews: list[dict]) -> str:
-    """三态判定（CR-061）：`passed` / `failed` / `review_required`。
+    """三态判定（CR-061，CR-062/063 修正）：
+    `passed` / `failed` / `review_required`。
 
     有 `failures`（缺关键点、缺来源、拒答、生成出错）一律 `failed`，
     与 `forbidden_hit` 无关。没有 `failures` 但有 `forbidden_hit` 时，
-    必须为**每一条**命中的 pattern 都找到 `verdict: confirmed_ok` 的
-    复核记录，才能判 `passed`；只要有一条没有记录或记录写的是
-    `confirmed_issue`，就是 `review_required`——不计入通过数，也不能
-    让整次评测的退出码为 0（见 `main()`）。
+    对每一条命中的 pattern 查找绑定了这次 `answer_hash` 的复核记录：
+    - 只要有一条被人工确认为 `confirmed_issue`，整题判 **`failed`**——
+      这是一个已经完成的人工判断（"我看过，这确实是问题"），不是"还
+      没人看过"，不该和 `review_required` 混为一谈（CR-062）。
+    - 没有 `confirmed_issue`，但至少有一条找不到匹配记录（问题+pattern
+      对得上、内容对不上，或者压根没记录），判 `review_required`。
+    - 只有**每一条**命中都能找到匹配当前内容的 `confirmed_ok` 记录，
+      才判 `passed`。
     """
     if c.failures:
         return "failed"
     if not c.forbidden_hit:
         return "passed"
-    for pattern in c.forbidden_hit:
-        if _lookup_review_verdict(c.question, pattern, reviews) != "confirmed_ok":
-            return "review_required"
+    answer_hash = _answer_hash(c.answer_text)
+    verdicts = [
+        _lookup_review_verdict(c.question, pattern, answer_hash, reviews)
+        for pattern in c.forbidden_hit
+    ]
+    if any(v == "confirmed_issue" for v in verdicts):
+        return "failed"
+    if any(v != "confirmed_ok" for v in verdicts):
+        return "review_required"
     return "passed"
 
 
@@ -231,6 +266,25 @@ def run_case(orch: Orchestrator, spec: dict, language: str, reviews: list[dict])
     return c
 
 
+def _summarize(cases: list[ScenarioCase]) -> dict:
+    """不涉及生成或网络，可在没有 Metal/模型的环境里单测（CR-064）——
+    R57 复审指出，`main()` 里内联的汇总/退出码计算完全没有独立测试
+    覆盖，`--limit 1` 这类端到端手工验证也无法稳定命中
+    `review_required` 分支来证明它确实会让退出码非零。这里把汇总和
+    退出码判定拆成一个纯函数，只依赖每个 `ScenarioCase.status`，不需要
+    真的跑一次评测就能测。
+    """
+    passed = sum(1 for c in cases if c.status == "passed")
+    failed = sum(1 for c in cases if c.status == "failed")
+    review_required = sum(1 for c in cases if c.status == "review_required")
+    return {
+        "passed": passed,
+        "failed": failed,
+        "review_required": review_required,
+        "exit_code": 0 if passed == len(cases) else 1,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
@@ -268,13 +322,13 @@ def main() -> int:
               f"来源 {', '.join(c.cited_projects) or '无'}")
         for f in c.failures:
             print(f"        └─ {f}")
+        answer_hash = _answer_hash(c.answer_text)
         for p in c.forbidden_hit:
-            verdict = _lookup_review_verdict(c.question, p, reviews) or "无复核记录"
+            verdict = _lookup_review_verdict(c.question, p, answer_hash, reviews) or "无匹配复核记录"
             print(f"        ⚠ 命中可疑模式（{verdict}）: {p!r}")
 
-    passed = sum(1 for c in cases if c.status == "passed")
-    failed = sum(1 for c in cases if c.status == "failed")
-    review_required = sum(1 for c in cases if c.status == "review_required")
+    summary = _summarize(cases)
+    passed, failed, review_required = summary["passed"], summary["failed"], summary["review_required"]
     total_keypoints = sum(len(c.expect_keypoints) for c in cases)
     hit_keypoints = sum(len(c.keypoints_hit) for c in cases)
     coverage = hit_keypoints / total_keypoints if total_keypoints else 1.0
@@ -283,9 +337,10 @@ def main() -> int:
     print(f"通过 {passed}/{len(cases)}（失败 {failed}，待复核 {review_required}）")
     print(f"关键点覆盖率: {hit_keypoints}/{total_keypoints}（{coverage*100:.0f}%）")
     if review_required:
-        print(f"△ {review_required} 题命中可疑模式且无 confirmed_ok 复核记录，"
+        print(f"△ {review_required} 题命中可疑模式且无匹配的 confirmed_ok 复核记录，"
               f"不计入通过、整次评测不算成功——需要在 "
-              f"{REVIEWS.relative_to(ROOT)} 补一条复核结论：")
+              f"{REVIEWS.relative_to(ROOT)} 补一条复核结论（记得带上这次的 "
+              f"answer_hash，否则下次生成内容一变又会失效）：")
         for c in cases:
             if c.status == "review_required":
                 print(f"    - {c.question[:50]}")
@@ -307,7 +362,7 @@ def main() -> int:
     print(f"报告 {path.name}")
 
     store.close()
-    return 0 if passed == len(cases) else 1
+    return summary["exit_code"]
 
 
 if __name__ == "__main__":
