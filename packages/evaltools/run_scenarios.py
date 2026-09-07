@@ -54,6 +54,7 @@ class ScenarioCase:
     question: str
     expect_keypoints: list[str]
     expect_sources: list[str]
+    forbid_patterns: list[str] = field(default_factory=list)
     answer_text: str = ""
     sufficiency: str = ""
     served_by: str = ""
@@ -63,6 +64,7 @@ class ScenarioCase:
     cited_projects: list[str] = field(default_factory=list)
     keypoints_hit: list[str] = field(default_factory=list)
     keypoints_missed: list[str] = field(default_factory=list)
+    forbidden_hit: list[str] = field(default_factory=list)
     sources_missed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
@@ -85,11 +87,45 @@ def _project_of(citation: str) -> str:
     return citation.split(" ", 1)[0] if citation else ""
 
 
+def _score(
+    answer: str, expect_keypoints: list[str], forbid_patterns: list[str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """纯判定：不涉及生成或网络，可在没有 Metal/模型的环境里单测。
+
+    返回 `(keypoints_hit, keypoints_missed, forbidden_hit, failures)`。
+
+    CR-053：只看"该出现的短语出现了没有"这一种判据，漏掉了另一种失败
+    模式——答案里混进一句**已知错误的越界断言**，却因为凑巧命中了两条
+    比较宽泛的正向 `expect_keypoints`（例如"不能"/"无法…判断"）而被记成
+    "关键点全部命中"，实际上这段解释本身是错的（R48/R49 已指出
+    `RedisAtomicLong` 断言"仅支持原子增减""必须用 Lua"这类说法超出了
+    引用来源的支撑范围，见 CR-052/CR-053）。`forbid_patterns` 是可选的
+    负向判据，用来登记"已知这句话是错的，不能因为正向关键点凑巧命中就
+    判通过"——命中任一条就判失败，不管正向关键点是否已经全部命中。
+    """
+    hit: list[str] = []
+    missed: list[str] = []
+    forbidden: list[str] = []
+    failures: list[str] = []
+    for pattern in expect_keypoints:
+        if re.search(pattern, answer):
+            hit.append(pattern)
+        else:
+            missed.append(pattern)
+            failures.append(f"未命中关键点: {pattern!r}")
+    for pattern in forbid_patterns:
+        if re.search(pattern, answer):
+            forbidden.append(pattern)
+            failures.append(f"命中禁止模式（已知的越界/错误论断）: {pattern!r}")
+    return hit, missed, forbidden, failures
+
+
 def run_case(orch: Orchestrator, spec: dict, language: str) -> ScenarioCase:
     c = ScenarioCase(
         question=spec["q"],
         expect_keypoints=list(spec.get("expect_keypoints", [])),
         expect_sources=list(spec.get("expect_sources", [])),
+        forbid_patterns=list(spec.get("forbid_patterns", [])),
     )
     answer = ""
     for ev in orch.answer(AnswerRequest(question=c.question, max_tokens=400, language=language)):
@@ -114,12 +150,10 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> ScenarioCase:
         c.failures.append("模型判定证据不足而拒答，本题按设计应有覆盖场景卡片可回答")
         return c
 
-    for pattern in c.expect_keypoints:
-        if re.search(pattern, answer):
-            c.keypoints_hit.append(pattern)
-        else:
-            c.keypoints_missed.append(pattern)
-            c.failures.append(f"未命中关键点: {pattern!r}")
+    c.keypoints_hit, c.keypoints_missed, c.forbidden_hit, kp_failures = _score(
+        answer, c.expect_keypoints, c.forbid_patterns,
+    )
+    c.failures.extend(kp_failures)
 
     for project in c.expect_sources:
         if project not in c.cited_projects:

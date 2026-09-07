@@ -212,10 +212,25 @@ questions:
       - "(?i)(缓存|cache|不需要|不用|无需|only.{0,10}first|falling back)"
     expect_sources: [spring-data-redis]
 
-  - q: "spring-data-redis 提供的原子计数器（RedisAtomicLong 这类）能不能直接用来做库存扣减，防止超卖"
+  # CR-053：这题原先问"能不能直接用 RedisAtomicLong 这类计数器"，措辞较宽，
+  # 容易诱导模型对整个类的能力边界下断言（真实一次生成给出"仅支持原子增减，
+  # 无法实现读改写完整逻辑"——这本身是越界断言，CR-052 已指出公开 API 还有
+  # compareAndSet 等方法，只是这些细节不在已入库语料里）。收窄问法，明确问
+  # "调用无条件的递增/递减操作"这一件已入库卡片确实支持的具体事实，减少
+  # 诱导模型对整个类下过强结论的空间；同时新增 forbid_patterns 作为兜底——
+  # 就算问法收窄后模型仍然给出同类越界断言，也不能因为两条正向 keypoint
+  # 凑巧命中就判通过。
+  - q: "spring-data-redis 的 RedisAtomicLong 这类原子计数器，如果只调用它的无条件递增/递减操作来做库存扣减，能不能防止超卖"
     expect_keypoints:
       - "(?i)(不能|不行|不足以|does.{0,10}not|cannot)"
       # 放宽"没有"为"没有|无法|不能/不会"，覆盖"无法判断库存是否充足"这类
       # 同义表述——这是校准发现的正则过窄问题，不是放宽判据标准本身。
       - "(?i)(单个?命令|single command|(没有|无法|不(能|会)).{0,8}(条件|判断|检查|阈值)|no.{0,10}(condition|check))"
+    forbid_patterns:
+      # CR-053 指出的具体越界断言：整个类"仅支持原子增减"（否定 CAS/更新
+      # 方法存在，卡片和语料都没有支撑这个否定）；"必须/只能用 Lua"这类
+      # 排他性结论（CR-052 已改卡片为"脚本是上文示例的一种方式"，不是
+      # 唯一方式）。命中任一条即判失败，不管正向 keypoint 是否已全部命中。
+      - "(?i)(仅支持.{0,6}(原子)?(增减|递增|递减|increment)|only support.{0,10}(atomic )?increment(/decrement)?)"
+      - "(?i)((必须|只能|唯一(的)?(方法|方式|办法)|only way).{0,10}(Lua|脚本|script))"
     expect_sources: [spring-data-redis]
