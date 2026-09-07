@@ -92,12 +92,29 @@ def _project_of(citation: str) -> str:
 # 却包含同一个触发词组。只做字符串/正则命中判断不了极性，这里用一个简单
 # 但可验证的启发式：命中位置紧邻前文一小段窗口内如果出现否定标记，就不算
 # 命中——不是语义解析，只是防止最常见的这种反例被误伤。
-_NEGATION_MARKERS = ("不是", "并非", "不只", "不仅", "不止", "not only", "isn't", "is not")
+#
+# CR-055：上面这句"紧邻前文一小段窗口"原来直接量前 15 个字符，不管中间
+# 是否跨了标点分句——"不能；没有条件检查，但不只是先读再写，仍然只能用
+# Lua 脚本。"里"不只是"否定的是前一分句"先读再写"这个完全不同的命题，
+# 落在"只能用 Lua 脚本"前 15 字符窗口内，却被当成后者的否定标记，放过了
+# 一条真实的排他性断言。修法有两处：
+# 1. 否定标记表去掉"不只/不仅/不止/not only"——这几个词本身语义上是
+#    "不仅…而且…"这种递进关系，不是对紧邻命题的否定（"不仅只能用 Lua，
+#    还必须额外校验"这种真实排他性断言里，"不仅"甚至会加强而不是推翻
+#    "只能"），用它们当否定标记从语义上就不成立，不只是窗口大小的问题。
+# 2. 窗口按标点/分句边界截断，只在触发词所在的**同一分句**内找否定标记，
+#    不再跨逗号/句号等分句符号回溯——这才是绑定"否定标记必须修饰同一个
+#    命题"这个约束的关键，单纯缩小字符数治不了跨分句误伤。
+_NEGATION_MARKERS = ("不是", "并非", "isn't", "is not")
 _NEGATION_WINDOW = 15
+_CLAUSE_BOUNDARY = re.compile(r"[，。；！？、,.;!?\n]")
 
 
 def _is_negated(answer: str, match_start: int, *, window: int = _NEGATION_WINDOW) -> bool:
-    prefix = answer[max(0, match_start - window):match_start]
+    clause_start = 0
+    for m in _CLAUSE_BOUNDARY.finditer(answer, 0, match_start):
+        clause_start = m.end()
+    prefix = answer[max(clause_start, match_start - window):match_start]
     return any(marker in prefix for marker in _NEGATION_MARKERS)
 
 
@@ -120,6 +137,10 @@ def _score(
     CR-054：命中判断按 `_is_negated()` 做极性过滤——一个 forbid pattern
     在答案里出现多次时，只要有一次命中不是被否定的，就记为命中；如果
     每一次命中前面都紧跟着否定标记，则不算命中这条 forbid pattern。
+
+    CR-055：`_is_negated()` 现在按分句边界截断否定标记的搜索范围，
+    不会把前一分句里另一个命题的否定词误当成后一分句真实排他性断言的
+    否定——见 `_is_negated()` 定义处的完整说明。
     """
     hit: list[str] = []
     missed: list[str] = []

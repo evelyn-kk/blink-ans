@@ -21,6 +21,15 @@ CR-054 是 CR-053 修复上线后 R50 复审又发现的两个同类问题：
    其他机制"是明确推翻排他性主张的**正确**表述，字面却包含"只能…Lua"
    这个触发词组，裸正则会把它也判成命中，误伤正确答案。
 
+CR-055 是 CR-054 修复上线后 R51 复审又发现的问题：`_is_negated()` 原来
+直接量前 15 个字符找否定标记，不管中间是否跨了标点分句——"不能；没有
+条件检查，但**不只是**先读再写，仍然**只能用 Lua 脚本**。"里，"不只是"
+否定的是前一分句"先读再写"这个完全不同的命题，却落在"只能用 Lua 脚本"
+前 15 字符窗口内，被误当成后者的否定标记，放过了一条真实的排他性断言。
+修复：否定标记表去掉"不只/不仅/不止/not only"（这几个词语义上是"不仅…
+而且…"的递进关系，不是对紧邻命题的否定），并按标点/分句边界截断否定
+标记的搜索范围，只在触发词所在的同一分句内找否定标记。
+
 这里只测纯判定函数 `_score`（及其内部用到的 `_is_negated`），不加载
 模型/索引，因此毫秒级，可进快速门禁。
 """
@@ -78,6 +87,30 @@ _CR054_ANSWER_NEGATED_EXCLUSIVITY = (
     "不能直接防止超卖，因为无条件递减没有阈值检查。"
     "但这不是只能用 Lua 脚本才能解决，也可以采用其他机制来补上这个条件判断。"
 )
+
+# CR-055 复现句（取自 codex R51 复审给出的具体构造例句）：前一分句"不只是
+# 先读再写"否定的是一个完全不同的命题，不应该豁免后一分句"只能用 Lua
+# 脚本"这句独立的真实排他性断言。
+_CR055_ANSWER_CROSS_CLAUSE = "不能；没有条件检查，但不只是先读再写，仍然只能用 Lua 脚本。"
+
+# CR-055 附加案例：同一个 forbid pattern 在答案里出现两次，第一次被同一
+# 分句内的"不是"正确豁免，第二个独立分句里是一条真实的排他性断言——
+# 用来验证 `re.finditer` + 逐命中判极性的实际承诺（第一次被否定不等于
+# 整条 pattern 都被豁免）。
+_CR055_ANSWER_NEGATED_THEN_REAL = (
+    "不是只能用 Lua 脚本这一种方式；不过对库存扣减这类场景，"
+    "确实必须用 Lua 才能保证原子性。"
+)
+
+
+def _is_negated_pre_cr055(answer: str, match_start: int, *, window: int = 15) -> bool:
+    """CR-054 刚上线时 `_is_negated()` 的行为快照：不按分句边界截断，
+    且把"不只/不仅/不止/not only"也当否定标记。仅用于下面的判别性基线
+    测试，不是生产代码的一部分。
+    """
+    markers = ("不是", "并非", "不只", "不仅", "不止", "not only", "isn't", "is not")
+    prefix = answer[max(0, match_start - window):match_start]
+    return any(marker in prefix for marker in markers)
 
 
 def test_old_positive_only_keypoints_wrongly_pass_the_cr053_answer():
@@ -180,3 +213,44 @@ def test_forbid_patterns_do_not_misfire_on_explicitly_negated_exclusivity_claim(
     )
     assert not forbidden, f"不应误判为越界断言，实际命中: {forbidden}"
     assert not failures
+
+
+def test_pre_cr055_negation_check_wrongly_exempts_a_cross_clause_violation():
+    """判别性基线：CR-054 刚上线时的否定检测（不按分句边界截断、且把
+    "不只/不仅/不止"也当否定标记）会把前一分句"不只是先读再写"这个
+    完全不同命题的否定词，错误地当成后一分句"只能用 Lua 脚本"这句
+    真实排他性断言的否定标记——这正是 CR-055 指出的洞，复现句取自
+    codex R51 复审给出的具体构造例句，不是臆造的场景。
+    """
+    lua_pattern = _FORBID_PATTERNS[1]
+    matches = list(re.finditer(lua_pattern, _CR055_ANSWER_CROSS_CLAUSE))
+    assert matches, "复现句必须包含一次真实的 Lua 排他性字面命中"
+    assert all(
+        _is_negated_pre_cr055(_CR055_ANSWER_CROSS_CLAUSE, m.start()) for m in matches
+    ), "旧的否定检测应该（错误地）把这次命中判定为已被否定——这正是 CR-055 的洞"
+
+
+def test_score_no_longer_exempts_the_cross_clause_negation_repro():
+    """CR-055 修复：按分句边界截断后，"不只是"不再能豁免后一独立分句里
+    真实存在的"只能用 Lua 脚本"这句排他性断言。
+    """
+    hit, missed, forbidden, failures = _score(
+        _CR055_ANSWER_CROSS_CLAUSE, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert hit == _POSITIVE_KEYPOINTS
+    assert not missed
+    assert forbidden, "应正确识别出这条真实的排他性断言，不被前一分句的否定词豁免"
+    assert failures
+
+
+def test_finditer_polarity_check_still_catches_a_later_independent_violation():
+    """验证 `re.finditer` + 逐命中判极性的实际承诺：同一个 forbid pattern
+    第一次命中被同一分句内的"不是"正确豁免，但后一个独立分句里"确实
+    必须用 Lua"是另一条真实的排他性断言，不能因为第一次命中被豁免就
+    连带放过整条 pattern。
+    """
+    _, _, forbidden, failures = _score(
+        _CR055_ANSWER_NEGATED_THEN_REAL, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert forbidden, "第二个独立分句里的真实排他性断言不应被第一次的豁免连带放过"
+    assert failures
