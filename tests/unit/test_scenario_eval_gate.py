@@ -176,6 +176,32 @@ def _is_negated_pre_cr057(answer: str, match_start: int, *, adjacency: int = 6) 
 # 命题——这是明确的否定语境，不应被判为真实排他性断言。
 _CR057_ANSWER_LOOSE_ZH = "不能；没有条件检查，并不一定只能用 Lua 脚本，也可以采用其他机制。"
 
+# CR-059 复现句（取自 codex R54 复审给出的具体构造例句）：同一个 pattern
+# 命中两次——"并非只能用 Lua"（真的被否定）和"且必须使用 Lua 脚本"（中间
+# 隔着加合连词"且"，是独立的真实排他性断言）。"且"没有被列进
+# `_CLAUSE_BOUNDARY` 的连词词表（本轮故意不加，见 CR-059 说明），修复靠
+# 的是"后一次命中不能越过前一次命中的结尾"这条结构性约束。
+_CR059_ANSWER = "不能；没有条件检查，并非只能用 Lua 且必须使用 Lua 脚本。"
+
+
+def _is_negated_pre_cr059(answer: str, match_start: int, *, window: int = 12) -> bool:
+    """CR-057 修复后、CR-059 修复前 `_is_negated()` 的行为快照：按分句
+    边界（含标点与转折连词）截断否定标记搜索范围，但不知道"同一个
+    pattern 上一次命中在哪里结束"，因此后一次命中的否定检索能越过前一次
+    命中，一路找到更早的、属于不同命题的否定标记。仅用于下面的判别性
+    基线测试，不是生产代码的一部分。
+    """
+    markers = ("不是", "并非", "不一定", "isn't", "not")
+    clause_boundary = re.compile(
+        r"[，。；！？、,.;!?\n]|但是|不过|然而|却|仍然|but|however|though|yet"
+    )
+    clause_start = 0
+    for m in clause_boundary.finditer(answer, 0, match_start):
+        clause_start = m.end()
+    prefix = answer[max(clause_start, match_start - window):match_start]
+    return any(marker in prefix for marker in markers)
+
+
 # CR-057 复现句二（英文版本）：否定词"not"和触发短语"only way"之间隔着
 # "the"。
 _CR057_ANSWER_LOOSE_EN = (
@@ -434,3 +460,33 @@ def test_score_recognizes_the_loose_en_negation():
     assert not missed
     assert not forbidden, f"应识别为否定语境，不应误判为越界断言，实际命中: {forbidden}"
     assert not failures
+
+
+def test_pre_cr059_negation_check_wrongly_exempts_a_second_chained_violation():
+    """判别性基线：CR-057 修复后、CR-059 修复前的否定检测不知道"同一个
+    pattern 上一次命中在哪里结束"，因此"并非只能用 Lua"里"并非"的否定
+    效力能越过"且"这个未被列进连词词表的加合连词，泄漏给后面"必须使用
+    Lua 脚本"这句独立的真实排他性断言——复现句取自 codex R54 复审给出的
+    具体构造例句，不是臆造的场景。
+    """
+    lua_pattern = _FORBID_PATTERNS[1]
+    matches = list(re.finditer(lua_pattern, _CR059_ANSWER))
+    assert len(matches) == 2, (
+        "复现句应包含两次字面命中：'并非只能用 Lua' 与 '且必须使用 Lua 脚本'"
+    )
+    assert all(
+        _is_negated_pre_cr059(_CR059_ANSWER, m.start()) for m in matches
+    ), "旧逻辑应该（错误地）把两次命中都判定为已被否定——这正是 CR-059 的洞"
+
+
+def test_score_no_longer_exempts_the_second_chained_violation():
+    """CR-059 修复：同一个 pattern 后一次命中的否定检索不能越过前一次
+    命中的结尾——不需要认识"且"是连词，就能正确识别出这是两个独立命题。
+    """
+    hit, missed, forbidden, failures = _score(
+        _CR059_ANSWER, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert hit == _POSITIVE_KEYPOINTS
+    assert not missed
+    assert forbidden, "应正确识别出'且必须使用 Lua 脚本'这条独立的真实排他性断言"
+    assert failures

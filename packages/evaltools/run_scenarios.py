@@ -111,13 +111,37 @@ def _project_of(citation: str) -> str:
 # use Lua"（"not"和"only way"之间隔着"the"）这类**自然的修饰语**，同样
 # 会被"零容忍紧邻"拒之门外，把明确的否定语境也判成了真实违规。
 #
-# 综合三轮教训，真正需要的不是"零窗口"也不是"无限窗口"，而是把 CR-055
-# 的"按分句边界截断"和 CR-056/057 指出的两个缺口一起补上：分句边界不能
-# 只认标点，也要认得出"但是/不过"这类转折连词（补 CR-056 的洞）；边界
-# 内的窗口不能收到零容忍，要给"一定/the"这类自然修饰语留出空间，但仍然
-# 要有一个不算大的上限、不能让否定词跨到无关的老远（补 CR-057 的洞，
-# 同时不重新打开 CR-055 的洞）。否定标记本身的词表也要覆盖"不一定/并不
-# 一定"这类比"不是/并非"更松散的否定构式。
+# CR-057 之后综合三轮教训：真正需要的不是"零窗口"也不是"无限窗口"，而是
+# 把 CR-055 的"按分句边界截断"和 CR-056/057 指出的两个缺口一起补上：
+# 分句边界不能只认标点，也要认得出"但是/不过"这类转折连词（补 CR-056
+# 的洞）；边界内的窗口不能收到零容忍，要给"一定/the"这类自然修饰语留出
+# 空间，但仍然要有一个不算大的上限（补 CR-057 的洞，同时不重新打开
+# CR-055 的洞）。否定标记本身的词表也要覆盖"不一定/并不一定"这类比
+# "不是/并非"更松散的否定构式。
+#
+# CR-059：指出光靠"给 `_CLAUSE_BOUNDARY` 加连词"这条路会没完没了——
+# "并非只能用 Lua **且**必须使用 Lua 脚本"里，"且"是加合连词而不是转折
+# 连词，没在词表里，12 字符窗口重新让"并非"泄漏给了"必须使用 Lua 脚本"
+# 这句独立的真实排他性断言。中文里能起加合/转折作用的连词理论上是
+# 一个开放集合（且/而/并且/而且/同时/但是/不过/然而/……），靠枚举永远
+# 追不完——这正是这条启发式反复被打补丁的根本原因：它想用"这段前文里
+# 有没有否定词"去回答一个本质上是句法结构的问题（"这个否定词在语法上
+# 修饰的是不是这个短语"），而句法结构不是靠关键词表能穷尽的。
+#
+# 因此这次**没有**再往 `_CLAUSE_BOUNDARY` 里加"且/而/并且"这些词——按
+# R54 指出的"收益递减"结论，继续枚举连词只是换一种反例、迟早再挨一刀。
+# 换成一个不依赖连词词表也能生效的结构性约束：同一个 forbid pattern 在
+# 答案里命中多次时，**后一次命中的否定检索范围不能越过前一次命中的
+# 结尾**——如果否定词和当前命中之间隔着"另一个刚刚出现过的、同类的
+# 真实断言"，那本身就是两个独立命题的强信号，不管中间用的是哪个连词、
+# 甚至没有连词，都不需要先认出那是个连词才能生效。这条约束天然覆盖了
+# CR-059 的复现句（验证见下方 `_is_negated()`/`_score()` 与测试）。
+# residual 风险如实登记：这条结构性约束只覆盖"同一个 pattern 命中过
+# 不止一次"的场景；如果未来出现"只命中一次、前面隔着一个还没被列进
+# 词表的连词接无关否定"这种单命中场景，现有词表（标点 + 但是/不过/
+# 然而/却/仍然/but/however/though/yet）依然可能漏判——这是本轮明确
+# 选择不去堵的口子，理由同上：不想为了堵一个尚未被真实复现的假设场景，
+# 继续往词表里加没有实际反例支撑的连词。
 _NEGATION_MARKERS = ("不是", "并非", "不一定", "isn't", "not")
 _NEGATION_WINDOW = 12  # 留够"并不一定"（4 字）、"definitely not the "（约 8 字符）的空间
 _CLAUSE_BOUNDARY = re.compile(
@@ -125,9 +149,15 @@ _CLAUSE_BOUNDARY = re.compile(
 )
 
 
-def _is_negated(answer: str, match_start: int, *, window: int = _NEGATION_WINDOW) -> bool:
-    clause_start = 0
-    for m in _CLAUSE_BOUNDARY.finditer(answer, 0, match_start):
+def _is_negated(
+    answer: str, match_start: int, *, lower_bound: int = 0, window: int = _NEGATION_WINDOW,
+) -> bool:
+    """`lower_bound`：否定标记搜索范围的硬下界——CR-059 之后，调用方在
+    同一个 pattern 的多次命中之间传入上一次命中的结尾位置，防止否定词
+    跨过一个独立的、更早的真实命中泄漏过来（见上方 CR-059 说明）。
+    """
+    clause_start = lower_bound
+    for m in _CLAUSE_BOUNDARY.finditer(answer, lower_bound, match_start):
         clause_start = m.end()
     prefix = answer[max(clause_start, match_start - window):match_start]
     return any(marker in prefix for marker in _NEGATION_MARKERS)
@@ -156,7 +186,12 @@ def _score(
     CR-055/CR-056/CR-057：`_is_negated()` 按分句边界（含标点与"但是/
     不过"这类转折连词）截断否定标记的搜索范围，边界内留一个不大的窗口
     容纳"一定/the"这类自然修饰语——见 `_is_negated()` 定义处的完整说明，
-    含三轮教训的具体反例。
+    含四轮教训的具体反例。
+
+    CR-059：同一个 pattern 的多次命中之间，后一次命中的否定检索不能
+    越过前一次命中的结尾——防止"并非只能用 Lua **且**必须使用 Lua
+    脚本"这类中间隔着一个还没被列进连词词表的加合词时，前一个命中的
+    否定标记泄漏给后一个独立的真实命中。
     """
     hit: list[str] = []
     missed: list[str] = []
@@ -170,7 +205,13 @@ def _score(
             failures.append(f"未命中关键点: {pattern!r}")
     for pattern in forbid_patterns:
         matches = list(re.finditer(pattern, answer))
-        if any(not _is_negated(answer, m.start()) for m in matches):
+        lower_bound = 0
+        has_real_violation = False
+        for m in matches:
+            if not _is_negated(answer, m.start(), lower_bound=lower_bound):
+                has_real_violation = True
+            lower_bound = m.end()
+        if has_real_violation:
             forbidden.append(pattern)
             failures.append(f"命中禁止模式（已知的越界/错误论断）: {pattern!r}")
     return hit, missed, forbidden, failures
