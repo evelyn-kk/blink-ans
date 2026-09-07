@@ -24,14 +24,22 @@ source: spring-data-redis https://docs.spring.io/spring-data/redis/reference/4.1
 Enabling `RedisTemplate.setEnableTransactionSupport(true)` and running the
 read-then-decrement inside a `@Transactional` method looks like it should close the
 gap, but Spring Data Redis's transaction documentation spells out what commands issued
-inside that transaction actually do: write commands are only queued and applied on
-commit, and a read run during the transaction returns null immediately, because
-"values set within a transaction are not visible" until the transaction commits. There
-is no point during the transaction where application code can read the real current
-stock value and branch on it — the `GET` is queued the same way the `DECR` is, so the
-code has nothing to condition on. The transaction only batches commands that were
-already decided on before it opened; it never hands the application a real value to
-decide with.
+inside that transaction actually do, and the two kinds of commands are not treated the
+same way: "Spring Data Redis distinguishes between read-only and write commands in an
+ongoing transaction. Read-only commands, such as `KEYS`, are piped to a fresh
+(non-thread-bound) `RedisConnection` to allow reads. Write commands are queued by
+`RedisTemplate` and applied upon commit." So a `GET` on the stock key does not sit
+blocked behind the pending transaction — it runs on that separate connection and
+returns the real, live count. (The documentation's own null example is a different
+case: it reads back a key that the same still-open transaction had just queued a `SET`
+for, so there is nothing committed yet for that specific key to read.) The `DECR`,
+being a write, is still only queued and applied later at `EXEC`. That is exactly the
+gap: the transaction gives the application a real value to read, but nothing ties that
+read to the later commit — a second checkout's `GET` can land, see the same live
+count, and queue its own `DECR` before the first transaction commits, so both still go
+through. Wrapping the pair in `@Transactional` batches the commands; it does not add
+the missing condition that would make the second transaction's `EXEC` fail once the
+first one has already spent the stock.
 
 ## A Lua script runs as a single atomic command, so no other client's request can land between the read and the write
 source: spring-data-redis https://docs.spring.io/spring-data/redis/reference/4.1/redis/scripting.html
@@ -61,17 +69,19 @@ script costs about the same as a single command over the wire once the script is
 warm — the atomicity is not purchased by paying for an extra round trip on the hot
 path.
 
-## The atomic counters in spring-data-redis's support classes only wrap a single command — they do not add the conditional check inventory needs
+## The plain increment/decrement operation the support classes wrap has no notion of a stock floor
 source: spring-data-redis https://docs.spring.io/spring-data/redis/reference/4.1/redis/support-classes.html
 
 `org.springframework.data.redis.support` offers JDK-style atomic counters that "make
-it easy to wrap Redis key incrementation" — a convenience wrapper around a single
-Redis command, atomic in exactly the sense that any single Redis command is atomic.
-That is a different guarantee from what inventory needs: such a counter will happily
-decrement a key below zero, because the command it wraps has no notion of a floor and
-nothing to compare against before writing. Reaching for one of these counter classes
-on a stock key does not reproduce the check-and-set behavior from the sections above;
-it only makes the unconditional decrement atomic, which was never the part of the
-problem that caused overselling in the first place. The conditional threshold check
-still has to come from a script, not from swapping `DECR` for a nicer-looking Java
-wrapper around the same command.
+it easy to wrap Redis key incrementation." The documentation describes what these
+classes wrap — a Redis key-increment command — but does not describe them adding any
+inventory-specific rule on top of it, such as a minimum-value check. An unconditional
+decrement, called directly the way the documentation describes, inherits exactly the
+atomicity of that one underlying command and nothing more: the command itself has no
+notion of a floor, so nothing stops the key from going negative if it runs when there
+is not enough stock left. That means reaching for one of these counters on a stock key
+and calling its plain decrement operation does not, by itself, reproduce the
+check-and-set behavior from the sections above — the documentation for these classes
+does not describe them doing that. The missing threshold check has to be added
+deliberately, whether by scripting the whole read-and-decide server-side as in the
+sections above, or by some other mechanism outside what this documentation covers.
