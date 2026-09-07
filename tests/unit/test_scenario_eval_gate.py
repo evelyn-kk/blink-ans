@@ -1,4 +1,4 @@
-"""场景评测判据自身的回归（CR-053~060）。
+"""场景评测判据自身的回归（CR-053~061）。
 
 为什么单独测：判据是场景评测结果的门禁，判据本身漏判会让"通过/不通过"
 这个数字失去意义——就像 `test_probe_gate.py` 对排序探针门禁（CR-015）
@@ -13,23 +13,24 @@
   两条比较宽泛的正向关键点（"不能"/"无法…判断"），照样被记成"关键点
   2/2 全部命中"、判为通过——新增 `forbid_patterns`，命中即记入
   `forbidden_hit`。
-- **CR-054~060**：`forbid_patterns` 上线后，又花了六轮（CR-054 触发词
-  太窄漏判"需使用" → CR-055 加否定语境过滤又误伤"不是只能用 Lua" →
-  CR-056 窗口跨命题泄漏 → CR-057 分句边界不认转折连词 → CR-057 "零容忍
-  紧邻"矫枉过正 → CR-059 分句边界不认加合连词 → CR-060 单命中场景下
-  加合连词接无关否定仍会泄漏）反复调整"命中之后要不要自动判断这次命中
-  是否被否定"这条逻辑，每次修一个反例就暴露一个新反例。根因是这条
-  启发式想用"这段前文有没有否定词"回答一个本质上是句法结构的问题，而
-  中文/英文的连接词是一个开放集合，枚举永远追不完。
+- **CR-054~060**：`forbid_patterns` 上线后，又花了六轮反复调整"命中之后
+  要不要自动判断这次命中是否被否定"这条逻辑，每次修一个反例就暴露一个
+  新反例（跨命题窗口泄漏 → 分句边界不认转折连词 → 零容忍紧邻矫枉过正 →
+  分句边界不认加合连词 → 单命中场景加合连词接无关否定仍泄漏）。根因是
+  这条启发式想用"这段前文有没有否定词"回答一个本质上是句法结构的问题，
+  而连接词是开放集合，枚举永远追不完。CR-060 决定不再尝试自动判断否定
+  极性：命中只记入 `forbidden_hit`，交给人工判断。
+- **CR-061**：指出 CR-060 的修法本身还不完整——`forbidden_hit` 虽然会
+  打印警告，却完全不影响这道题的通过判定，真实报告里"命中可疑模式 +
+  正向关键点全部命中"的题照样被算进"通过"，等于换了个说法重新引入
+  CR-053 想堵住的洞。修法：三态判定（`passed`/`failed`/
+  `review_required`），命中 `forbidden_hit` 但没有人工复核确认
+  （`knowledge/eval/scenario_review.yaml` 里 `verdict: confirmed_ok`）
+  的题目一律 `review_required`——不计入通过数，也不能让整次评测的
+  退出码为 0。
 
-**CR-060 之后的决定**：不再尝试自动判断否定极性。`forbid_patterns`
-命中只记入 `forbidden_hit`，**不再计入 `failures`、不影响 `ok`**——
-交给人工判断这次命中到底是真实的越界断言还是已被正确否定的表述。这不
-是放弃 CR-053 想要的东西（"已知错误论断不能被正向关键点掩盖而悄悄放
-过"）：`forbidden_hit` 依然会被打印、写进报告，只是不再自动定性。
-
-这里只测纯判定函数 `_score`，不加载模型/索引，因此毫秒级，可进快速
-门禁。
+这里只测纯判定函数 `_score`/`_case_status`/`_lookup_review_verdict`，
+不加载模型/索引，因此毫秒级，可进快速门禁。
 """
 
 from __future__ import annotations
@@ -37,8 +38,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from packages.evaltools.run_scenarios import _score  # noqa: E402
+from packages.evaltools.run_scenarios import (  # noqa: E402
+    REVIEWS, ScenarioCase, _case_status, _lookup_review_verdict, _score,
+)
 
 # 逐字取自 bench/reports/eval-scenarios-20260907T055103Z.json 第 18 题的
 # answer_text（CR-053 的具体案例），未做任何删改。
@@ -53,6 +58,10 @@ _CR053_ANSWER = (
 
 # `knowledge/eval/scenario_questions.yaml` 里 RedisAtomicLong 那道题当前
 # 实际使用的判据。
+_QUESTION = (
+    "spring-data-redis 的 RedisAtomicLong 这类原子计数器，如果只调用它的"
+    "无条件递增/递减操作来做库存扣减，能不能防止超卖"
+)
 _POSITIVE_KEYPOINTS = [
     r"(?i)(不能|不行|不足以|does.{0,10}not|cannot)",
     r"(?i)(单个?命令|single command|(没有|无法|不(能|会)).{0,8}(条件|判断|检查|阈值)|no.{0,10}(condition|check))",
@@ -78,40 +87,36 @@ _HISTORICAL_REPROS = {
 }
 
 # 一句明确、干净地否定排他性主张、且不含任何独立真实违规的表述——即使
-# CR-060 之后不再自动判断极性，这句话依然会被记入 forbidden_hit（因为
-# 字面包含"只能…Lua"），这是本轮接受的代价，用测试如实固定下来，不假装
-# 它会被自动放过。
+# 不自动判断极性，这句话依然会被记入 forbidden_hit（因为字面包含
+# "只能…Lua"），这是本轮接受的代价，用测试如实固定下来，不假装它会被
+# 自动放过。
 _CLEANLY_NEGATED_ANSWER = "不能直接防止超卖，但这不是只能用 Lua 脚本才能解决，也可以采用其他机制。"
 
 
-def test_forbid_pattern_hit_is_recorded_but_does_not_fail_the_case():
-    """CR-060 之后的核心行为：命中 forbid_patterns 记入 forbidden_hit，
-    但不再出现在 failures 里——即使正向关键点全部命中，命中禁止模式也
-    不会让这道题被判定为失败。
+def _make_case(*, failures=(), forbidden_hit=()) -> ScenarioCase:
+    return ScenarioCase(
+        question=_QUESTION,
+        expect_keypoints=_POSITIVE_KEYPOINTS,
+        expect_sources=[],
+        forbid_patterns=_FORBID_PATTERNS,
+        failures=list(failures),
+        forbidden_hit=list(forbidden_hit),
+    )
+
+
+def test_forbid_pattern_hit_is_recorded_in_score_output():
+    """`_score` 本身只负责记录，不判定状态——命中 forbid_patterns 记入
+    forbidden_hit，但不出现在 failures 里，即使正向关键点全部命中。
     """
     hit, missed, forbidden, failures = _score(_CR053_ANSWER, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS)
     assert hit == _POSITIVE_KEYPOINTS
     assert not missed
     assert forbidden, "真实存在的越界断言仍应被记入 forbidden_hit，供人工复核"
-    assert not failures, "forbid_patterns 命中不应再自动计入 failures（CR-060 之后的设计）"
-
-
-def test_forbid_pattern_hit_is_visible_without_forbid_patterns_configured():
-    """对照组：不传 forbid_patterns 时，同一条含越界断言的答案完全没有
-    任何痕迹（这正是 CR-053 最初指出的洞——只是现在的修法不再是"自动判
-    失败"，而是"至少要能看见"）。
-    """
-    hit, missed, forbidden, failures = _score(_CR053_ANSWER, _POSITIVE_KEYPOINTS, [])
-    assert hit == _POSITIVE_KEYPOINTS
-    assert not missed
-    assert not forbidden
-    assert not failures
+    assert not failures, "forbid_patterns 命中不应出现在 failures 里"
 
 
 def test_missing_keypoints_still_fail_the_case_independent_of_forbid_patterns():
-    """确认 CR-060 的改动没有连带削弱正向关键点判据——缺关键点依然记入
-    failures，这条判据完全不受 forbid_patterns 语义变化的影响。
-    """
+    """确认这条判据完全不受 forbid_patterns 语义变化的影响。"""
     answer = "这段回答完全跑题，什么都没提到。"
     hit, missed, forbidden, failures = _score(answer, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS)
     assert not hit
@@ -120,25 +125,115 @@ def test_missing_keypoints_still_fail_the_case_independent_of_forbid_patterns():
     assert failures and all("未命中关键点" in f for f in failures)
 
 
-def test_all_historical_negation_repros_are_now_flagged_for_review():
+def test_all_historical_negation_repros_are_flagged_in_forbidden_hit():
     """CR-054~060 六轮反例，不管否定语境是否成立，字面上都包含真实的
-    forbid_patterns 触发词组——CR-060 之后不再尝试自动判断极性，这六句
-    都应该被记入 forbidden_hit（供人工复核），不会再有任何一句像
-    CR-055/056/057/059/060 那样被自动逻辑错误放行、完全没有痕迹。
+    forbid_patterns 触发词组——不会再有任何一句被自动逻辑错误放行、
+    完全没有痕迹（是否计入通过是 `_case_status` 的事，这里只测 `_score`
+    本身的记录是否完整）。
     """
     for label, answer in _HISTORICAL_REPROS.items():
         _, _, forbidden, failures = _score(answer, [], _FORBID_PATTERNS)
         assert forbidden, f"{label}: 应至少命中一条 forbid_patterns 供人工复核"
-        assert not failures, f"{label}: forbid_patterns 命中不应自动计入 failures"
+        assert not failures, f"{label}: forbid_patterns 命中不应出现在 failures 里"
+
+
+def test_old_ok_semantics_would_have_wrongly_counted_review_required_as_passed():
+    """判别性基线：CR-060 刚上线时 `ScenarioCase.ok` 就是 `not failures`，
+    完全不管 `forbidden_hit`——用 `_CR053_ANSWER` 的真实 `_score()` 结果
+    构造一个 case，复现"命中禁止模式 + 正向关键点全部命中"时，旧逻辑会
+    把它算成"通过"。这正是 CR-061 指出的洞：只标记不改变判定，等于没有
+    约束。
+    """
+    _, _, forbidden, failures = _score(_CR053_ANSWER, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS)
+    old_ok = not failures  # CR-060 时期 ScenarioCase.ok 的定义
+    assert forbidden, "复现前提：这条真实答案必须命中 forbid_patterns"
+    assert old_ok, "旧逻辑应该（错误地）把这道题算作通过——这正是 CR-061 的洞"
+
+
+def test_case_status_is_failed_when_failures_present_regardless_of_reviews():
+    """有 failures 的题一律 failed，不管有没有人工复核确认——两者是
+    独立的判据，复核确认不能拿来抵消关键点缺失这类硬失败。
+    """
+    c = _make_case(failures=["未命中关键点: xxx"], forbidden_hit=["yyy"])
+    reviews = [{"question": _QUESTION, "pattern": "yyy", "verdict": "confirmed_ok"}]
+    assert _case_status(c, reviews) == "failed"
+
+
+def test_case_status_is_passed_when_no_forbidden_hit():
+    """没有命中 forbid_patterns 的题，只要没有 failures 就直接 passed，
+    完全不需要查复核记录。
+    """
+    c = _make_case()
+    assert _case_status(c, []) == "passed"
+
+
+def test_case_status_is_review_required_without_a_matching_review_record():
+    """CR-061 的核心行为：命中 forbid_patterns、没有 failures，但找不到
+    对应的复核记录——必须是 review_required，不能算 passed。
+    """
+    c = _make_case(forbidden_hit=[_FORBID_PATTERNS[1]])
+    assert _case_status(c, []) == "review_required"
+
+
+def test_case_status_stays_review_required_with_a_confirmed_issue_verdict():
+    """人工看过、确认这确实是个真实问题（`confirmed_issue`）时，依然是
+    review_required——"标记已复核"不等于"标记为已解决"，两者是不同的
+    状态，不能用 verdict 记录本身冒充"这道题没问题了"。
+    """
+    c = _make_case(forbidden_hit=[_FORBID_PATTERNS[1]])
+    reviews = [{"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "verdict": "confirmed_issue"}]
+    assert _case_status(c, reviews) == "review_required"
+
+
+def test_case_status_becomes_passed_with_a_confirmed_ok_verdict():
+    """只有明确的 `confirmed_ok` 复核记录，才能把命中转为 passed。"""
+    c = _make_case(forbidden_hit=[_FORBID_PATTERNS[1]])
+    reviews = [{"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "verdict": "confirmed_ok"}]
+    assert _case_status(c, reviews) == "passed"
+
+
+def test_case_status_requires_every_forbidden_hit_to_be_confirmed():
+    """一道题命中了两条 forbid_patterns 时，必须每一条都有 confirmed_ok
+    记录才能 passed——只确认其中一条不够，不能靠部分复核冒充全部复核。
+    """
+    c = _make_case(forbidden_hit=[_FORBID_PATTERNS[0], _FORBID_PATTERNS[1]])
+    reviews = [{"question": _QUESTION, "pattern": _FORBID_PATTERNS[0], "verdict": "confirmed_ok"}]
+    assert _case_status(c, reviews) == "review_required"
+
+
+def test_lookup_review_verdict_matches_on_exact_question_and_pattern():
+    """复核记录按 (question, pattern) 精确匹配——问法或正则稍有不同都不
+    应该命中同一条记录（避免卡片/问法改写后误用过期的复核结论）。
+    """
+    reviews = [{"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "verdict": "confirmed_ok"}]
+    assert _lookup_review_verdict(_QUESTION, _FORBID_PATTERNS[1], reviews) == "confirmed_ok"
+    assert _lookup_review_verdict(_QUESTION, "不同的正则", reviews) is None
+    assert _lookup_review_verdict("不同的问题", _FORBID_PATTERNS[1], reviews) is None
 
 
 def test_cleanly_negated_answer_is_still_flagged_not_silently_dropped():
-    """如实固定 CR-060 之后接受的代价：一句明确否定排他性主张、且没有
-    独立真实违规的正确表述，字面依然包含触发词组，依然会被记入
-    forbidden_hit——这不是 bug，是"不再自动判断极性"这个设计决定的
-    直接后果，用测试防止未来有人"顺手"把这种情况悄悄改回自动放行
-    （那样就是在重新引入 CR-054~060 已经证明治不好的那套机制）。
+    """如实固定接受的代价：一句语境上正确的否定表述，字面依然包含触发
+    词组，依然会被记入 forbidden_hit（进而在没有复核记录时判
+    review_required）——这不是 bug，是"不再自动判断极性"这个设计决定的
+    直接后果。
     """
     _, _, forbidden, failures = _score(_CLEANLY_NEGATED_ANSWER, [], _FORBID_PATTERNS)
     assert forbidden, "即使语境上是正确的否定表述，字面命中依然应记入 forbidden_hit"
-    assert not failures, "但依然不应自动计入 failures——由人工复核决定这次命中是否真的有问题"
+    assert not failures
+
+
+def test_real_scenario_review_yaml_entries_declare_required_fields():
+    """`knowledge/eval/scenario_review.yaml` 里的每条记录都必须有
+    question/pattern/verdict/note/reviewed_at，且 verdict 只能是两个
+    受支持的值——防止漏填字段导致复核记录悄悄失效（`_lookup_review_
+    verdict` 找不到就等于没复核过）。
+    """
+    data = yaml.safe_load(REVIEWS.read_text(encoding="utf-8"))
+    reviews = data.get("reviews", [])
+    assert reviews, "至少应有一条真实复核记录（当前已知 RedisAtomicLong 那题的命中）"
+    for r in reviews:
+        for field in ("question", "pattern", "verdict", "note", "reviewed_at"):
+            assert str(r.get(field, "")).strip(), f"记录缺少 {field}: {r}"
+        assert r["verdict"] in ("confirmed_ok", "confirmed_issue"), (
+            f"verdict 只能是 confirmed_ok/confirmed_issue，实际: {r['verdict']!r}"
+        )

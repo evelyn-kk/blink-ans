@@ -15,11 +15,21 @@
 真的在多次生成里稳定命中，而不是断言一个从没在真实输出里出现过的短语。
 
 可选的 `forbid_patterns`（每题一组正则）用来标记"已知的可疑/越界措辞"
-（比如卡片明确不支持的排他性断言）——命中只会被记入 `forbidden_hit`
-并在输出里显著标出"待人工复核"，**不会**自动判定这道题失败（CR-054~
-060 的完整教训见 `_score()` 上方注释：自动判断"这次命中是否被否定"
-在正则层面被反复证明做不对，与其继续加窗口/连词打补丁，不如老实交给
-人看）。
+（比如卡片明确不支持的排他性断言）——命中记入 `forbidden_hit`，但
+**不再**在正则层面自动判断这次命中是否真的构成问题（CR-054~060 的
+完整教训见 `_score()` 上方注释：自动判断"这次命中是否被否定"在正则
+层面被反复证明做不对，与其继续加窗口/连词打补丁，不如老实交给人看）。
+
+每道题因此有三种状态（CR-061）：`passed`（无 failures，且没有未裁决的
+forbidden_hit）、`failed`（有 failures——缺关键点/缺来源/拒答/生成
+出错，与 forbidden_hit 无关）、`review_required`（无 failures，但有
+forbidden_hit 且找不到对应的人工复核确认）。`review_required` **不计入
+通过数，也不能让整次评测的退出码为 0**——只标记不追加实际约束等于
+没约束，CR-053 想堵住的"已知可疑断言被悄悄计入统计"会以另一种方式
+重新出现。人工复核结论持久化存放在 `knowledge/eval/scenario_review.
+yaml`，按 `(question, pattern)` 匹配；只有 `verdict: confirmed_ok` 才能
+把命中转为 `passed`，`confirmed_issue` 或没有记录都停留在
+`review_required`。
 
 用法:
     python packages/evaltools/run_scenarios.py [--limit N] [--offline] [--language zh|en]
@@ -53,6 +63,7 @@ from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 
 QUESTIONS = ROOT / "knowledge" / "eval" / "scenario_questions.yaml"
+REVIEWS = ROOT / "knowledge" / "eval" / "scenario_review.yaml"
 REPORTS = ROOT / "bench" / "reports"
 
 
@@ -74,18 +85,12 @@ class ScenarioCase:
     forbidden_hit: list[str] = field(default_factory=list)
     sources_missed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    status: str = "passed"
 
     @property
     def keypoint_coverage(self) -> float:
         total = len(self.expect_keypoints)
         return len(self.keypoints_hit) / total if total else 1.0
-
-    @property
-    def ok(self) -> bool:
-        """`forbid_patterns` 命中**不计入**这里——见 `forbidden_hit` 字段
-        与 `_score()` 顶部关于 CR-060 的说明：它是"标记待人工复核"，
-        不再是自动判定失败的判据。"""
-        return not self.failures
 
 
 def _project_of(citation: str) -> str:
@@ -109,13 +114,16 @@ def _project_of(citation: str) -> str:
 # 集合，枚举永远追不完，句法结构也不是关键词表能穷尽的。
 #
 # CR-060（R55 复审、六个反例里的最后一个）之后决定停止在这条路上继续
-# 打补丁：`forbid_patterns` 命中**不再做任何自动否定判定**，也**不再
-# 自动计入 `failures`/影响 `ok`**——命中就如实记入 `forbidden_hit` 并在
-# CLI 输出、JSON 报告里显著标出"待人工复核"，由人判断这次命中到底是
-# 真实的越界断言还是已被正确否定的表述。这不是放弃 CR-053 想要的东西
-# （"已知的错误论断不能被正向关键点掩盖而悄悄放过"）——`forbidden_hit`
-# 依然会被打印出来、写进报告，不会像 CR-053 修复前那样完全没有痕迹；
-# 放弃的只是"自动分辨这次命中是否被否定"这一步，把它交还给人工。
+# 打补丁：`forbid_patterns` 命中**不再做任何自动否定判定**——命中就如实
+# 记入 `forbidden_hit`，由人判断这次命中到底是真实的越界断言还是已被
+# 正确否定的表述。
+#
+# CR-061：光记入 `forbidden_hit` 并打印出来还不够——如果这依然不影响
+# 这道题的通过判定，等于只是换了个说法重新引入 CR-053 想堵住的洞（已知
+# 可疑断言被悄悄计入统计）。因此命中 `forbidden_hit` 但没有对应人工
+# 复核确认的题，判定为独立的第三种状态 `review_required`：不算 `passed`，
+# 也不能让整次评测的退出码为 0——具体的三态判定逻辑见 `_case_status()`，
+# 人工复核结论的持久化格式见 `knowledge/eval/scenario_review.yaml`。
 def _score(
     answer: str, expect_keypoints: list[str], forbid_patterns: list[str],
 ) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -123,8 +131,9 @@ def _score(
 
     返回 `(keypoints_hit, keypoints_missed, forbidden_hit, failures)`。
     `forbidden_hit` 不进入 `failures`——命中 `forbid_patterns` 只是标记
-    "这段文字里出现了已知的可疑措辞，需要人工看一眼"，不再自动判定这题
-    失败（见上方 CR-054~060 的完整说明）。
+    "这段文字里出现了已知的可疑措辞，需要人工看一眼"，本身不判定这题
+    是否失败；最终的三态判定（含要不要采信人工复核结论）在 `_case_
+    status()` 里做，见上方 CR-054~061 的完整说明。
     """
     hit: list[str] = []
     missed: list[str] = []
@@ -142,7 +151,40 @@ def _score(
     return hit, missed, forbidden, failures
 
 
-def run_case(orch: Orchestrator, spec: dict, language: str) -> ScenarioCase:
+def _lookup_review_verdict(question: str, pattern: str, reviews: list[dict]) -> str | None:
+    """在 `knowledge/eval/scenario_review.yaml` 的记录里找 `(question,
+    pattern)` 这个组合键对应的人工复核结论。找不到返回 `None`——按
+    `_case_status()` 的语义，`None` 和 `confirmed_issue` 效果一样，都
+    不能把命中转为 `passed`，只是理由不同（没人看过 vs 看过但确认有
+    问题）。
+    """
+    for r in reviews:
+        if r.get("question") == question and r.get("pattern") == pattern:
+            return r.get("verdict")
+    return None
+
+
+def _case_status(c: ScenarioCase, reviews: list[dict]) -> str:
+    """三态判定（CR-061）：`passed` / `failed` / `review_required`。
+
+    有 `failures`（缺关键点、缺来源、拒答、生成出错）一律 `failed`，
+    与 `forbidden_hit` 无关。没有 `failures` 但有 `forbidden_hit` 时，
+    必须为**每一条**命中的 pattern 都找到 `verdict: confirmed_ok` 的
+    复核记录，才能判 `passed`；只要有一条没有记录或记录写的是
+    `confirmed_issue`，就是 `review_required`——不计入通过数，也不能
+    让整次评测的退出码为 0（见 `main()`）。
+    """
+    if c.failures:
+        return "failed"
+    if not c.forbidden_hit:
+        return "passed"
+    for pattern in c.forbidden_hit:
+        if _lookup_review_verdict(c.question, pattern, reviews) != "confirmed_ok":
+            return "review_required"
+    return "passed"
+
+
+def run_case(orch: Orchestrator, spec: dict, language: str, reviews: list[dict]) -> ScenarioCase:
     c = ScenarioCase(
         question=spec["q"],
         expect_keypoints=list(spec.get("expect_keypoints", [])),
@@ -170,6 +212,7 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> ScenarioCase:
 
     if c.declined:
         c.failures.append("模型判定证据不足而拒答，本题按设计应有覆盖场景卡片可回答")
+        c.status = _case_status(c, reviews)
         return c
 
     c.keypoints_hit, c.keypoints_missed, c.forbidden_hit, kp_failures = _score(
@@ -184,6 +227,7 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> ScenarioCase:
                 f"引用中缺少期望来源 {project!r}（实际 {', '.join(c.cited_projects) or '无'}）"
             )
 
+    c.status = _case_status(c, reviews)
     return c
 
 
@@ -199,6 +243,7 @@ def main() -> int:
     specs = yaml.safe_load(QUESTIONS.read_text(encoding="utf-8"))["questions"]
     if args.limit:
         specs = specs[: args.limit]
+    reviews = yaml.safe_load(REVIEWS.read_text(encoding="utf-8"))["reviews"] if REVIEWS.exists() else []
 
     prompt = system_prompt(args.language)
     engine = InferenceEngine(DEFAULT_MODEL)
@@ -214,31 +259,36 @@ def main() -> int:
     print(f"运行 {len(specs)} 题场景评测（语言 {args.language}）\n")
     cases: list[ScenarioCase] = []
     t0 = time.perf_counter()
+    marks = {"passed": "✓", "failed": "✗", "review_required": "△"}
     for i, spec in enumerate(specs, 1):
-        c = run_case(orch, spec, args.language)
+        c = run_case(orch, spec, args.language, reviews)
         cases.append(c)
-        mark = "✓" if c.ok else "✗"
-        print(f"  {mark} [{i:>2}/{len(specs)}] {c.question[:40]:<42} "
+        print(f"  {marks[c.status]} [{i:>2}/{len(specs)}] {c.question[:40]:<42} "
               f"关键点 {len(c.keypoints_hit)}/{len(c.expect_keypoints)} "
               f"来源 {', '.join(c.cited_projects) or '无'}")
         for f in c.failures:
             print(f"        └─ {f}")
         for p in c.forbidden_hit:
-            print(f"        ⚠ 命中可疑模式（未计入判定，需人工复核）: {p!r}")
+            verdict = _lookup_review_verdict(c.question, p, reviews) or "无复核记录"
+            print(f"        ⚠ 命中可疑模式（{verdict}）: {p!r}")
 
-    passed = sum(1 for c in cases if c.ok)
+    passed = sum(1 for c in cases if c.status == "passed")
+    failed = sum(1 for c in cases if c.status == "failed")
+    review_required = sum(1 for c in cases if c.status == "review_required")
     total_keypoints = sum(len(c.expect_keypoints) for c in cases)
     hit_keypoints = sum(len(c.keypoints_hit) for c in cases)
     coverage = hit_keypoints / total_keypoints if total_keypoints else 1.0
-    flagged = [c for c in cases if c.forbidden_hit]
 
     print(f"\n{'='*60}")
-    print(f"通过 {passed}/{len(cases)}")
+    print(f"通过 {passed}/{len(cases)}（失败 {failed}，待复核 {review_required}）")
     print(f"关键点覆盖率: {hit_keypoints}/{total_keypoints}（{coverage*100:.0f}%）")
-    if flagged:
-        print(f"⚠ {len(flagged)} 题命中可疑模式，需人工复核（未计入上面的通过/失败判定）：")
-        for c in flagged:
-            print(f"    - {c.question[:50]}")
+    if review_required:
+        print(f"△ {review_required} 题命中可疑模式且无 confirmed_ok 复核记录，"
+              f"不计入通过、整次评测不算成功——需要在 "
+              f"{REVIEWS.relative_to(ROOT)} 补一条复核结论：")
+        for c in cases:
+            if c.status == "review_required":
+                print(f"    - {c.question[:50]}")
     print(f"耗时 {time.perf_counter()-t0:.0f}s")
 
     REPORTS.mkdir(parents=True, exist_ok=True)
@@ -248,6 +298,8 @@ def main() -> int:
         "language": args.language,
         "offline_mode": args.offline,
         "passed": passed,
+        "failed": failed,
+        "review_required": review_required,
         "total": len(cases),
         "keypoint_coverage": coverage,
         "cases": [vars(c) for c in cases],
