@@ -15,8 +15,18 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from packages.schemas.chunk import Chunk, utc_now  # noqa: E402
+from services.retrieval import store as store_mod  # noqa: E402
+from services.retrieval.embed import DIM  # noqa: E402
+from services.retrieval.store import IndexBuilder  # noqa: E402
 from services.sync import cards  # noqa: E402
 from services.sync.registry import RegistryError, Source, load_registry  # noqa: E402
+
+
+def _vec(i: int) -> list[float]:
+    v = [0.0] * DIM
+    v[i] = 1.0
+    return v
 
 
 def _authored_src(tmp_path: Path, **over) -> Source:
@@ -53,6 +63,14 @@ def _fake_registry() -> list[Source]:
             format="markdown", locale="en", paths=("docs",),
             repo="https://github.com/example/mplsource", ref="v1",
             license="MPL-2.0", license_file="LICENSE", base_url="https://example.com/",
+        ),
+        # 镜像生产注册表里真实的 scenario-cards 条目——CR-047 的测试需要
+        # `_authored_path_prefixes()` 能从注册表里认出"knowledge/scenarios"
+        # 是一个 authored 路径前缀，才能验证回退查询确实排除了这个前缀下
+        # 历史遗留的卡片块。
+        Source(
+            id="scenario-cards", project="scenario-cards", technology="scenario-cards",
+            format="authored", locale="en", paths=("knowledge/scenarios",),
         ),
     ]
 
@@ -122,7 +140,7 @@ def test_two_sections_produce_two_chunks_with_inherited_metadata(tmp_path):
 def test_version_prefers_this_run_over_current_index(tmp_path, monkeypatch):
     """versions 参数（本轮同步内刚拿到的）优先于查当前已激活索引。"""
     _write_card(tmp_path, "widget.md", CARD_OK)
-    monkeypatch.setattr(cards, "_lookup_current_version", lambda project: "stale-from-disk")
+    monkeypatch.setattr(cards, "_lookup_current_version", lambda project, prefixes: "stale-from-disk")
 
     chunks, _res = cards.collect_chunks(
         _authored_src(tmp_path), lambda *_: None,
@@ -133,7 +151,7 @@ def test_version_prefers_this_run_over_current_index(tmp_path, monkeypatch):
 
 def test_version_falls_back_to_current_index_when_absent_from_this_run(tmp_path, monkeypatch):
     _write_card(tmp_path, "widget.md", CARD_OK)
-    monkeypatch.setattr(cards, "_lookup_current_version", lambda project: "from-disk")
+    monkeypatch.setattr(cards, "_lookup_current_version", lambda project, prefixes: "from-disk")
 
     chunks, _res = cards.collect_chunks(
         _authored_src(tmp_path), lambda *_: None, versions={}, known_urls=KNOWN_URLS
@@ -197,7 +215,7 @@ def test_section_citing_a_disallowed_license_is_rejected_by_chunk_validate(tmp_p
 
 
 def test_section_without_resolvable_version_is_rejected(tmp_path, monkeypatch):
-    monkeypatch.setattr(cards, "_lookup_current_version", lambda project: None)
+    monkeypatch.setattr(cards, "_lookup_current_version", lambda project, prefixes: None)
     _write_card(tmp_path, "widget.md", CARD_OK)
 
     chunks, res = cards.collect_chunks(
@@ -237,7 +255,7 @@ def test_known_urls_prefers_this_run_over_current_index(tmp_path, monkeypatch):
     """known_urls 参数（本轮同步内刚拿到的）优先于查当前已激活索引——
     与 version 解析的优先级规则对称。"""
     _write_card(tmp_path, "widget.md", CARD_OK)
-    monkeypatch.setattr(cards, "_lookup_current_urls", lambda project: {"https://stale.example/x"})
+    monkeypatch.setattr(cards, "_lookup_current_urls", lambda project, prefixes: {"https://stale.example/x"})
 
     chunks, res = cards.collect_chunks(
         _authored_src(tmp_path), lambda *_: None,
@@ -249,13 +267,81 @@ def test_known_urls_prefers_this_run_over_current_index(tmp_path, monkeypatch):
 
 def test_known_urls_falls_back_to_current_index_when_absent_from_this_run(tmp_path, monkeypatch):
     _write_card(tmp_path, "widget.md", CARD_OK)
-    monkeypatch.setattr(cards, "_lookup_current_urls", lambda project: set(KNOWN_URLS["widgetdocs"]))
+    monkeypatch.setattr(cards, "_lookup_current_urls", lambda project, prefixes: set(KNOWN_URLS["widgetdocs"]))
 
     chunks, res = cards.collect_chunks(
         _authored_src(tmp_path), lambda *_: None, versions={"widgetdocs": "abc123"}, known_urls={}
     )
     assert res.rejected == 0
     assert len(chunks) == 2
+
+
+# ---------- CR-047：回退查询不得把历史 authored 块当成官方真实块 ----------
+
+def test_current_index_fallback_excludes_authored_blocks_from_self_endorsing(tmp_path, monkeypatch):
+    """独立复现 codex 的构造：CR-045 修复前跑过的旧版卡片同步，会把一个
+    编造/跨域 URL 写成 source_project='widgetdocs'（因为卡片小节照抄的
+    是被引用来源的 source_project，和该来源真正的原生块无法用这个字段
+    区分）。如果 _lookup_current_urls()/_lookup_current_version() 的回退
+    查询不排除 authored 来源自己产生的块，这条历史伪造记录会被当成
+    "widgetdocs 语料里已有的真实地址"，让新卡片引用同一个 URL 时
+    自我背书通过——这正是 CR-047 指出的洞。这里用真实的 IndexBuilder/
+    ChunkStore 建一个真实 current.db（不是纯 mock），同时放一条这样的
+    历史 authored 块和一条真正的原生块，验证回退查询只认后者。
+    """
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    monkeypatch.setattr(store_mod, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(cards, "CURRENT", index_dir / "current.db")
+
+    poisoned = Chunk(
+        source_url="https://attacker.invalid/old-card-url",
+        source_project="widgetdocs", version_or_commit="v0-poisoned",
+        license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Old card", "Bad section"], technology="widgets",
+        content_type="prose", locale="en", text="旧版卡片留下的伪造引用。",
+        # 落在 _fake_registry() 里 scenario-cards 的 authored 路径前缀下，
+        # 模拟这条块真的是历史 authored 同步产生的。
+        source_path="knowledge/scenarios/old-card.md",
+    )
+    legit = Chunk(
+        source_url="https://example.com/docs/real-page.html",
+        source_project="widgetdocs", version_or_commit="v1-real",
+        license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Real Docs", "Real section"], technology="widgets",
+        content_type="prose", locale="en", text="widgetdocs 官方文档的真实正文。",
+        source_path="docs/real-page.md",  # 非 authored 路径，真正的原生块
+    )
+    poisoned.validate()
+    legit.validate()
+
+    b = IndexBuilder("current")
+    b.add([poisoned, legit], [_vec(0), _vec(1)])
+    b.finalize({"widgetdocs": "v1-real"}, "synthetic")
+    b.activate()
+
+    text = CARD_OK.replace(
+        "source: widgetdocs https://example.com/docs/lifecycle.html#draining",
+        "source: widgetdocs https://attacker.invalid/old-card-url",
+    ).replace(
+        "source: widgetdocs https://example.com/docs/lifecycle.html#hooks",
+        "source: widgetdocs https://example.com/docs/real-page.html",
+    )
+    _write_card(tmp_path, "widget.md", text)
+
+    chunks, res = cards.collect_chunks(
+        _authored_src(tmp_path), lambda *_: None, versions={}, known_urls={}
+    )
+
+    assert res.rejected == 1, "伪造 URL 即便已经在 current.db 里也不该被接受"
+    assert any("已存在的真实块地址" in k for k in res.reject_reasons)
+    assert len(chunks) == 1
+    assert chunks[0].source_url == "https://example.com/docs/real-page.html", (
+        "真实的原生块 URL 仍应能通过回退校验"
+    )
+    assert chunks[0].version_or_commit == "v1-real", (
+        "版本回退同样必须排除 authored 块，不能取到被伪造的 v0-poisoned"
+    )
 
 
 # ---------- 卡片格式本身的拒绝（整份文件级别） ----------

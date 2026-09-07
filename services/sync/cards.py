@@ -94,33 +94,64 @@ def _parse_card(path: Path) -> tuple[str, list[_Section]]:
     return title, sections
 
 
-def _lookup_current_version(project: str) -> str | None:
-    """从当前已激活索引里找该来源既有块的版本号，作为兜底。"""
+def _authored_path_prefixes(registry: list[Source]) -> tuple[str, ...]:
+    """所有 authored 来源在注册表里声明的路径前缀。
+
+    CR-047：卡片小节落库后 `source_project` 是它引用的真实来源（如
+    debezium），和那个来源的原生块完全无法用 `source_project` 区分——
+    `_lookup_current_version()`/`_lookup_current_urls()` 从当前索引回退
+    查值时，若不排除 authored 来源自己产生的块，一条历史遗留的伪造
+    URL/版本（例如 CR-045 修复前跑过的旧版卡片留下的）就能在后续同步里
+    被当成"语料里已有的真实值"自我背书、继续被接受，绕开 CR-045 的
+    整套校验。排除逻辑必须按注册表**当前声明的全部** authored 路径，
+    不能硬编码某一个路径——理由与 `store.carry_over()` 的
+    `exclude_source_path_prefixes` 完全一致。
+    """
+    return tuple(p for s in registry if s.format == "authored" for p in s.paths)
+
+
+def _is_authored_path(source_path: str | None, prefixes: tuple[str, ...]) -> bool:
+    if not source_path:
+        return False
+    return any(
+        source_path == p or source_path.startswith(p.rstrip("/") + "/")
+        for p in prefixes
+    )
+
+
+def _lookup_current_version(project: str, authored_prefixes: tuple[str, ...]) -> str | None:
+    """从当前已激活索引里找该来源既有的**非 authored** 块的版本号，作为兜底。"""
     if not CURRENT.exists():
         return None
     store = ChunkStore(CURRENT)
     try:
         rows = store.execute(
-            "SELECT version_or_commit FROM chunks WHERE source_project = ? LIMIT 1", (project,)
+            "SELECT version_or_commit, source_path FROM chunks WHERE source_project = ?", (project,)
         )
-        return rows[0]["version_or_commit"] if rows else None
+        for r in rows:
+            if not _is_authored_path(r["source_path"], authored_prefixes):
+                return r["version_or_commit"]
+        return None
     finally:
         store.close()
 
 
-def _lookup_current_urls(project: str) -> set[str]:
-    """从当前已激活索引里找该来源既有块的全部 source_url，作为兜底。
+def _lookup_current_urls(project: str, authored_prefixes: tuple[str, ...]) -> set[str]:
+    """从当前已激活索引里找该来源既有的**非 authored** 块的全部 source_url，作为兜底。
 
     CR-045：`source:` 指令光靠"项目已登记、可入库"完全挡不住引用一个真实
     存在但内容风马牛不相及的 URL（甚至跨域 URL）——这道校验要求引用的
     URL 必须逐字匹配语料里**已经存在**的某条真实块的 `source_url`（含
-    锚点），而不是"看起来像"这个项目的地址。"""
+    锚点），而不是"看起来像"这个项目的地址。CR-047：这里的"真实块"必须
+    排除 authored 来源自己产生的块，见 `_authored_path_prefixes()`。"""
     if not CURRENT.exists():
         return set()
     store = ChunkStore(CURRENT)
     try:
-        rows = store.execute("SELECT DISTINCT source_url FROM chunks WHERE source_project = ?", (project,))
-        return {r["source_url"] for r in rows}
+        rows = store.execute(
+            "SELECT source_url, source_path FROM chunks WHERE source_project = ?", (project,)
+        )
+        return {r["source_url"] for r in rows if not _is_authored_path(r["source_path"], authored_prefixes)}
     finally:
         store.close()
 
@@ -131,6 +162,7 @@ def _build_chunk(
     by_project: dict[str, Source],
     version_by_project: dict[str, str],
     known_urls_by_project: dict[str, set[str]],
+    authored_prefixes: tuple[str, ...],
     now: str,
     source_path: str,
 ) -> Chunk:
@@ -152,7 +184,7 @@ def _build_chunk(
     known_urls = (
         known_urls_by_project[sec.project]
         if sec.project in known_urls_by_project
-        else _lookup_current_urls(sec.project)
+        else _lookup_current_urls(sec.project, authored_prefixes)
     )
     if sec.url not in known_urls:
         raise CardFormatError(
@@ -161,7 +193,7 @@ def _build_chunk(
             f"已入库、可核验的真实证据，不能引用编造或跨域的地址"
         )
 
-    version = version_by_project.get(sec.project) or _lookup_current_version(sec.project)
+    version = version_by_project.get(sec.project) or _lookup_current_version(sec.project, authored_prefixes)
     if not version:
         raise CardFormatError(
             f"§ {sec.heading}: {sec.project!r} 尚未有任何已入库的块，无法确定引用版本，"
@@ -237,6 +269,7 @@ def collect_chunks(
     by_project = {s.project: s for s in registry}
     version_by_project = {s.project: versions[s.id] for s in registry if s.id in versions}
     known_urls_by_project = {s.project: known_urls[s.id] for s in registry if s.id in known_urls}
+    authored_prefixes = _authored_path_prefixes(registry)
     now = utc_now()
     chunks: list[Chunk] = []
 
@@ -253,7 +286,8 @@ def collect_chunks(
         for sec in sections:
             try:
                 chunk = _build_chunk(
-                    title, sec, by_project, version_by_project, known_urls_by_project, now, rel_path
+                    title, sec, by_project, version_by_project, known_urls_by_project,
+                    authored_prefixes, now, rel_path,
                 )
                 chunk.validate()
             except (CardFormatError, MetadataError) as exc:
