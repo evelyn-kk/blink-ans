@@ -1,4 +1,6 @@
-# T-011 场景评测雏形：只覆盖 Outbox 场景卡片（knowledge/scenarios/outbox-pattern.md）。
+# T-011 场景评测雏形：覆盖 Outbox（knowledge/scenarios/outbox-pattern.md）与
+# Kafka 消费者重试/死信队列（knowledge/scenarios/kafka-consumer-retry-dlq.md）
+# 两张场景卡片。
 #
 # 与 basic_questions.yaml 的区别：那份只验证"有没有引用、拒答对不对"，
 # 不判断答案的技术正确性。这里的 expect_keypoints 是人工核对过、
@@ -86,3 +88,63 @@ questions:
       - "(?i)(not.{0,20}exactly once|并非.{0,10}(严格)?一次|不是.{0,10}(严格)?一次|不能保证.{0,10}一次)"
       - "(?i)(read side|downstream|consumer|消费(端|者|侧)|下游)"
     expect_sources: [kafka]
+
+  # ---- 第二张场景卡片：Kafka 消费者重试与死信队列 ----
+  #
+  # 2026-09-06 实测校准记录（务必读；用真实 `run_scenarios.py --offline
+  # --language zh` 输出核对过，不是猜的）：
+  # 1) 标识符类关键点（`RuntimeException`/`DefaultErrorHandler`/
+  #    `@RetryableTopic`/`-dlt`）本地后端稳定保留原文，未出现 Outbox
+  #    批次那种"概念性短语被模型翻译成中文"的问题，因此这五题的关键点
+  #    大多不需要中英双写；仍在结论性短语上留了双语，理由同上一批。
+  # 2) 第 2 题（是否所有异常都应重试）初版直接问"是不是所有异常都应该让
+  #    Kafka 消费者重试"，检索命中的是 kafka 来源的 Connect
+  #    `errors.tolerance` 内容而不是本卡片——问法不含"Spring Kafka"/
+  #    "DefaultErrorHandler"时会被路由到无关的 kafka 语料。改问法显式
+  #    带上这两个词后，来源正确回到 spring-kafka；但模型仍把"继承自
+  #    `Error` 会绕过错误处理器"和"`DeserializationException` 等是默认
+  #    不重试的致命 `RuntimeException`"这两件卡片原文分开的事实混成一句
+  #    （错误地说 `DeserializationException` "继承自 Error"），`RuntimeException`
+  #    这个词没有出现在答案里——如实记为本地小模型的合成质量问题（与
+  #    Outbox 批次已记录的"本地兜底后端会把相邻证据块的事实混淆"同一类），
+  #    未松动关键点掩盖它。
+  # 3) 第 3 题（死信主题命名+分区数要求）初版问法只问"发到哪个主题"，
+  #    模型如实只答了这一件事，第二条关于分区数的关键点必然落空——不是
+  #    模型的问题，是问法本身没问那件事。改为把两件事都写进问题
+  #    （"...发到哪个主题，对这个死信主题的分区数有什么要求"），因为
+  #    这两个事实本就来自同一个卡片小节，合并问法后两条关键点都稳定命中。
+  # 实测结果：13 题合计通过 7/13、关键点覆盖率 20/26（77%）；仅本卡片的
+  # 5 题里 4/5 通过（第 2 题因上述 (2) 的合成质量问题未通过）。Outbox 原
+  # 8 题结果与此前记录完全一致（3/8、11/16），证明新卡片入库未影响其
+  # 校准结果。仍未做的验证：与 Outbox 批次相同，只跑过本地兜底后端，
+  # 未用云端 Claude 验证过关键点阈值是否对生产路径偏松。
+
+  - q: "Kafka 消费者处理某条消息一直抛异常，Spring Kafka 默认会怎么重试"
+    expect_keypoints:
+      - "(?i)(backoff|退避|重新投递|redeliver|重试)"
+      - "(?i)(同一个?分区|partition|阻塞|block|卡住|hold up)"
+    expect_sources: [spring-kafka]
+
+  - q: "在 Spring Kafka 的 DefaultErrorHandler 里，是不是所有异常类型都应该被重试"
+    expect_keypoints:
+      - "(?i)(RuntimeException)"
+      - "(?i)(Error|致命|fatal|不(会|应该)?重试|not.{0,10}retr)"
+    expect_sources: [spring-kafka]
+
+  - q: "Spring Kafka 的 DeadLetterPublishingRecoverer 默认把失败消息发到哪个主题，对这个死信主题的分区数有什么要求"
+    expect_keypoints:
+      - "(?i)(-dlt|dlt\\b)"
+      - "(?i)(同一个?分区|partition|分区数|至少)"
+    expect_sources: [spring-kafka]
+
+  - q: "用 @RetryableTopic 注解和用 DefaultErrorHandler 在原分区重试，这两种重试方式有什么区别"
+    expect_keypoints:
+      - "(?i)(@RetryableTopic|独立.{0,6}(主题|topic)|(retry|重试).{0,6}(主题|topic))"
+      - "(?i)(不.{0,10}(阻塞|block)|继续.{0,10}(处理|消费)|同一个?(消费者|分区|线程))"
+    expect_sources: [spring-kafka]
+
+  - q: "批量消费的 Kafka Listener 能不能用 @RetryableTopic 实现死信队列"
+    expect_keypoints:
+      - "(?i)(不支持|不能|not.{0,15}support|NOT supported)"
+      - "(?i)(DefaultErrorHandler|DeadLetterPublishingRecoverer)"
+    expect_sources: [spring-kafka]
