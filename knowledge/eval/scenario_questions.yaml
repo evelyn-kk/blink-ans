@@ -148,3 +148,53 @@ questions:
       - "(?i)(不支持|不能|not.{0,15}support|NOT supported)"
       - "(?i)(DefaultErrorHandler|DeadLetterPublishingRecoverer)"
     expect_sources: [spring-kafka]
+
+  # ---- 第三张场景卡片：Redis 库存超卖 ----
+  #
+  # 2026-09-07 实测校准记录（`run_scenarios.py --offline --language zh` 输出
+  # 逐句核对过，非猜测）：本地兜底后端（Qwen 3-4B）对这五题的回答基本忠实
+  # 转述了卡片各小节的实际论点（两条独立命令有间隙/事务内 GET 读不到真实值
+  # 返回 null/Lua 脚本合并读改写为单次原子操作/SHA1 缓存避免重发脚本体/
+  # 原子计数器只对单命令原子、不含阈值检查），首次校准即 5/5 全部通过、
+  # 关键点 10/10 全部命中，不需要像 Outbox 批次那样做中英双语改写——概念性
+  # 关键点本身就用了双语正则，标识符类关键点（Lua/SHA1/RedisAtomicLong 等）
+  # 本地后端也稳定保留原文。**如实登记一处合成质量问题，不影响关键点判定**：
+  # 第 3 题（Lua 脚本实现）答案编造了本卡片原文完全没有的"关键前提：Redis
+  # 版本 ≥ 2.6.x，JDK ≥ 17，Spring Framework ≥ 6.0"，第 4 题（SHA1 缓存）
+  # 编造了"脚本内容变更需手动更新源码并重新计算 SHA1，否则旧版本脚本将被
+  # 忽略"——两处都是本地小模型在真实论点之外添加的无来源细节，与 Outbox/
+  # Kafka 批次已记录的"本地兜底合成质量偏弱、会补充或混淆相邻事实"同一类
+  # 问题，未松动关键点掩盖它，也未借此收紧关键点去捕捉这类幻觉（那需要更
+  # 细粒度的事实核查机制，不是这批 keypoint 正则该做的事）。
+  # 仍未做的验证：与前两批相同，只跑过本地兜底后端，未用云端 Claude 验证过
+  # 关键点阈值是否对生产路径偏松。
+
+  - q: "秒杀场景下，先 GET 库存判断是否还有余量，再单独调用 DECR 扣减，为什么会出现超卖"
+    expect_keypoints:
+      - "(?i)(check.?and.?set|两(个|条|次)?独立|两次.{0,6}(命令|请求|round.?trip)|原子)"
+      - "(?i)(超卖|oversell|negative|负数|同时|并发|concurrent)"
+    expect_sources: [spring-data-redis]
+
+  - q: "用 Spring 的 @Transactional 把 Redis 的 GET 和 DECR 包在一个事务里，能不能解决库存超卖"
+    expect_keypoints:
+      - "(?i)(不能|不行|does.{0,10}not|cannot|没有解决)"
+      - "(?i)(null|看不到|不可见|not visible|读不到|无法读取)"
+    expect_sources: [spring-data-redis]
+
+  - q: "Spring Data Redis 怎么用 Lua 脚本实现库存的原子扣减"
+    expect_keypoints:
+      - "(?i)(lua|脚本|script)"
+      - "(?i)(原子|atomic|一次(性)?|single)"
+    expect_sources: [spring-data-redis]
+
+  - q: "每次执行 Redis 的 Lua 脚本都要把脚本内容重新发一遍给服务器吗，会不会很慢"
+    expect_keypoints:
+      - "(?i)(sha1?|evalsha)"
+      - "(?i)(缓存|cache|不需要|不用|无需|only.{0,10}first|falling back)"
+    expect_sources: [spring-data-redis]
+
+  - q: "spring-data-redis 提供的原子计数器（RedisAtomicLong 这类）能不能直接用来做库存扣减，防止超卖"
+    expect_keypoints:
+      - "(?i)(不能|不行|不足以|does.{0,10}not|cannot)"
+      - "(?i)(单个?命令|single command|没有.{0,6}(条件|判断|检查)|no.{0,10}(condition|check))"
+    expect_sources: [spring-data-redis]
