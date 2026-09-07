@@ -33,10 +33,19 @@ CR-056 是 CR-055 修复上线后 R52 复审又发现的问题：按标点分句
 治标不治本——"但是/不过"这类转折连词并不产生标点分句边界，"并非只能
 用 Lua **但是**仍然只能用 Lua 脚本。"里，"并非只能用 Lua"和"但是仍然
 只能用 Lua 脚本"因为中间没有标点，仍被判定成同一个分句，前一命题的
-"并非"照样泄漏给了后一个独立的真实排他性断言。真正的修复不是继续找
-更多种"分句边界"打补丁，而是换一个更严格的判定：否定标记必须**紧邻**
-它修饰的触发词本身（`str.endswith`，只留几个字符的宽松余量），不接受
-隔着任何别的命题——不管中间隔的是标点还是连词，这个检查天然不关心。
+"并非"照样泄漏给了后一个独立的真实排他性断言。当时判断"分句边界"这个
+方向在打不完的补丁，换成了更严格的判定：否定标记必须**紧邻**触发词
+本身（`str.endswith`，只留几个字符的宽松余量）。
+
+CR-057 是 CR-056 修复上线后 R53 复审又发现的问题：CR-056 的"紧邻"矫枉
+过正——"并不一定只能用 Lua 脚本"（否定词"并不一定"和触发词"只能"之间
+没有隔别的命题，只是隔着"一定"这个自然修饰语）、英文
+"definitely not the only way to use Lua"（"not"和"only way"之间隔着
+"the"）这类**明确的否定语境**，同样会被"零容忍紧邻"拒之门外，误判成
+真实违规。真正需要的不是"零窗口"也不是"无限窗口"：把 CR-055 的"按分句
+边界截断"和 CR-056 指出的"边界要认得出转折连词，不能只认标点"一起用，
+边界内再留一个不大的窗口容纳"一定/the"这类修饰语，否定标记词表也要
+覆盖"不一定/并不一定"这类更松散的否定构式。
 
 这里只测纯判定函数 `_score`（及其内部用到的 `_is_negated`），不加载
 模型/索引，因此毫秒级，可进快速门禁。
@@ -150,6 +159,29 @@ def _clause_boundary_negation_pre_cr056(
         clause_start = m.end()
     prefix = answer[max(clause_start, match_start - window):match_start]
     return any(marker in prefix for marker in markers)
+
+
+def _is_negated_pre_cr057(answer: str, match_start: int, *, adjacency: int = 6) -> bool:
+    """CR-056 刚上线时 `_is_negated()` 的行为快照：要求否定标记恰好紧邻
+    （`str.endswith`）触发词本身，容不下"一定/the"这类自然修饰语。仅用于
+    下面的判别性基线测试，不是生产代码的一部分。
+    """
+    markers = ("不是", "并非", "isn't", "is not")
+    prefix = answer[max(0, match_start - adjacency):match_start]
+    return any(prefix.endswith(marker) for marker in markers)
+
+
+# CR-057 复现句一（取自 codex R53 复审给出的具体构造例句）：否定词
+# "并不一定"和触发词"只能"之间隔着"一定"这个自然修饰语，不是隔着别的
+# 命题——这是明确的否定语境，不应被判为真实排他性断言。
+_CR057_ANSWER_LOOSE_ZH = "不能；没有条件检查，并不一定只能用 Lua 脚本，也可以采用其他机制。"
+
+# CR-057 复现句二（英文版本）：否定词"not"和触发短语"only way"之间隔着
+# "the"。
+_CR057_ANSWER_LOOSE_EN = (
+    "cannot; no condition check; it is definitely not the only way to use Lua; "
+    "other mechanisms work."
+)
 
 
 def test_old_positive_only_keypoints_wrongly_pass_the_cr053_answer():
@@ -352,3 +384,53 @@ def test_forbid_patterns_do_not_misfire_on_negated_atomic_only_claim():
         correct_answer, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
     )
     assert not forbidden, f"不应误判为越界断言，实际命中: {forbidden}"
+
+
+def test_pre_cr057_negation_check_wrongly_rejects_a_loose_zh_negation():
+    """判别性基线：CR-056 刚上线时的"紧邻"否定检测（`str.endswith`，
+    几乎零容忍）会把"并不一定只能用 Lua 脚本"这句夹着"一定"这个自然
+    修饰语的否定表述，错判成没有被否定——复现句取自 codex R53 复审
+    给出的具体构造例句，不是臆造的场景。
+    """
+    lua_pattern = _FORBID_PATTERNS[1]
+    matches = list(re.finditer(lua_pattern, _CR057_ANSWER_LOOSE_ZH))
+    assert matches, "复现句必须包含一次真实的 Lua 排他性字面命中"
+    assert not any(
+        _is_negated_pre_cr057(_CR057_ANSWER_LOOSE_ZH, m.start()) for m in matches
+    ), "旧的紧邻检测应该（错误地）把这次命中判定为未被否定——这正是 CR-057 的洞"
+
+
+def test_score_recognizes_the_loose_zh_negation():
+    """CR-057 修复：分句边界内留出的窗口能容纳"一定"这类自然修饰语，
+    正确识别出这是被否定的表述，不判为真实排他性断言。
+    """
+    hit, missed, forbidden, failures = _score(
+        _CR057_ANSWER_LOOSE_ZH, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert hit == _POSITIVE_KEYPOINTS
+    assert not missed
+    assert not forbidden, f"应识别为否定语境，不应误判为越界断言，实际命中: {forbidden}"
+    assert not failures
+
+
+def test_pre_cr057_negation_check_wrongly_rejects_a_loose_en_negation():
+    """同上，英文版本："not"和"only way"之间隔着"the"，CR-056 的零容忍
+    紧邻检测同样会错判成未被否定。
+    """
+    lua_pattern = _FORBID_PATTERNS[1]
+    matches = list(re.finditer(lua_pattern, _CR057_ANSWER_LOOSE_EN))
+    assert matches, "复现句必须包含一次真实的 'only way' 字面命中"
+    assert not any(
+        _is_negated_pre_cr057(_CR057_ANSWER_LOOSE_EN, m.start()) for m in matches
+    ), "旧的紧邻检测应该（错误地）把这次命中判定为未被否定——这正是 CR-057 的洞"
+
+
+def test_score_recognizes_the_loose_en_negation():
+    """CR-057 修复：英文版本同样能正确识别否定语境。"""
+    hit, missed, forbidden, failures = _score(
+        _CR057_ANSWER_LOOSE_EN, _POSITIVE_KEYPOINTS, _FORBID_PATTERNS
+    )
+    assert hit == _POSITIVE_KEYPOINTS
+    assert not missed
+    assert not forbidden, f"应识别为否定语境，不应误判为越界断言，实际命中: {forbidden}"
+    assert not failures
