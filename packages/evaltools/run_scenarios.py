@@ -36,7 +36,10 @@ failures——缺关键点/缺来源/拒答/生成出错；**或者** forbidden_
 **`failed`**（这是一个已经完成的人工判断，不是"还没人看过"，不该
 和 `review_required` 混为一谈——CR-062）；哈希不匹配（包括记录压根
 不存在）一律 `review_required`，需要针对这次新出现的具体内容重新
-复核。
+复核。复核档案里的 `(question, pattern, answer_hash)` 三元组必须
+唯一，`main()` 启动时用 `_validate_reviews()` 校验，重复三元组直接
+拒绝启动——不能让两条互相矛盾的记录按 YAML 里的顺序被悄悄采信其中
+一条（CR-065）。
 
 用法:
     python packages/evaltools/run_scenarios.py [--limit N] [--offline] [--language zh|en]
@@ -169,6 +172,31 @@ def _answer_hash(answer: str) -> str:
     return hashlib.sha256(answer.encode("utf-8")).hexdigest()[:16]
 
 
+def _validate_reviews(reviews: list[dict]) -> None:
+    """CR-065：`(question, pattern, answer_hash)` 三元组必须在整份复核
+    档案里唯一。重复的三元组——不管两条记录的 `verdict` 是否一致——
+    说明数据本身有问题（复制粘贴遗留、改过主意但没删旧记录），必须在
+    加载时就拒绝，不能让 `_lookup_review_verdict()` 悄悄按 YAML 里
+    出现的顺序挑一条：如果恰好是 `confirmed_ok` 排在前面，一条互相
+    矛盾的记录会被静默采信为"通过"。
+    """
+    seen: dict[tuple[str | None, str | None, str | None], list[str | None]] = {}
+    for r in reviews:
+        key = (r.get("question"), r.get("pattern"), r.get("answer_hash"))
+        seen.setdefault(key, []).append(r.get("verdict"))
+    duplicates = {k: v for k, v in seen.items() if len(v) > 1}
+    if duplicates:
+        lines = "\n".join(
+            f"  - question={q!r} pattern={p!r} answer_hash={h!r} verdicts={vs}"
+            for (q, p, h), vs in duplicates.items()
+        )
+        raise ValueError(
+            f"{REVIEWS.relative_to(ROOT)} 存在重复的 (question, pattern, "
+            f"answer_hash) 三元组，必须先去重/合并，不能让复核结论按加载"
+            f"顺序悄悄挑一条：\n{lines}"
+        )
+
+
 def _lookup_review_verdict(
     question: str, pattern: str, answer_hash: str, reviews: list[dict],
 ) -> str | None:
@@ -177,15 +205,27 @@ def _lookup_review_verdict(
     三者必须**同时**匹配——哪怕 question/pattern 都对得上，只要这次的
     `answer_hash` 和记录里的不一样（说明模型这次生成了不同的内容），
     就当作没有复核过，返回 `None`（CR-063）。
+
+    CR-065：正常情况下 `_validate_reviews()` 已经在加载时拒绝了重复
+    三元组，这里不应该遇到多条匹配记录——但这个函数本身也做了一层
+    独立的兜底：如果真的收到了互相矛盾的记录（比如未来某处绕过了
+    `_validate_reviews()` 直接构造 `reviews` 列表），**失败关闭**，
+    返回 `None` 而不是像旧实现那样按列表顺序取第一条，不能因为
+    `confirmed_ok` 恰好排在前面就被判定为通过。
     """
-    for r in reviews:
+    matches = [
+        r.get("verdict") for r in reviews
         if (
             r.get("question") == question
             and r.get("pattern") == pattern
             and r.get("answer_hash") == answer_hash
-        ):
-            return r.get("verdict")
-    return None
+        )
+    ]
+    if not matches:
+        return None
+    if len(set(matches)) > 1:
+        return None
+    return matches[0]
 
 
 def _case_status(c: ScenarioCase, reviews: list[dict]) -> str:
@@ -298,6 +338,11 @@ def main() -> int:
     if args.limit:
         specs = specs[: args.limit]
     reviews = yaml.safe_load(REVIEWS.read_text(encoding="utf-8"))["reviews"] if REVIEWS.exists() else []
+    try:
+        _validate_reviews(reviews)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     prompt = system_prompt(args.language)
     engine = InferenceEngine(DEFAULT_MODEL)

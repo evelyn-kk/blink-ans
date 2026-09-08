@@ -1,4 +1,4 @@
-"""场景评测判据自身的回归（CR-053~064）。
+"""场景评测判据自身的回归（CR-053~065）。
 
 为什么单独测：判据是场景评测结果的门禁，判据本身漏判会让"通过/不通过"
 这个数字失去意义——就像 `test_probe_gate.py` 对排序探针门禁（CR-015）
@@ -35,10 +35,17 @@
   `--limit 1` 这类端到端手工验证也没能真正命中 `review_required` 分支
   来证明它确实会让退出码非零。修法：把汇总/退出码判定拆成纯函数
   `_summarize()`，可以脱离模型/索引单测。
+- **CR-065**：指出复核档案没有校验 `(question, pattern, answer_hash)`
+  三元组的唯一性——如果同一个三元组意外出现两条记录、一条
+  `confirmed_ok` 一条 `confirmed_issue`，`_lookup_review_verdict()`
+  原来按 YAML 里出现的顺序取第一条，`confirmed_ok` 排在前面就会把
+  一道真实有问题的题错误判为通过。修法：新增 `_validate_reviews()`
+  在加载时拒绝重复三元组；`_lookup_review_verdict()` 本身也加一层
+  独立的失败关闭兜底——遇到冲突的多条记录返回 `None`，不按顺序挑一条。
 
 这里只测纯判定函数（`_score`/`_case_status`/`_lookup_review_verdict`/
-`_summarize`/`_answer_hash`），不加载模型/索引，因此毫秒级，可进快速
-门禁。
+`_validate_reviews`/`_summarize`/`_answer_hash`），不加载模型/索引，
+因此毫秒级，可进快速门禁。
 """
 
 from __future__ import annotations
@@ -46,12 +53,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.evaltools.run_scenarios import (  # noqa: E402
     REVIEWS, ScenarioCase, _answer_hash, _case_status, _lookup_review_verdict,
-    _score, _summarize,
+    _score, _summarize, _validate_reviews,
 )
 
 # 逐字取自 bench/reports/eval-scenarios-20260907T055103Z.json 第 18 题的
@@ -332,6 +340,78 @@ def test_real_scenario_review_yaml_entries_declare_required_fields():
             f"verdict 只能是 confirmed_ok/confirmed_issue，实际: {r['verdict']!r}"
         )
         assert len(r["answer_hash"]) == 16, f"answer_hash 应为 16 位十六进制指纹: {r['answer_hash']!r}"
+    _validate_reviews(reviews)  # CR-065：真实档案不应该有重复的三元组
+
+
+# ---- CR-065：复核档案的三元组唯一性校验 ----
+
+def test_validate_reviews_accepts_a_clean_list():
+    reviews = [
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_ok"},
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[0], "answer_hash": "aaaa", "verdict": "confirmed_issue"},
+    ]
+    _validate_reviews(reviews)  # 不应该抛异常
+
+
+def test_validate_reviews_rejects_a_conflicting_duplicate_triple():
+    """CR-065 复现：同一个 (question, pattern, answer_hash) 三元组出现
+    两条记录、verdict 互相矛盾——必须在加载时就拒绝。
+    """
+    reviews = [
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_ok"},
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_issue"},
+    ]
+    with pytest.raises(ValueError, match="重复的"):
+        _validate_reviews(reviews)
+
+
+def test_validate_reviews_rejects_an_exact_duplicate_triple_too():
+    """即使两条记录的 verdict 完全一致，重复的三元组本身也说明数据有
+    问题（复制粘贴遗留），同样应该拒绝，不只是"verdict 冲突"才拒绝。
+    """
+    reviews = [
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_ok"},
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_ok"},
+    ]
+    with pytest.raises(ValueError, match="重复的"):
+        _validate_reviews(reviews)
+
+
+def test_pre_cr065_lookup_silently_picked_the_first_matching_record():
+    """判别性基线：CR-061~064 时期的 `_lookup_review_verdict()` 只是
+    遍历列表、返回第一条匹配的记录——如果两条记录的三元组相同但 verdict
+    冲突，且 `confirmed_ok` 恰好排在前面，旧实现会把这道真实有问题的题
+    错误地判定为通过。这里内联复现那个旧实现，证明这个洞是真实存在的。
+    """
+    reviews = [
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_ok"},
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_issue"},
+    ]
+
+    def _pre_cr065_lookup(question, pattern, answer_hash, reviews):
+        for r in reviews:
+            if (r.get("question") == question and r.get("pattern") == pattern
+                    and r.get("answer_hash") == answer_hash):
+                return r.get("verdict")
+        return None
+
+    assert _pre_cr065_lookup(_QUESTION, _FORBID_PATTERNS[1], "aaaa", reviews) == "confirmed_ok", (
+        "旧实现应该（错误地）采信排在前面的 confirmed_ok，即使后面还有一条互相矛盾的 confirmed_issue"
+    )
+
+
+def test_lookup_review_verdict_fails_closed_on_conflicting_duplicate_records():
+    """CR-065 修复：`_lookup_review_verdict()` 本身也做了独立的失败
+    关闭兜底——遇到同一三元组的多条冲突记录，返回 `None`（等价于"没有
+    复核过"），不像旧实现那样按列表顺序采信第一条。这是防御性的第二
+    道防线，即使某处绕过了 `_validate_reviews()` 也不会被曾经的洞
+    绕过去。
+    """
+    reviews = [
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_ok"},
+        {"question": _QUESTION, "pattern": _FORBID_PATTERNS[1], "answer_hash": "aaaa", "verdict": "confirmed_issue"},
+    ]
+    assert _lookup_review_verdict(_QUESTION, _FORBID_PATTERNS[1], "aaaa", reviews) is None
 
 
 # ---- CR-064：main() 汇总/退出码逻辑的独立测试，不需要模型/索引 ----
