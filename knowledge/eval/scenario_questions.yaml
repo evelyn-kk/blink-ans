@@ -247,3 +247,84 @@ questions:
       # CR-052 已撤回的排他性表述，已补进触发词。
       - "(?i)((必须|只能|需要?|唯一(的)?(方法|方式|办法)|only way|must|need).{0,10}(Lua|脚本|script))"
     expect_sources: [spring-data-redis]
+
+  # ------------------------------------------------------------------
+  # 第四张卡片：PostgreSQL 慢 SQL 诊断
+  # （knowledge/scenarios/postgres-slow-query-diagnosis.md，6 个小节，
+  #  全部引用 postgresql 17 官方文档已入库的真实块）
+  #
+  # 8 题覆盖 6 个小节：§1 两题（归一化文本 / total 与 mean 的区别）、
+  # §2 一题（auto_explain.log_analyze 的代价）、§3 两题（先看行数估计
+  # 而不是 cost / loops 是每次执行的平均值）、§4 一题（LIMIT 造成的
+  # 估计与实际不符不是估计错误）、§5 一题（列相关导致的错估重跑
+  # ANALYZE 无用）、§6 一题（覆盖索引受可见性映射制约）。
+  #
+  # keypoint 写法沿用前三批的教训：概念性关键点必须中英文都能命中
+  # （`--language zh` 时模型用中文作答），标识符类（`$1`、`loops`、
+  # `auto_explain.log_analyze`、`CREATE STATISTICS`、`visibility map`）
+  # 保留英文，因为这些在中文答案里也会原样出现。
+  # ------------------------------------------------------------------
+
+  # 校准记录（本轮）：这题原问法是"是不是当时执行慢的那条语句的原文"，
+  # 实测本地答案把它读成了"能不能定位到那一次慢执行"（答"不保证是执行慢的
+  # 那条"），而卡片小节讲的是另一件事——文本本身是归一化后的代表文本、
+  # 字面常量被换成 $1。**问法有两种读法是本轮出题的缺陷**，改成只问文本
+  # 形态（"和应用实际发出去的 SQL 是不是逐字一样"），不是因为答不中就放宽
+  # 判据：两条 keypoint 一字未改。
+  - q: "pg_stat_statements 的 query 列显示的语句，和应用实际发出去的 SQL 是逐字一样的吗"
+    expect_keypoints:
+      # 结论：不是原文（归一化后的代表文本）
+      - "(?i)(不是|并非|不一定|not the|规范化|归一化|normaliz|代表性?(的)?(文本|语句|查询)|representative)"
+      # 依据：字面常量被替换成 $1 这类参数符号
+      - "(?i)(\\$1|常量|字面量|参数符号|placeholder|literal)"
+    expect_sources: [postgresql]
+
+  - q: "想从 pg_stat_statements 里挑出最该优化的语句，按 total_exec_time 排和按 mean_exec_time 排有什么不同"
+    expect_keypoints:
+      - "(?i)(total_exec_time|累计|总(的)?(执行)?(时间|耗时)|总耗时)"
+      - "(?i)(mean_exec_time|平均|单次|每次|per.?call)"
+    expect_sources: [postgresql]
+
+  - q: "线上偶发的慢查询抓不到执行计划，打开 auto_explain 的 log_analyze 有什么代价"
+    expect_keypoints:
+      # 代价的关键在于"所有语句都被计时"，不只是被记录下来的那些
+      - "(?i)(所有|全部|每(一)?(条|个)|不(只|仅)是?.{0,12}(慢|被记录|记录下来)|all statements|whether or not)"
+      - "(?i)(性能|开销|overhead|impact|影响|变慢|代价)"
+    expect_sources: [postgresql]
+
+  - q: "EXPLAIN ANALYZE 输出里 cost 和 actual time 数值对不上，是不是就说明计划有问题；应该先看哪个数"
+    expect_keypoints:
+      # cost 是任意单位、和毫秒不可比
+      - "(?i)(任意单位|arbitrary|单位不同|不同的?单位|不(可|能)(直接)?比较|不(一定|会).{0,8}(对应|匹配)|unlikely to match)"
+      # 真正该先看的是行数估计与实际的差距
+      # 校准：补入"估算"这个同义词——实测答案写的是"实际行数远低于估算"，
+      # 与"估计/预估"是同一个概念的常见写法，属于正则过窄，不是放宽标准
+      # （沿用第 18 题"没有→没有|无法|不能"那次同类修正的口径）。
+      - "(?i)((估计|预估|估算|estimated).{0,12}(行数|rows)|行数.{0,12}(估计|预估|估算|接近|偏差|差距)|rows.{0,12}(estimate|actual))"
+    expect_sources: [postgresql]
+
+  - q: "嵌套循环内层的 Index Scan 节点 actual time 只有 0.003 毫秒，是不是说明这个节点不耗时"
+    expect_keypoints:
+      - "(?i)loops"
+      - "(?i)(平均|每次(执行)?|per.?execution|乘(以)?|multiply|总(的)?(时间|耗时))"
+    expect_sources: [postgresql]
+
+  - q: "计划里 Index Scan 估计返回 10 行、实际只有 2 行，外面套着 LIMIT 2，这是统计信息不准吗"
+    expect_keypoints:
+      # 结论：不是估计错误
+      - "(?i)(不是|并非|不属于|not an? estimation error|不能算|无需)"
+      # 依据：LIMIT 让节点提前停止取行 / 估计按跑完整来显示
+      - "(?i)(LIMIT|提前(停止|结束)|停(止|下)|stopped short|跑完|run to completion|取(够|满)|够了就)"
+    expect_sources: [postgresql]
+
+  - q: "两个 WHERE 条件涉及的列都刚 ANALYZE 过，行数估计还是差好几个数量级，再跑一次 ANALYZE 有用吗"
+    expect_keypoints:
+      - "(?i)(相关|correlat|独立(性)?假设|independent)"
+      - "(?i)(CREATE STATISTICS|扩展统计|多元统计|multivariate|extended statistics)"
+    expect_sources: [postgresql]
+
+  - q: "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快"
+    expect_keypoints:
+      - "(?i)(visibility map|可见性(映射|图|位图)?|all.?visible)"
+      - "(?i)(MVCC|可见性|快照|snapshot|heap|堆(表|页)?|回表)"
+    expect_sources: [postgresql]
