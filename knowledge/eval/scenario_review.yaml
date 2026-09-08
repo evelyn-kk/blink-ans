@@ -90,3 +90,24 @@ reviews:
       这是 CR-063"一次确认不得永久豁免"的既定代价，本轮不改判据，只如实
       登记。
     reviewed_at: "2026-09-08"
+
+  # 2026-09-08（处理 CR-066 的同一轮）：新增的 Q20 负向约束第一次命中，
+  # 命中的正是 codex R60 用来复现 CR-066 的那句真实输出。
+  - question: "想从 pg_stat_statements 里挑出最该优化的语句，按 total_exec_time 排和按 mean_exec_time 排有什么不同"
+    pattern: "(?i)(单次|每次|单条|极端|最(慢|坏|大))[^。；\\n]{0,20}total_exec_time"
+    answer_hash: "7e7e58a3d52fec43"
+    verdict: confirmed_issue
+    note: >
+      逐句核对 bench/reports/eval-scenarios-20260908T193341Z.json 第 20 题
+      的真实输出。命中的是这一句："若关注单次极端延迟，可看
+      total_exec_time"。这与卡片和 PostgreSQL 官方文档的字段定义直接冲突：
+      `total_exec_time` 是该语句形状**跨全部调用累计**的执行时间，单次
+      极端延迟应当看 `max_exec_time`（或按平均看 `mean_exec_time`），
+      一个被调用三千次的语句累计耗时高，完全不意味着它单次慢。答案的
+      前半句（total 反映总耗时、mean 反映单次平均）是对的，正因为如此
+      两条绑定式正向 keypoint 全部命中——这正是 CR-066 指出的漏洞形状：
+      事实说对了，最后的选择建议却反了。判 confirmed_issue（按 CR-062
+      计为 failed），归因为本地兜底后端（Qwen 3-4B）的合成质量问题，
+      不是卡片内容或判据本身的错误。同一次生成的措辞与 R60 那次逐字
+      相同，说明这句错误建议在当前模型/提示词下是可复现的，不是偶发。
+    reviewed_at: "2026-09-08"

@@ -58,8 +58,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.evaltools.run_scenarios import (  # noqa: E402
-    REVIEWS, ScenarioCase, _answer_hash, _case_status, _lookup_review_verdict,
-    _score, _summarize, _validate_reviews,
+    QUESTIONS, REVIEWS, ScenarioCase, _answer_hash, _case_status,
+    _lookup_review_verdict, _score, _summarize, _validate_reviews,
 )
 
 # 逐字取自 bench/reports/eval-scenarios-20260907T055103Z.json 第 18 题的
@@ -460,3 +460,232 @@ def test_pre_cr061_naive_summary_would_have_returned_zero_for_review_required():
     naive_exit_code = 0 if naive_passed_count == len(cases) else 1
     assert naive_exit_code == 0, "朴素汇总应该（错误地）把这种情况判定为整体成功"
     assert _summarize(cases)["exit_code"] == 1
+
+
+# ---- CR-066：关键点只查术语、不约束结论方向 ----
+#
+# codex R60 审查指出：第四张卡片（PostgreSQL 慢 SQL）新增的 8 道题，
+# `expect_keypoints` 检查的是"术语有没有出现"，不是"结论对不对"，因此
+# 一个**事实词全中、结论恰好相反**的答案会被判 passed。审查方给了两个
+# 复现：一个是保存报告里的真实输出（Q20 建议用 total_exec_time 看单次
+# 极端延迟），一个是纯 `_score()` 构造的反例（Q22 说"对不上就说明计划
+# 有问题"）。
+#
+# 修法两条通道，下面的测试分别覆盖：
+#   1. 正向 keypoint 改成"绑定式"——术语必须和它正确的含义出现在同一句
+#      里。挡的是"把术语背对了"的答案。
+#   2. 结论方向靠 `forbid_patterns` 进三态通道（命中 → review_required
+#      → 人工复核）。正向正则原理上挡不住"事实全对、结论反过来"，因为
+#      对手把两条事实也写进去就能全中——这正是 Q22 反例的构造方式。
+#
+# 每条测试都成对写："旧规则会放行"（判别性基线，内联复现改之前的正则）
+# 与"新规则不会放行"（读 `knowledge/eval/scenario_questions.yaml` 里
+# **当前真实生效**的判据，不复制一份，避免判据改了测试还在测旧副本）。
+
+_QUESTIONS_YAML = yaml.safe_load(QUESTIONS.read_text(encoding="utf-8"))["questions"]
+
+
+def _spec(prefix: str) -> dict:
+    """按题干前缀取当前真实生效的题目判据。"""
+    matches = [q for q in _QUESTIONS_YAML if q["q"].startswith(prefix)]
+    assert len(matches) == 1, f"题干前缀 {prefix!r} 应唯一匹配一题，实际 {len(matches)} 条"
+    return matches[0]
+
+
+def _status_of(spec: dict, answer: str) -> str:
+    """把 `_score` + `_case_status` 串起来，得到这次回答的三态结果。
+    复核档案传空列表：这些反例都是新出现的内容，本来就不该有复核记录。
+    """
+    hit, missed, forbidden, failures = _score(
+        answer, spec["expect_keypoints"], spec.get("forbid_patterns", [])
+    )
+    case = ScenarioCase(
+        question=spec["q"],
+        expect_keypoints=spec["expect_keypoints"],
+        expect_sources=[],
+        forbid_patterns=spec.get("forbid_patterns", []),
+        answer_text=answer,
+        keypoints_hit=hit,
+        keypoints_missed=missed,
+        forbidden_hit=forbidden,
+        failures=failures,
+    )
+    return _case_status(case, [])
+
+
+# 逐字取自 bench/reports/eval-scenarios-20260908T012349Z.json 第 20 题的
+# answer_text（CR-066 的真实误放行案例），未做任何删改。
+_CR066_Q20_REAL_ANSWER = (
+    "按 total_exec_time 排序会突出执行总耗时最长的语句，反映整体性能瓶颈；"
+    "按 mean_exec_time 排序反映单次执行的平均耗时，更适用于识别频繁执行但每次耗时较高的语句 [1][2]。  \n"
+    "若需优化高负载场景，应优先看 mean_exec_time，因其反映常态执行效率；"
+    "若关注单次极端延迟，可看 total_exec_time [1][2]。  \n"
+    "注意：total_exec_time 可能被长尾请求拉高，而 mean_exec_time 更稳定 [1][2]。"
+)
+
+# 逐字取自 code-review.md CR-066 的复现描述。
+_CR066_Q22_COUNTEREXAMPLE = (
+    "**是**，cost 虽然是任意单位，估算行数也要和实际比较，"
+    "但只要两者对不上就说明计划有问题。"
+)
+
+# 改判据之前，这 8 道题用的正向关键点（判别性基线，内联复现）。
+_PRE_CR066_KEYPOINTS = {
+    "Q19": [
+        r"(?i)(不是|并非|不一定|not the|规范化|归一化|normaliz|代表性?(的)?(文本|语句|查询)|representative)",
+        r"(?i)(\$1|常量|字面量|参数符号|placeholder|literal)",
+    ],
+    "Q20": [
+        r"(?i)(total_exec_time|累计|总(的)?(执行)?(时间|耗时)|总耗时)",
+        r"(?i)(mean_exec_time|平均|单次|每次|per.?call)",
+    ],
+    "Q21": [
+        r"(?i)(所有|全部|每(一)?(条|个)|不(只|仅)是?.{0,12}(慢|被记录|记录下来)|all statements|whether or not)",
+        r"(?i)(性能|开销|overhead|impact|影响|变慢|代价)",
+    ],
+    "Q23": [
+        r"(?i)loops",
+        r"(?i)(平均|每次(执行)?|per.?execution|乘(以)?|multiply|总(的)?(时间|耗时))",
+    ],
+    "Q24": [
+        r"(?i)(不是|并非|不属于|not an? estimation error|不能算|无需)",
+        r"(?i)(LIMIT|提前(停止|结束)|停(止|下)|stopped short|跑完|run to completion|取(够|满)|够了就)",
+    ],
+    "Q25": [
+        r"(?i)(相关|correlat|独立(性)?假设|independent)",
+        r"(?i)(CREATE STATISTICS|扩展统计|多元统计|multivariate|extended statistics)",
+    ],
+}
+
+# 每条：题干前缀、结论方向相反（但事实词齐全）的答案、这段答案为什么是错的。
+_CR066_WRONG_DIRECTION_ANSWERS = {
+    "Q19": (
+        "pg_stat_statements 的 query 列显示的语句",
+        "不一定完全一致，取决于 search_path，常量原样保留不会被替换。",
+        "否认了常量会被归一化成 $1，与卡片相反",
+    ),
+    "Q20": (
+        "想从 pg_stat_statements 里挑出最该优化的语句",
+        _CR066_Q20_REAL_ANSWER,
+        "把单次极端延迟指向 total_exec_time（应看 mean/max）",
+    ),
+    "Q21": (
+        "线上偶发的慢查询抓不到执行计划",
+        "auto_explain 会记录所有超过阈值的慢语句，性能开销可以忽略。",
+        "官方原文是 extremely negative impact，且计时发生在所有语句上",
+    ),
+    "Q22": (
+        "EXPLAIN ANALYZE 输出里 cost 和 actual time",
+        _CR066_Q22_COUNTEREXAMPLE,
+        "官方明确说这类不符本身不代表计划有问题",
+    ),
+    "Q23": (
+        "嵌套循环内层的 Index Scan 节点",
+        "是的，actual time 只有 0.003 毫秒说明这个节点不耗时，"
+        "loops 只是循环次数，平均值已经足够说明问题。",
+        "actual time 是每次执行的平均值，要乘 loops 才是总时间",
+    ),
+    "Q24": (
+        "计划里 Index Scan 估计返回 10 行",
+        "这不是 LIMIT 的问题，而是统计信息不准，建议重新收集统计信息后再看计划。",
+        "官方明确说这是显示方式的差异，不是估计错误",
+    ),
+    "Q25": (
+        "两个 WHERE 条件涉及的列都刚 ANALYZE 过",
+        "行数估计差是因为列之间相关，独立性假设不成立；"
+        "再跑一次 ANALYZE 就能修好，也可以用 CREATE STATISTICS。",
+        "重跑 ANALYZE 修不了跨列相关，规则统计天生测不到它",
+    ),
+}
+
+
+@pytest.mark.parametrize("key", sorted(_PRE_CR066_KEYPOINTS))
+def test_pre_cr066_keypoints_would_have_passed_the_wrong_direction_answer(key):
+    """判别性基线：改判据之前，这些结论完全相反的答案两条关键点全中、
+    `failures` 为空——也就是会被判 passed。Q20 用的是保存报告里的真实
+    输出，不是构造的。（Q22 没有列在这里，因为它的两条正向关键点本轮
+    一字未改，误放行发生在"正向全中但结论相反"这一层，见下一条测试。）
+    """
+    _prefix, answer, _why = _CR066_WRONG_DIRECTION_ANSWERS[key]
+    hit, missed, forbidden, failures = _score(answer, _PRE_CR066_KEYPOINTS[key], [])
+    assert not missed, f"旧关键点本应全部命中（这正是问题所在）：{missed}"
+    assert hit == _PRE_CR066_KEYPOINTS[key]
+    assert not failures, "旧规则下这个结论相反的答案没有任何 failures，会被判 passed"
+    assert not forbidden
+
+
+@pytest.mark.parametrize("key", sorted(_CR066_WRONG_DIRECTION_ANSWERS))
+def test_cr066_wrong_direction_answers_are_no_longer_passed(key):
+    """新规则：同样这些答案不能再是 `passed`——要么因为绑定式关键点没
+    命中而 `failed`，要么因为命中负向约束而 `review_required`（交人工看）。
+    两种结果都可接受，本项目要求的是"判据能阻断同类反向结论"，不是
+    "必须自动判成 failed"（CR-054~060 已证明正则判不了极性）。
+    """
+    prefix, answer, why = _CR066_WRONG_DIRECTION_ANSWERS[key]
+    status = _status_of(_spec(prefix), answer)
+    assert status in ("failed", "review_required"), f"{key}（{why}）不应再被判 passed"
+
+
+def test_cr066_q20_real_answer_is_flagged_by_the_new_forbid_pattern():
+    """点名复现：保存报告里第 20 题的真实输出。它的两条绑定式关键点
+    **仍然全中**（这个答案确实分别讲对了两个字段的定义），所以拦住它的
+    只能是负向约束——正向正则在这里原理上无能为力。
+    """
+    spec = _spec("想从 pg_stat_statements 里挑出最该优化的语句")
+    hit, missed, forbidden, failures = _score(
+        _CR066_Q20_REAL_ANSWER, spec["expect_keypoints"], spec["forbid_patterns"]
+    )
+    assert not missed and not failures, "两条绑定式关键点对这个答案依然成立"
+    assert forbidden, "'若关注单次极端延迟，可看 total_exec_time' 必须被负向约束标出"
+    assert _status_of(spec, _CR066_Q20_REAL_ANSWER) == "review_required"
+
+
+def test_cr066_q22_counterexample_is_flagged_by_the_new_forbid_pattern():
+    """点名复现：审查方给的 Q22 反例原话。两条正向关键点全中且本轮未改，
+    因此只可能被负向约束拦住。
+    """
+    spec = _spec("EXPLAIN ANALYZE 输出里 cost 和 actual time")
+    hit, missed, forbidden, failures = _score(
+        _CR066_Q22_COUNTEREXAMPLE, spec["expect_keypoints"], spec["forbid_patterns"]
+    )
+    assert not missed and not failures, "反例正是构造成两条正向关键点全中的"
+    assert forbidden
+    assert _status_of(spec, _CR066_Q22_COUNTEREXAMPLE) == "review_required"
+
+
+# 按卡片正文写的"正确答案"样例：新判据不能严到连正确答案都判不过
+# （只会变红的判据和只会变绿的判据一样没有信息量）。
+_CR066_CORRECT_ANSWERS = {
+    "pg_stat_statements 的 query 列显示的语句":
+        "不是逐字一样。pg_stat_statements 会把仅有字面常量差异的语句归一化成同一条记录，"
+        "常量显示为 $1，文本取的是该 queryid 第一条查询的代表文本。",
+    "想从 pg_stat_statements 里挑出最该优化的语句":
+        "total_exec_time 是跨全部调用的累计耗时，排在前面的是总时间花得最多的语句形状；"
+        "mean_exec_time 反映单次执行的平均耗时，单次最坏要看 max_exec_time。",
+    "线上偶发的慢查询抓不到执行计划":
+        "log_analyze 打开后，所有语句都会做逐节点计时，而不只是够慢被记录下来的那些，"
+        "对性能影响很大；可以关掉 log_timing 或调低 sample_rate 来减轻开销。",
+    "EXPLAIN ANALYZE 输出里 cost 和 actual time":
+        "cost 是任意单位，与毫秒本来就不可比，数值对不上不说明什么；"
+        "该先看的是估计行数和实际行数的差距。",
+    "嵌套循环内层的 Index Scan 节点":
+        "不能这么看。内层节点的 actual time 是每次执行的平均值，要乘以 loops 才是它的总耗时。",
+    "计划里 Index Scan 估计返回 10 行":
+        "不是统计信息不准。LIMIT 让节点提前停止取行，而估计值按跑完整来显示，"
+        "两者的差异只是显示方式不同。",
+    "两个 WHERE 条件涉及的列都刚 ANALYZE 过":
+        "再跑一次 ANALYZE 也没用：规则统计是逐列的，天生测不到跨列相关性，"
+        "planner 仍按条件独立假设估算。要用 CREATE STATISTICS 建扩展统计对象，"
+        "再跑一次 ANALYZE 才会真正收集数据。",
+    "已经建了包含查询所有列的覆盖索引":
+        "因为可见性还得回堆里确认：index-only scan 会查 visibility map 的 all-visible 位，"
+        "位没置上就必须访问 heap，跟普通索引扫描相比就没有优势了。",
+}
+
+
+@pytest.mark.parametrize("prefix", sorted(_CR066_CORRECT_ANSWERS))
+def test_cr066_new_rules_still_pass_a_correct_answer(prefix):
+    """反向判别性：按卡片正文写的正确答案在新判据下必须仍然 `passed`，
+    否则说明新规则是"只会变红"的坏判据（`AGENTS.md` §5.2 的对偶情形）。
+    """
+    assert _status_of(_spec(prefix), _CR066_CORRECT_ANSWERS[prefix]) == "passed"
