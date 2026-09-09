@@ -50,6 +50,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -747,15 +748,29 @@ def test_cr067_reversed_conclusion_is_no_longer_passed(key):
 
 
 def test_cr067_every_yes_no_question_has_a_negative_constraint():
-    """结构性约束：这批题里凡是问"是不是/有没有用/有什么不同"这类
-    有明确结论方向的，都必须配 `forbid_patterns`——CR-066/067 两轮的
-    共同教训是"漏配一题就漏一题"，靠人记不住，写成测试。
-    唯一豁免的是 Q26（"为什么"型问题，事实性关键点本身就承载方向），
-    在这里显式列出，改动时会被这条测试逼着重新解释理由。
+    """结构性约束：凡是问"是不是/有没有用/有什么不同"这类有明确结论方向
+    的题，都必须配 `forbid_patterns`——CR-066/067 两轮的共同教训是"漏配
+    一题就漏一题"，靠人记不住，写成测试。
+
+    **2026-09-09（R71）扩到全量**：原来这里写的是 `_QUESTIONS_YAML[-8:]`，
+    只检查最近一批（CR-066 那 8 题）。那等于给此前所有题开了一个不写在
+    豁免名单里的后门：R71 加完第五张卡片后一数，前三张卡片的 Q4/Q5/Q6/
+    Q7/Q10/Q17 六道是非题一条负向约束都没有，而门禁一直是绿的——正是
+    `AGENTS.md` §5.4 说的"哪些输入会让它什么都不判"。改为遍历全部题目，
+    六道旧题在同一轮补齐负向约束。
+
+    豁免必须逐条写在 `exempt` 里并说明理由，改动时会被这条测试逼着重新
+    解释：
+      - Q26：""为什么"型问题，事实性关键点本身就承载方向；
+      - Q34：问的是"怎么确认"，"是不是内存超限"只是宾语从句，
+        没有可反转的是非结论（marker 命中属于中文字面误伤）。
     """
-    exempt = {"已经建了包含查询所有列的覆盖索引"}
+    exempt = {
+        "已经建了包含查询所有列的覆盖索引",
+        "容器隔一阵就没了、应用日志里什么都没留下",
+    }
     markers = ("吗", "是不是", "有什么不同", "有什么代价", "先看哪个")
-    for q in _QUESTIONS_YAML[-8:]:
+    for q in _QUESTIONS_YAML:
         if any(q["q"].startswith(e) for e in exempt):
             continue
         if any(m in q["q"] for m in markers):
@@ -768,3 +783,103 @@ def test_cr066_new_rules_still_pass_a_correct_answer(prefix):
     否则说明新规则是"只会变红"的坏判据（`AGENTS.md` §5.2 的对偶情形）。
     """
     assert _status_of(_spec(prefix), _CR066_CORRECT_ANSWERS[prefix]) == "passed"
+
+
+# ---- R71（2026-09-09）：负向约束的判别性 ----
+#
+# `test_cr067_every_yes_no_question_has_a_negative_constraint` 本轮从
+# `[-8:]` 扩到全量后，前三张卡片的 Q4/Q5/Q6/Q7/Q10/Q17 补齐了负向约束，
+# 第五张卡片的 Q28/Q31/Q33/Q35 随卡片一起写。这一组测试成对固定两件事：
+#   1. 每条负向约束都能命中它自己那句"结论反过来"的构造反例；
+#   2. 它不会命中同一题**真实跑出来的**那次回答（逐字取自
+#      bench/reports/eval-scenarios-20260909T220321Z.json，未删改）。
+# 第 2 点是必须的：CR-054~060 的整段教训就是负向正则最容易误伤正确的
+# 否定表述，只测"能抓反例"会重演那个坑。
+
+_R71_NEGATIVE_CONSTRAINT_CASES = {
+    "Q4": (
+        'Outbox 表的结构有什么讲究',
+        'Outbox 表随便加字段都行，SMT 会自动忽略多余的列 [1]。',
+        'Outbox 表必须符合 Debezium Outbox Event Router 的预期结构，字段需支持 JSON 字段的嵌套与扩展，且字段命名需与 SMT 配置中的 `predicates.IsOutboxTable.pattern` 一致 [1]。  \n若使用 MongoDB 连接器，不可使用通用 Outbox Event Router，应改用 MongoDB 特有的 Outbox Event Router SMT [4]。  \n字段类型需支持 JSON 内容的扩展，如 `partition` 字段用于分区，但其值不能为别名，否则无效 [2]。  \n\n**关键前提**：Outbox 表结构必须与 `predicates.IsOutboxTable.pattern=outbox.event.*` 匹配，且字段需能被 SMT 正确解析，否则消息无法路由 [1][4]。  \n**风险**：若字段类型不兼容（如非 JSON 或无足够字段空间），可能导致消息丢失或解析失败 [5]。',
+        '把「结构有约束」反转成「随便加都行」',
+    ),
+    "Q5": (
+        '用了 Outbox 模式之后',
+        '用了 Outbox 之后消费者不需要再做幂等，重复消息已经在写入侧被消除 [1]。',
+        '是，消费者仍需处理重复消息 [1]。  \n需基于消息的唯一键（如 outbox row id）实现幂等处理 [1][3]。  \n若使用 JSON 转换器，需确保 payload 中包含可识别的唯一标识 [2]。',
+        '把「仍需幂等」反转成「不需要幂等」',
+    ),
+    "Q6": (
+        'Outbox 模式解决的是消息发布的哪一半问题',
+        'Outbox 同时也解决了消费端的重复消费问题，两者加起来就等于恰好一次 [1]。',
+        'Outbox 模式解决的是消息发布写入侧的可靠性，确保已提交的业务变更最终会生成事件并进入 Kafka [1]。Kafka 自身的投递保证（如持久化副本存活）解决的是消费侧的事件可见性与不丢失问题，但不保证“恰好一次”交付 [2]。两者分别解决发布与消费两端的可靠性，互不替代 [1]。  \n\n关键前提：Outbox 仅保证事件被发布，不保证消费端只消费一次；若需“恰好一次”消费，需额外设计消费者幂等性或状态管理 [1]。',
+        '把「各解决一半」反转成「加起来就是 exactly once」',
+    ),
+    "Q7": (
+        '如果 Outbox 的转发进程挂了一段时间',
+        '转发进程挂了就会丢数据，因为事件只在内存里排队 [1]。',
+        '不会丢，因为 Outbox Event Router 仅转发事件到指定 topic（如 `outbox.event.*`），原始数据已由 Debezium Connector 完整捕获并持久化到源数据库，转发进程挂掉不会导致数据丢失 [1][3]。  \n若转发进程挂起，可配置 `transforms.outbox.predicate=IsOutboxTable` 保证仅转发匹配的事件 [1]。  \n若需恢复，应确保 Kafka 消费者或下游系统具备重试机制，避免因短暂中断导致数据丢失 [2]。  \n\n关键前提：Debezium Connector 已启用持久化（如 binlog 或 WAL），且未关闭 `enable.auto.commit` 或 `commit.offsets` 配置。  \n风险：若下游系统未消费或处理，事件可能堆积，导致延迟或重复处理。',
+        '把「不会丢」反转成「会丢」',
+    ),
+    "Q10": (
+        '在 Spring Kafka 的 DefaultErrorHandler 里',
+        '在 DefaultErrorHandler 里所有异常都会被重试，直到达到次数上限 [1]。',
+        '不是，所有异常类型都不应被重试 [2]。  \n`DefaultErrorHandler` 默认跳过 `Error` 类型异常（如 `DeserializationException`、`ClassCastException` 等）且不重试 [2]。  \n若需控制重试行为，应通过 `addNotRetryableExceptions()` 显式配置 [2]。  \n\n关键前提：`Error` 异常直接终止消费者线程，无重试、无死信投递，可能导致消息丢失且应用看似健康 [2]。',
+        '把「不是所有异常都该重试」反转成「所有异常都重试」',
+    ),
+    "Q17": (
+        '每次执行 Redis 的 Lua 脚本',
+        '每次执行都要把脚本内容重新发送给服务器，所以并发高时会明显变慢 [1]。',
+        '不会，每次执行 Lua 脚本时不会重新发送脚本内容。Spring Data Redis 通过缓存脚本的 SHA1 哈希值，仅在首次执行时编译脚本并缓存其哈希，后续调用直接使用缓存的哈希值执行 [2]。  \n若配置了 `DefaultRedisScript` 单例，可避免每次运行时重复计算脚本的 SHA1，提升性能 [2]。  \n风险：若未正确缓存，可能导致脚本每次被重新编译，造成网络往返开销和延迟，尤其在高并发场景下 [1]。  \n\n建议配置：  \n```java\n@Bean\npublic RedisScript<Boolean> checkAndSetScript() {\n    return new DefaultRedisScript<>("checkandset.lua", RedisScript.Boolean.class);\n}\n```  \n前提：脚本内容在应用启动时已加载，且 Redis 服务版本支持 Lua 脚本执行（如 Redis 6+）[1]。',
+        '把「靠 SHA1 缓存、不必重发」反转成「每次重发全文」',
+    ),
+    "Q28": (
+        '发布卡了十几分钟一直没推进',
+        '超过 progressDeadlineSeconds 之后，Kubernetes 会自动回滚到上一个版本 [1]。',
+        '不会，Kubernetes 不会主动回滚到上一个版本 [2]。若 rollout 无进展，需手动检查 `Progressing` 状态为 `False` 后执行回滚 [2]。  \n使用 `kubectl rollout undo deployment/<name> --to-revision=N` 回退到指定版本 [3]。  \n风险：若新版本 Pod 启动失败，回滚后服务可能仍不可用，需确认旧版本健康 [3]。',
+        '把「只报状态、不回滚」反转成「会自动回滚」',
+    ),
+    "Q31": (
+        '容器压根没配 readiness probe',
+        '容器没有配置 readiness probe 时，探针检查一直不通过，Pod 会一直不就绪 [1]。',
+        '不会，容器未配置 readiness probe 时，kubelet 会默认认为其处于就绪状态，不会阻断流量 [2]。  \n若容器未配置 readiness probe，初始阶段结果为 `Failure`，但后续无探针则不会持续标记为不就绪 [2]。  \n关键前提：若容器未配置 readiness probe，kubelet 会将其视为就绪，Pod 会持续接收流量，除非配置了其他机制（如 liveness 或 startup）影响状态 [4]。',
+        '把「没配就按 Success」反转成「没配就一直不就绪」',
+    ),
+    "Q33": (
+        'Pod 状态是 CrashLoopBackOff',
+        'Pod 处于 CrashLoopBackOff 说明应用代码有 bug，改代码即可 [1]。',
+        '不能，CrashLoopBackOff 仅表明 Pod 启动失败且持续重启，具体原因需结合日志和容器退出码判断 [1]。  \n若 Pod 持续处于该状态，应检查容器日志（如 `kubectl logs <pod> --previous`）和资源限制（如内存溢出）[4]。  \n若使用 Pod Disruption Budget（PDB），需确认是否启用 `AlwaysAllow` 策略导致误驱逐 [2]。',
+        '把「状态只是退避」反转成「状态就等于应用有 bug」',
+    ),
+    # Q35 的"反例"不是构造的：本轮本地后端真的答成了"是，会把副本数
+    # 恢复到上一版本"，逐字取自同一份报告；"不该命中"的那一侧才是构造的
+    # 正确答案。第一版负向约束写成"恢复**回**"，恰好打不中这句真实反转
+    # （实际是"恢复**到**"），已按 AGENTS.md §5.3 收紧——一条抓不住自己
+    # 动机例句的负向约束等于没有。
+    "Q35": (
+        "上一次发布顺手把副本数从 3 调到 10",
+        '是，执行 `kubectl rollout undo` 会将副本数恢复到上一版本的配置值（即 3）[1][3][5]。  \n若需指定具体版本（如回退到 revision=1），使用 `--to-revision=1` [4]。  \n**前提**：该 Deployment 的 `spec.revisionHistoryLimit` 需大于 0，否则无历史可回退 [4]。',
+        "不会。rollout undo 只回滚 .spec.template，副本数不受影响；"
+        "扩缩容不会产生新的 revision [1]。",
+        "把「只回滚 Pod 模板」反转成「副本数也一起回滚」",
+    ),
+}
+
+
+@pytest.mark.parametrize("key", sorted(_R71_NEGATIVE_CONSTRAINT_CASES))
+def test_r71_negative_constraint_catches_the_reversed_conclusion(key):
+    """判别性：每题的负向约束必须命中它对应的反转结论。"""
+    prefix, inverted_answer, _real, why = _R71_NEGATIVE_CONSTRAINT_CASES[key]
+    spec = _spec(prefix)
+    pats = spec.get("forbid_patterns", [])
+    assert pats, f"{key} 应当已配负向约束"
+    assert [p for p in pats if re.search(p, inverted_answer)], f"{key}（{why}）应被负向约束标出"
+
+
+@pytest.mark.parametrize("key", sorted(_R71_NEGATIVE_CONSTRAINT_CASES))
+def test_r71_negative_constraint_spares_the_real_answer(key):
+    """反向判别性：同一条约束不得命中这题真实跑出来的那次回答。"""
+    prefix, _inverted, real_answer, _why = _R71_NEGATIVE_CONSTRAINT_CASES[key]
+    spec = _spec(prefix)
+    hits = [p for p in spec.get("forbid_patterns", []) if re.search(p, real_answer)]
+    assert not hits, f"{key} 的负向约束误伤了真实回答：{hits}"
