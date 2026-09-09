@@ -8,7 +8,9 @@
 # 少了一大半"的检测。CR-068 要求把"操作约束"升级成真正的恢复能力。
 #
 # 用法:
-#   docsnap save [说明]     写前快照：把 9 份文档连同行数/字节数/sha256 存一份
+#   docsnap save [--allow-missing] [说明]
+#                           写前快照：把 9 份文档连同行数/字节数/sha256 存一份
+#                           受监控文档缺失时默认拒绝存，除非给 --allow-missing
 #   docsnap list            列出现有快照
 #   docsnap check           把当前文档与最近一次快照比对，**任何删除**都报错退出
 #   docsnap accept <文件> "理由"  有意删减：**逐文件**记录理由并重建基线
@@ -118,8 +120,16 @@ $all
 EOF
 }
 
+# CR-077：受监控的文档如果不在了，`save` 原来只是**静默跳过**——生成的
+# 快照被判为"有效"，但压根不覆盖那份文档，之后 `check` 照样退出 0，
+# 那份文档就此悄悄脱离检测范围。这是最坏的一种失效：门禁看起来是绿的。
+# 现在缺文件默认拒绝存快照；确实是有意删掉的文档，用
+# `docsnap save --allow-missing "理由"` 显式记录（缺失清单会写进
+# MISSING.txt 存档）。
 cmd_save() {
-  local reason="${1:-}" stamp dir f seq tmpdir real_dir
+  local allow_missing=0
+  if [ "${1:-}" = "--allow-missing" ]; then allow_missing=1; shift; fi
+  local reason="${1:-}" stamp dir f seq tmpdir real_dir missing=
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   # 同一秒里可能存一份以上（accept 紧接着 save）。加两位序号，并且序号
   # 放在说明之前——目录名的字典序必须与创建顺序一致，否则 `_latest` 会
@@ -136,12 +146,27 @@ cmd_save() {
   rm -rf "$tmpdir"; mkdir -p "$tmpdir"
   local real_dir="$dir"; dir="$tmpdir"
   : > "$dir/MANIFEST.tsv"
+  missing=""
   for f in $DOCS; do
     if [ -f "$ROOT/$f" ]; then
       cp "$ROOT/$f" "$dir/$f"
       _manifest_line "$f" "$ROOT/$f" >> "$dir/MANIFEST.tsv"
+    else
+      missing="${missing}${f}
+"
     fi
   done
+  if [ -n "$missing" ] && [ "$allow_missing" -eq 0 ]; then
+    rm -rf "$tmpdir"
+    {
+      echo "以下受监控的文档不在工作区里，拒绝存快照（失败关闭）："
+      printf '%s' "$missing" | sed 's/^/  - /'
+      echo "  它们是被误删了？先找回来。确实是有意去掉的，用："
+      echo "    docsnap save --allow-missing \"为什么少了这几份\""
+    } >&2
+    return 1
+  fi
+  [ -n "$missing" ] && printf '%s' "$missing" > "$dir/MISSING.txt"
   [ -n "$reason" ] && printf '%s\n' "$reason" > "$dir/REASON.txt"
   mv "$tmpdir" "$real_dir"; dir="$real_dir"
   _prune
@@ -238,6 +263,20 @@ cmd_check() {
       echo "  + $name $lines -> $now_lines 行（$bytes -> $now_bytes 字节）；删 $tdel 行 / 加 $tadd 行"
     fi
   done < "$dir/MANIFEST.tsv"
+  # CR-077 的另一半：基线里没有这份文档，不等于它不该被盯着。凡是
+  # `$DOCS` 里点名、而清单里没有的，一律报出来——否则一次"缺文件的
+  # 快照"会让那份文档永久脱离检测。
+  for name in $DOCS; do
+    if ! grep -q "^${name}	" "$dir/MANIFEST.tsv" 2>/dev/null; then
+      if [ -f "$ROOT/$name" ]; then
+        echo "  ✗ $name 存在于工作区，但**没有被基线覆盖**（快照是在它缺失时存的？）：" \
+             "跑一次 docsnap save 把它纳入基线" >&2
+      else
+        echo "  ✗ $name 既不在工作区、也不在基线里——受监控的文档不该凭空消失" >&2
+      fi
+      rc=1
+    fi
+  done
   broken="$(_invalid_snapshots)"
   if [ -n "$broken" ]; then
     {
@@ -265,7 +304,7 @@ cmd_check() {
 # 新基线里**只有被点名的那一份**取当前内容，其余全部沿用上一份基线，
 # 因此别的文档如果有未被接受的删除，下一次 check 照样报红。
 cmd_accept() {
-  local file="${1:-}" reason="${2:-}" latest dir newdir name lines bytes sha seq stamp del_total add_total loss tdel tadd
+  local file="${1:-}" reason="${2:-}" latest dir newdir newreal name lines bytes sha seq stamp del_total add_total loss tdel tadd
   if [ -z "$file" ] || [ -z "$reason" ]; then
     echo "用法: docsnap accept <文件名> \"删了什么、为什么\"" >&2
     echo "  文件名与理由都必填——这是一次有记录的、**逐文件**的基线重建，" >&2
@@ -293,7 +332,13 @@ cmd_accept() {
   seq="$(ls -1 "$STORE" 2>/dev/null | grep -c "^${stamp}__" || true)"
   seq="$(printf '%02d' $(( seq + 1 )))"
   newdir="$STORE/${stamp}__${seq}__accept-$(echo "$file" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-24)"
-  mkdir -p "$newdir"
+  # CR-078：和 `save` 一样先写 `.partial-` 临时目录再原子改名。R66 只改了
+  # save，accept 仍在直接写最终目录——被打断就会留下一份"名字合法、内容
+  # 半截"的快照，而 accept 恰恰是**唯一会把删除写进基线**的操作，它半途
+  # 而废的后果比 save 更糟。
+  newreal="$newdir"
+  newdir="$STORE/.partial-$(basename "$newreal")"
+  rm -rf "$newdir"; mkdir -p "$newdir"
   : > "$newdir/MANIFEST.tsv"
   # 被点名的文件取**当前**内容；其余一律沿用上一份基线的内容。
   while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
@@ -330,6 +375,7 @@ cmd_accept() {
       echo "……其余 $(( del_total - 40 )) 行删除见 ACCEPTED.diff"
     fi
   } > "$newdir/ACCEPTED.txt"
+  mv "$newdir" "$newreal"; newdir="$newreal"
   echo "已重建基线：$(basename "$newdir")（只有 $file 取当前内容，其余沿用上一份基线）"
 }
 
@@ -380,7 +426,12 @@ cmd_diff() {
 # 演练：在临时目录里真跑一遍"写前快照 → 把文件截断成事故那种样子 →
 # check 必须报错 → restore 必须逐字节还原"。不碰真实文档。
 cmd_drill() {
+  # 演练自己也受 CR-077 的新规矩约束：DOCS 必须在整个函数里被覆盖成演练
+  # 用的那一两份，否则 `cmd_save` 会因为"其余七份受监控文档不在临时目录里"
+  # 而拒绝存快照。bash 的 local 是动态作用域，这里的覆盖对被调用的
+  # cmd_save/cmd_check/cmd_accept 一并生效。
   local tmp doc snap rc
+  local DOCS="progress.md"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
   mkdir -p "$tmp/repo"
@@ -425,7 +476,11 @@ cmd_drill() {
   [ "$rc" -eq 1 ] || { echo "演练失败：净增长但中间被删 100 行，没有被判非零" >&2; return 1; }
   echo "   ✓ check 退出码 1（净 +200 行，仍然报出整块删除）"
 
-  echo "6.5) 删掉的是 `---` 这类以 -- 开头的正文行、且被追加掩盖（CR-074）"
+  # CR-076：这句原来用双引号包着反引号 `---`，bash 把它当命令替换执行了，
+  # stderr 上出现 "---: command not found" 而演练照样报成功。演练的输出
+  # 本身也是证据，不能带着噪声——现在整条演练的 stderr 必须为空
+  # （`tests/unit/test_docsnap.py` 有一条断言盯着它）。
+  echo '6.5) 删掉的是 --- 这类以 -- 开头的正文行、且被追加掩盖（CR-074）'
   ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
   { printf -- '--- 分隔线 %s\n' 1 2 3 4 5 6 7 8 9 10; cat "$doc"; } > "$doc.tmp" && mv "$doc.tmp" "$doc"
   ROOT="$tmp/repo" STORE="$tmp/store" cmd_save "带分隔线" > /dev/null
@@ -454,11 +509,19 @@ cmd_drill() {
   [ "$rc" -eq 1 ] || { echo "演练失败：十处各删 9 行 + 追加没有被判非零（CR-071）" >&2; return 1; }
   echo "   ✓ check 退出码 1（净 +210 行，仍然报出每处 9 行的删除）"
 
+  echo "7.5) 受监控的文档不在了，save 必须拒绝存快照（CR-077）"
+  mv "$doc" "$doc.moved"
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_save "缺文件" > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：受监控文档缺失时 save 仍然存了快照（CR-077）" >&2; return 1; }
+  mv "$doc.moved" "$doc"
+  echo '   ✓ save 退出码 1，没有生成「不覆盖那份文档」的快照'
+
   echo "8) 有意删减走 accept <文件> \"理由\"：只接受被点名的那一份"
   # 再造一份"意外被截断"的文档，验证接受 A 不会把 B 一起洗白（CR-070）
   printf '第 %s 行\n' $(seq 1 400) > "$tmp/repo/architecture.md"
-  export DOCSNAP_DOCS="progress.md architecture.md"
-  ROOT="$tmp/repo" STORE="$tmp/store" DOCS="progress.md architecture.md" cmd_save "两份" > /dev/null
+  DOCS="progress.md architecture.md"
+  export DOCSNAP_DOCS="$DOCS"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_save "两份" > /dev/null
   snap="$(STORE="$tmp/store" _latest)"
   awk 'NR<300 || NR>399' "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"       # A：有意删
   head -100 "$tmp/repo/architecture.md" > "$tmp/x" && mv "$tmp/x" "$tmp/repo/architecture.md"  # B：意外截断
@@ -479,7 +542,7 @@ cmd_drill() {
 }
 
 case "${1:-}" in
-  save)    shift; cmd_save "${1:-}" ;;
+  save)    shift; cmd_save "${1:-}" "${2:-}" ;;
   list)    cmd_list ;;
   check)   cmd_check ;;
   accept)  shift; cmd_accept "${1:-}" "${2:-}" ;;

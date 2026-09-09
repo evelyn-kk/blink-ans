@@ -627,6 +627,98 @@ def test_cr075_save_leaves_no_half_written_directory(tmp_path):
     assert run("check").returncode == 0, "遗留的 .partial- 目录不该把门禁带红"
 
 
+# ---- CR-076：演练的输出本身也是证据，不能带噪声 ----
+
+
+def test_cr076_drill_writes_nothing_to_stderr():
+    """`drill` 里一句提示原来用双引号裹着反引号 `---`，bash 把它当命令
+    替换执行了，stderr 上冒出 `---: command not found`，而演练照样报成功。
+    审查方是从 stderr 里看出来的——**演练报"通过"却在报错，本身就是
+    一种不可信**。这条断言把它钉死：整条演练的 stderr 必须为空。
+    """
+    r = subprocess.run([str(DOCSNAP), "drill"], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stderr == "", f"演练不该往 stderr 写任何东西，实际：\n{r.stderr}"
+
+
+# ---- CR-077：受监控的文档缺失时，save 不能悄悄少存一份 ----
+
+
+def test_cr077_save_refuses_when_a_monitored_doc_is_missing(tmp_path):
+    """最坏的失效形状：文件没了 -> save 静默跳过 -> 快照"有效"但不覆盖它
+    -> check 返回 0 -> 那份文档永久脱离检测，而门禁一直是绿的。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    (repo / "architecture.md").unlink()
+    r = run("save", "少了一份")
+    assert r.returncode == 1, "受监控文档缺失时必须拒绝存快照"
+    assert "architecture.md" in r.stdout + r.stderr
+    names = [p.name for p in store.iterdir() if not p.name.startswith(".partial-")]
+    assert len(names) == 1, "被拒绝的那次不该留下任何快照目录"
+
+
+def test_cr077_allow_missing_records_the_gap(tmp_path):
+    """确实是有意去掉的文档：显式 `--allow-missing`，缺失清单必须落盘。"""
+    repo, store, run = _mkrepo2(tmp_path)
+    (repo / "architecture.md").unlink()
+    r = run("save", "--allow-missing", "architecture.md 已按计划移除")
+    assert r.returncode == 0, r.stderr
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    assert (store / latest / "MISSING.txt").read_text(encoding="utf-8").strip() == "architecture.md"
+
+
+def test_cr077_check_flags_a_monitored_doc_not_covered_by_the_baseline(tmp_path):
+    """基线里没有这份文档 != 它不该被盯着。用只覆盖一份的基线去 check
+    两份文档，未被覆盖的那份必须报出来并判非零——否则一次"缺文件的快照"
+    会让它永久脱离检测。
+    """
+    repo, _store, _run = _mkrepo2(tmp_path)
+    env_one = {
+        "DOCSNAP_ROOT": str(repo), "DOCSNAP_STORE": str(tmp_path / "store"),
+        "DOCSNAP_DOCS": "progress.md", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+    subprocess.run([str(DOCSNAP), "save", "only-one"], capture_output=True, env=env_one, timeout=60)
+    env_two = dict(env_one, DOCSNAP_DOCS="progress.md architecture.md")
+    r = subprocess.run([str(DOCSNAP), "check"], capture_output=True, text=True, env=env_two, timeout=60)
+    assert r.returncode == 1
+    assert "architecture.md" in r.stdout + r.stderr
+    assert "没有被基线覆盖" in r.stdout + r.stderr
+
+
+def test_cr077_check_flags_a_monitored_doc_that_vanished_entirely(tmp_path):
+    """文件既不在工作区、也不在基线里（先删再存了一份 --allow-missing 的
+    快照），仍然必须报——这正是"脱离检测"的那条路径。
+    """
+    repo, _store, run = _mkrepo2(tmp_path)
+    (repo / "architecture.md").unlink()
+    assert run("save", "--allow-missing", "有意移除").returncode == 0
+    r = run("check")
+    assert r.returncode == 1
+    assert "不该凭空消失" in r.stdout + r.stderr
+
+
+# ---- CR-078：accept 也必须先写临时目录再原子改名 ----
+
+
+def test_cr078_accept_leaves_no_half_written_snapshot(tmp_path):
+    """accept 是唯一会把删除写进基线的操作，半途而废的后果比 save 更糟。
+    这里验证它和 save 一样不会留下半成品，且遗留的 `.partial-` 不影响它。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    (store / ".partial-20260101T000000Z__01__interrupted").mkdir()
+    a = repo / "progress.md"
+    a.write_text("\n".join(a.read_text(encoding="utf-8").splitlines()[:-100]) + "\n",
+                 encoding="utf-8")
+    assert run("accept", "progress.md", "有意删减").returncode == 0
+    snapshots = [p.name for p in store.iterdir() if not p.name.startswith(".partial-")]
+    for name in snapshots:
+        assert (store / name / "MANIFEST.tsv").exists(), f"{name} 是半成品"
+    assert not [p for p in store.iterdir()
+                if p.name.startswith(".partial-") and p.name != ".partial-20260101T000000Z__01__interrupted"], \
+        "accept 结束后不该留下自己的临时目录"
+    assert run("check").returncode == 0
+
+
 def test_real_collaboration_docs_are_all_covered(tmp_path):
     """`.gitignore` 里那几份没有 git 副本的协作文档，必须全部在 docsnap
     的默认清单里——漏掉哪一份，哪一份就还是裸奔。
