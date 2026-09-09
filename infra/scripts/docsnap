@@ -23,7 +23,10 @@
 # 环境变量（仅供测试/演练覆盖，正常使用不需要设置）:
 #   DOCSNAP_ROOT   文档所在目录，默认仓库根
 #   DOCSNAP_STORE  快照存放目录，默认 $DOCSNAP_ROOT/data/doc-snapshots
-#   DOCSNAP_DOCS   要快照的文件名清单（空格分隔），默认下面的 DEFAULT_DOCS
+#   DOCSNAP_DOCS   要快照的文件名清单（空格分隔），默认下面的 DEFAULT_DOCS。
+#                  **设成空字符串等于没设**（`${VAR:-默认}` 的语义），
+#                  仍然用默认九份——这是有意的：没人应该因为一次手滑
+#                  把"监控范围"变成空。真想缩小范围就显式写文件名。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

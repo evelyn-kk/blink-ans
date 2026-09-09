@@ -813,6 +813,51 @@ def test_cr080_refused_save_leaves_the_old_baseline_usable(tmp_path):
     assert (repo / "progress.md").read_text(encoding="utf-8") == original
 
 
+# ---- CR-081：把 shell 默认展开的语义钉死 ----
+#
+# R69 我在两处文档里写"`DOCSNAP_DOCS` 被设成空会触发 CR-080 的空快照"，
+# 那是把 `${VAR:-默认}` 的语义写反了：`:-` 对**空字符串也回退**，所以空值
+# 用的是默认九份、退出 1（默认清单缺失），不是退出 2。审查方独立复现后
+# 记为 CR-081。判据本身没错，错的是我举的例子——这类"顺手举的例子"
+# 同样是需要跑一遍才能写的断言（见 development-notes 2026-09-09）。
+
+
+def test_cr081_empty_docs_env_falls_back_to_the_default_list(tmp_path):
+    """空的 `DOCSNAP_DOCS` == 没设，仍然用默认九份。
+    这是有意的：不该有人因为一次手滑把"监控范围"变成空。
+    """
+    repo, store = tmp_path / "repo", tmp_path / "store"
+    repo.mkdir()
+    (repo / "progress.md").write_text("hi\n", encoding="utf-8")
+    env = {
+        "DOCSNAP_ROOT": str(repo), "DOCSNAP_STORE": str(store),
+        "DOCSNAP_DOCS": "", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+    r = subprocess.run([str(DOCSNAP), "save", "t"], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 1, "空值回退默认清单后，其余八份缺失 -> 退出 1"
+    out = r.stdout + r.stderr
+    for name in ("AGENTS.md", "scope.md", "architecture.md"):
+        assert name in out, f"应当按默认清单去找 {name}"
+    assert "拒绝存快照" in out
+
+
+def test_cr081_whitespace_only_docs_list_triggers_the_empty_snapshot_guard(tmp_path):
+    """真正能触发 CR-080 那条判据的输入：清单非空但解析出零个文件名
+    （例如只含空白）。退出 2、不发布任何目录。
+    """
+    repo, store = tmp_path / "repo", tmp_path / "store"
+    repo.mkdir()
+    (repo / "progress.md").write_text("hi\n", encoding="utf-8")
+    env = {
+        "DOCSNAP_ROOT": str(repo), "DOCSNAP_STORE": str(store),
+        "DOCSNAP_DOCS": "   ", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+    r = subprocess.run([str(DOCSNAP), "save", "t"], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 2, f"零个文件名 -> CR-080 的空产出物判据：\n{r.stdout}\n{r.stderr}"
+    assert "拒绝发布" in r.stdout + r.stderr
+    assert not store.exists() or not list(store.iterdir()), "不得留下任何目录"
+
+
 def test_real_collaboration_docs_are_all_covered(tmp_path):
     """`.gitignore` 里那几份没有 git 副本的协作文档，必须全部在 docsnap
     的默认清单里——漏掉哪一份，哪一份就还是裸奔。
