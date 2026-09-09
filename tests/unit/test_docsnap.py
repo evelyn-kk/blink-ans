@@ -15,8 +15,8 @@ docsnap 之后，恢复能力悄悄失效却没人发现——门禁失效比没
 
 from __future__ import annotations
 
-import shutil
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -283,6 +283,27 @@ def test_cr070_unaccepted_file_keeps_its_old_baseline(tmp_path):
     assert (store / latest / "progress.md").read_text(encoding="utf-8") == a.read_text(encoding="utf-8")
 
 
+def test_cr070_unaccepted_baseline_survives_repeated_accepts(tmp_path):
+    """R64 我自陈过一个"连续 accept 会把未接受文件的旧版本轮换掉"的风险，
+    codex R64 复审指出它在当前实现下不成立：每次 accept 都会把未点名文件
+    从上一份基线**继承**到新基线，所以旧版本一直跟着往前走。这里把这个
+    性质钉成回归——它是 CR-070 修法能否长期成立的前提，不能只停留在
+    "复审说不成立"。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    a, b = repo / "progress.md", repo / "architecture.md"
+    before_b = b.read_text(encoding="utf-8")
+    b.write_text("被截断了\n", encoding="utf-8")          # B 出事，一直不接受
+    for i in range(3):                                     # A 连续三轮有意删减
+        lines = a.read_text(encoding="utf-8").splitlines()
+        a.write_text("\n".join(lines[:-50]) + "\n", encoding="utf-8")
+        assert run("accept", "progress.md", f"第 {i + 1} 轮有意删减").returncode == 0
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    assert (store / latest / "architecture.md").read_text(encoding="utf-8") == before_b, \
+        "未被接受的 B 必须一路继承到最新基线，否则它的事故前版本会被轮换掉"
+    assert run("check").returncode == 1, "B 的截断也必须一直报红"
+
+
 def test_cr070_accept_records_which_file_and_what_was_deleted(tmp_path):
     """存档必须能追溯"接受的是哪一份、删掉的是什么"，否则橡皮图章盖完
     什么痕迹都不留。
@@ -345,6 +366,144 @@ def test_cr071_equal_size_rewrite_is_still_clean(tmp_path):
     doc.write_text("\n".join(lines) + "\n", encoding="utf-8")
     r = run("check")
     assert r.returncode == 0, f"原地等量改写（变长）不应报错：\n{r.stdout}\n{r.stderr}"
+
+
+# ---- CR-072：accept 的审计证据不能只是预览 ----
+
+
+def test_cr072_full_diff_is_archived_and_totals_recorded(tmp_path):
+    """删掉 151 行（远超预览的 40 行）之后：
+    - `ACCEPTED.txt` 必须写明删除总数，并说明自己只是预览；
+    - `ACCEPTED.diff` 必须存下完整 diff，第 41 行以后的删除也能取回。
+    这是 accept 唯一的审计证据——上一基线被保留策略轮换掉之后，它就是
+    唯一还能回答"当时到底删了什么"的东西。
+    """
+    doc, store, run = _mkrepo(tmp_path, lines=500)
+    kept = [l for i, l in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1)
+            if not (100 <= i <= 250)]
+    doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    assert run("accept", "progress.md", "删掉 100-250 那段过时记录").returncode == 0
+
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    txt = (store / latest / "ACCEPTED.txt").read_text(encoding="utf-8")
+    assert "删除行数: 151" in txt, f"摘要里必须有删除总数：\n{txt[:400]}"
+    assert "预览" in txt and "ACCEPTED.diff" in txt, "必须写明这里只是预览、完整 diff 在哪"
+    assert "其余 111 行删除见 ACCEPTED.diff" in txt
+
+    diff_text = (store / latest / "ACCEPTED.diff").read_text(encoding="utf-8")
+    deleted = [l[1:] for l in diff_text.splitlines()
+               if l.startswith("-") and not l.startswith("---")]
+    assert len(deleted) == 151, "完整 diff 里必须有全部 151 行删除"
+    # 第 41 行以后（预览截断处之外）确实能从归档里取到
+    assert "第 200 行" in deleted[-1] or any("第 200 行" in d for d in deleted)
+    assert any("第 250 行" in d for d in deleted), "最后一行删除也必须在归档里"
+
+
+def test_cr072_preview_note_is_absent_when_nothing_is_truncated(tmp_path):
+    """反向：删的行数不到 40 时不应出现"其余 N 行"这句——摘要不能说假话。"""
+    doc, store, run = _mkrepo(tmp_path, lines=100)
+    kept = [l for i, l in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1)
+            if not (10 <= i <= 14)]
+    doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    run("accept", "progress.md", "删掉 5 行")
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    txt = (store / latest / "ACCEPTED.txt").read_text(encoding="utf-8")
+    assert "删除行数: 5" in txt
+    assert "其余" not in txt
+
+
+# ---- CR-073：_prune 是唯一会 rm -rf 的分支，必须有边界回归 ----
+#
+# R62/R63/R64 连着三轮把"保留策略没有测试覆盖"登记为自陈却没有当场验证，
+# 违反 `AGENTS.md` §5.1。这里按当前策略（至少留最近 KEEP_MIN=20 份；
+# 超出的部分里只删超过 KEEP_DAYS=30 天的）把边界钉死。
+#
+# 造快照不需要跑 save：`_prune` 只看目录名里的 UTC 时间戳，不读内容。
+
+_KEEP_MIN = 20
+_KEEP_DAYS = 30
+
+
+def _fake_snapshots(store, ages_days):
+    """按给定的"天数前"造快照目录，返回目录名（按时间从老到新）。"""
+    store.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    names = []
+    for i, age in enumerate(sorted(ages_days, reverse=True)):
+        ts = (now - timedelta(days=age, seconds=i)).strftime("%Y%m%dT%H%M%SZ")
+        d = store / f"{ts}__01__fake{i:02d}"
+        d.mkdir()
+        (d / "MANIFEST.tsv").write_text("progress.md\t1\t3\tdeadbeef\n", encoding="utf-8")
+        (d / "progress.md").write_text("hi\n", encoding="utf-8")
+        names.append(d.name)
+    return names
+
+
+def _prune_env(tmp_path):
+    repo, store = tmp_path / "repo", tmp_path / "store"
+    repo.mkdir()
+    (repo / "progress.md").write_text("hi\n", encoding="utf-8")
+    env = {
+        "DOCSNAP_ROOT": str(repo), "DOCSNAP_STORE": str(store),
+        "DOCSNAP_DOCS": "progress.md", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+
+    def run(*args):
+        return subprocess.run([str(DOCSNAP), *args], capture_output=True, text=True, env=env, timeout=60)
+
+    return repo, store, run
+
+
+def test_cr073_prune_keeps_everything_within_keep_min_even_if_ancient(tmp_path):
+    """保底数量优先：只有 15 份（都 400 天前）时，一份都不许删。"""
+    _repo, store, run = _prune_env(tmp_path)
+    names = _fake_snapshots(store, [400] * 15)
+    assert run("save", "new").returncode == 0
+    left = {p.name for p in store.iterdir()}
+    assert set(names) <= left, "未超过保底数量时不得删除任何快照"
+    assert len(left) == 16
+
+
+def test_cr073_prune_deletes_only_the_excess_that_is_also_old(tmp_path):
+    """超额且超过 30 天的才删；超额但年轻的、以及保底 20 份，都要留下。"""
+    _repo, store, run = _prune_env(tmp_path)
+    old = _fake_snapshots(store, [60] * 5)          # 5 份 60 天前（会被删）
+    young = _fake_snapshots(store, [5] * 20)        # 20 份 5 天前（保底）
+    assert run("save", "new").returncode == 0       # 共 26 份，超额 6 份
+    left = {p.name for p in store.iterdir()}
+    assert not (set(old) & left), f"超额且超过 30 天的 5 份应被删除，实际还剩 {set(old) & left}"
+    assert set(young) <= left, "保底 20 份必须全部留下（哪怕它们也在超额计算里）"
+    assert len(left) == 21
+
+
+def test_cr073_prune_boundary_exactly_30_days_is_kept_31_is_deleted(tmp_path):
+    """边界：策略写的是"超过 30 天"，因此 30 天整必须留、31 天必须删。"""
+    _repo, store, run = _prune_env(tmp_path)
+    kept_edge = _fake_snapshots(store, [30])        # 30 天整 -> 留
+    deleted_edge = _fake_snapshots(store, [31])     # 31 天 -> 删
+    young = _fake_snapshots(store, [1] * 20)
+    assert run("save", "new").returncode == 0       # 22 份，超额 2 份，正好是上面两份
+    left = {p.name for p in store.iterdir()}
+    assert kept_edge[0] in left, "刚好 30 天不算'超过 30 天'，必须留下"
+    assert deleted_edge[0] not in left, "31 天且超额，必须删除"
+    assert set(young) <= left
+
+
+def test_cr073_after_pruning_latest_and_restore_still_work(tmp_path):
+    """删完之后基线仍然可用：`check` 认最新那份，`restore` 能拿回内容。"""
+    repo, store, run = _prune_env(tmp_path)
+    _fake_snapshots(store, [60] * 5 + [5] * 20)
+    doc = repo / "progress.md"
+    doc.write_text("\n".join(f"第 {i} 行" for i in range(1, 201)) + "\n", encoding="utf-8")
+    assert run("save", "real").returncode == 0
+    assert len({p.name for p in store.iterdir()}) == 21
+    assert run("check").returncode == 0, "刚存完的基线应当是干净的"
+
+    doc.write_text("被截断了\n", encoding="utf-8")
+    assert run("check").returncode == 1
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    assert run("restore", latest, "progress.md").returncode == 0
+    assert doc.read_text(encoding="utf-8").splitlines()[-1] == "第 200 行"
 
 
 def test_real_collaboration_docs_are_all_covered(tmp_path):

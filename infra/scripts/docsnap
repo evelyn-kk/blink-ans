@@ -189,7 +189,7 @@ cmd_check() {
 # 新基线里**只有被点名的那一份**取当前内容，其余全部沿用上一份基线，
 # 因此别的文档如果有未被接受的删除，下一次 check 照样报红。
 cmd_accept() {
-  local file="${1:-}" reason="${2:-}" latest dir newdir name lines bytes sha seq stamp
+  local file="${1:-}" reason="${2:-}" latest dir newdir name lines bytes sha seq stamp del_total add_total
   if [ -z "$file" ] || [ -z "$reason" ]; then
     echo "用法: docsnap accept <文件名> \"删了什么、为什么\"" >&2
     echo "  文件名与理由都必填——这是一次有记录的、**逐文件**的基线重建，" >&2
@@ -230,14 +230,26 @@ cmd_accept() {
     _manifest_line "$name" "$newdir/$name" >> "$newdir/MANIFEST.tsv"
   done < "$dir/MANIFEST.tsv"
 
+  # CR-072：完整的统一 diff 单独存档，`ACCEPTED.txt` 只做人读的摘要 +
+  # 前 40 行预览。原来只把预览写进 ACCEPTED.txt，第 41 行以后既没有内容
+  # 也没有计数——而 accept 正是唯一主动放行删除的路径，它的审计证据不能
+  # 只是预览：上一基线被保留策略轮换掉之后，这份 diff 就是唯一还能回答
+  # "当时到底删了什么"的东西。
+  { diff -u "$dir/$file" "$ROOT/$file" 2>/dev/null || true; } > "$newdir/ACCEPTED.diff"
+  del_total="$(awk '/^---/ {next} /^-/ {c++} END {print c+0}' "$newdir/ACCEPTED.diff")"
+  add_total="$(awk '/^\+\+\+/ {next} /^\+/ {c++} END {print c+0}' "$newdir/ACCEPTED.diff")"
   {
     echo "接受的文档: $file"
     echo "理由: $reason"
     echo "接受时间: $stamp"
     echo "上一基线: $latest"
-    echo "被接受掉的删除行（最多 40 行）:"
-    { diff -u "$dir/$file" "$ROOT/$file" 2>/dev/null || true; } \
-      | awk '/^---/ || /^\+\+\+/ {next} /^-/ {print}' | head -40
+    echo "删除行数: $del_total    新增行数: $add_total"
+    echo "完整 diff: ACCEPTED.diff（本文件下面只是前 40 行预览）"
+    echo "被接受掉的删除行（预览，最多 40 行）:"
+    awk '/^---/ {next} /^-/ {print}' "$newdir/ACCEPTED.diff" | head -40
+    if [ "$del_total" -gt 40 ]; then
+      echo "……其余 $(( del_total - 40 )) 行删除见 ACCEPTED.diff"
+    fi
   } > "$newdir/ACCEPTED.txt"
   echo "已重建基线：$(basename "$newdir")（只有 $file 取当前内容，其余沿用上一份基线）"
 }
