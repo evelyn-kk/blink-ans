@@ -141,7 +141,7 @@ def test_cr069_mid_file_deletion_is_flagged(tmp_path):
     doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
     r = run("check")
     assert r.returncode == 1, f"1000 -> 900 行必须判非零：\n{r.stdout}\n{r.stderr}"
-    assert "单块最多净删 100 行" in r.stdout + r.stderr
+    assert "真正丢失 100 行" in r.stdout + r.stderr
 
 
 def test_cr069_deletion_masked_by_appends_is_flagged(tmp_path):
@@ -155,7 +155,7 @@ def test_cr069_deletion_masked_by_appends_is_flagged(tmp_path):
     doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
     r = run("check")
     assert r.returncode == 1, f"净增长 200 行也必须报出中间那 100 行的删除：\n{r.stdout}\n{r.stderr}"
-    assert "净删" in r.stdout + r.stderr
+    assert "真正丢失" in r.stdout + r.stderr
 
 
 def test_cr069_small_in_place_edit_that_grows_is_still_clean(tmp_path):
@@ -353,7 +353,7 @@ def test_cr071_scattered_small_deletions_masked_by_appends_are_flagged(tmp_path)
     assert len(kept) > 2000, "构造前提：净行数必须是增长的，否则测的不是这个形状"
     r = run("check")
     assert r.returncode == 1, f"分散的小删除必须被判非零：\n{r.stdout}\n{r.stderr}"
-    assert "净删" in r.stdout + r.stderr
+    assert "真正丢失" in r.stdout + r.stderr
 
 
 def test_cr071_equal_size_rewrite_is_still_clean(tmp_path):
@@ -504,6 +504,127 @@ def test_cr073_after_pruning_latest_and_restore_still_work(tmp_path):
     latest = sorted(p.name for p in store.iterdir())[-1]
     assert run("restore", latest, "progress.md").returncode == 0
     assert doc.read_text(encoding="utf-8").splitlines()[-1] == "第 200 行"
+
+
+# ---- CR-074：正文里以 -- 开头的行不是 diff 的文件头 ----
+
+
+def _old_rule_deleted_count(diff_text):
+    """R65 那版按字面前缀认文件头的算法，内联复现用于判别性对照。"""
+    return sum(1 for l in diff_text.splitlines()
+               if l.startswith("-") and not l.startswith("---"))
+
+
+def test_cr074_deleted_separator_lines_are_counted(tmp_path):
+    """删掉的是 Markdown 分隔线（`---`）这类以 `--` 开头的正文行时，
+    旧算法会把它们当成 unified diff 的文件头跳过，删除数少算甚至归零。
+    """
+    doc, store, run = _mkrepo(tmp_path, lines=20)
+    doc.write_text("--- 分隔线一\n--- 分隔线二\n--- 分隔线三\n正文一\n正文二\n", encoding="utf-8")
+    run("save", "baseline")
+    doc.write_text("正文一\n正文二\n", encoding="utf-8")
+
+    r = run("check")
+    assert r.returncode == 1
+    assert "删 3 行" in r.stdout + r.stderr, f"三行分隔线都必须算进删除数：\n{r.stdout}\n{r.stderr}"
+
+    assert run("accept", "progress.md", "删掉三条分隔线").returncode == 0
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    txt = (store / latest / "ACCEPTED.txt").read_text(encoding="utf-8")
+    assert "删除行数: 3" in txt, f"摘要里的删除总数必须是 3：\n{txt}"
+    diff_text = (store / latest / "ACCEPTED.diff").read_text(encoding="utf-8")
+    assert _old_rule_deleted_count(diff_text) == 0, (
+        "判别性前提：旧算法在这份 diff 上确实数出 0 行删除（三行都被当成文件头）")
+    assert "-  分隔线一" in txt or "分隔线一" in txt, "预览里也要能看到被删的分隔线"
+
+
+def test_cr074_separator_deletion_masked_by_appends_is_flagged(tmp_path):
+    """最坏的组合：删掉的全是 `---` 行、又用追加把行数和字节数都做成增长。
+    旧算法下三条判据会同时失效（净行数增、字节增、每 hunk 算出的净删为 0），
+    这正是 CR-074 从"计数不准"升级成"能绕过门禁"的地方。
+    """
+    doc, _store, run = _mkrepo(tmp_path, lines=5)
+    doc.write_text("".join(f"--- 分隔线 {i}\n" for i in range(1, 11)) + "正文\n", encoding="utf-8")
+    run("save", "baseline")
+    doc.write_text("正文\n" + "".join(f"新增第 {i} 行\n" for i in range(1, 31)), encoding="utf-8")
+
+    r = run("check")
+    assert r.returncode == 1, f"被追加掩盖的分隔线删除必须仍然报红：\n{r.stdout}\n{r.stderr}"
+    assert "删 10 行" in r.stdout + r.stderr
+
+
+# ---- CR-075：形似时间戳的目录不等于可用基线 ----
+
+
+def _bogus_dir(store, name, manifest=None, files=None):
+    d = store / name
+    d.mkdir(parents=True)
+    if manifest is not None:
+        (d / "MANIFEST.tsv").write_text(manifest, encoding="utf-8")
+    for fn, content in (files or {}).items():
+        (d / fn).write_text(content, encoding="utf-8")
+    return d
+
+
+def test_cr075_invalid_timestamp_dir_is_not_used_as_baseline(tmp_path):
+    """`20269999T999999Z__01__bogus` 这种名字能过正则、过不了 `date`。
+    旧实现把它选成最新基线，`check` 打印一句找不到 MANIFEST 之后**退出 0**
+    ——门禁被整个绕过。现在必须：仍拿真正的基线比对，并把坏目录报出来。
+    """
+    doc, store, run = _mkrepo(tmp_path, lines=100)
+    _bogus_dir(store, "20269999T999999Z__01__bogus")
+    doc.write_text("只剩一行\n", encoding="utf-8")
+
+    r = run("check")
+    assert r.returncode == 1, "真实截断必须被判非零，而不是被坏目录带成 0"
+    out = r.stdout + r.stderr
+    assert "疑似大段截断" in out, "必须仍然与真正的基线比对"
+    assert "20269999T999999Z__01__bogus" in out, "坏目录必须被报出来"
+
+
+def test_cr075_only_broken_snapshots_fails_closed(tmp_path):
+    """一份有效基线都没有时必须失败关闭（退出 2），不能当作"没问题"。"""
+    repo, store, run = _prune_env(tmp_path)
+    _bogus_dir(store, "20269999T999999Z__01__bogus")
+    r = run("check")
+    assert r.returncode == 2
+    assert "失败关闭" in r.stdout + r.stderr
+
+
+def test_cr075_snapshot_missing_a_listed_file_is_invalid(tmp_path):
+    """清单里点名的文件不在目录里 = 这份快照不可用（半份 save 的形状）。"""
+    doc, store, run = _mkrepo(tmp_path, lines=50)
+    _bogus_dir(store, "29990101T000000Z__01__halfwritten",
+               manifest="progress.md\t50\t100\tdeadbeef\n")   # 只有清单，没有文件
+    doc.write_text("只剩一行\n", encoding="utf-8")
+    r = run("check")
+    assert r.returncode == 1
+    assert "halfwritten" in r.stdout + r.stderr
+    assert "疑似大段截断" in r.stdout + r.stderr, "仍应与真正可用的基线比对"
+
+
+def test_cr075_restore_refuses_an_invalid_snapshot(tmp_path):
+    doc, store, run = _mkrepo(tmp_path, lines=50)
+    _bogus_dir(store, "29990101T000000Z__01__halfwritten",
+               manifest="progress.md\t50\t100\tdeadbeef\n")
+    before = doc.read_text(encoding="utf-8")
+    r = run("restore", "29990101T000000Z__01__halfwritten", "progress.md")
+    assert r.returncode == 2
+    assert "不完整" in r.stdout + r.stderr
+    assert doc.read_text(encoding="utf-8") == before, "拒绝恢复时不得改动工作区"
+
+
+def test_cr075_save_leaves_no_half_written_directory(tmp_path):
+    """save 先写临时目录再原子改名：正常存完之后不应留下任何半成品，
+    而且遗留的 `.partial-` 目录不会被当成快照（名字不匹配时间戳格式）。
+    """
+    _doc, store, run = _mkrepo(tmp_path, lines=10)
+    (store / ".partial-20260101T000000Z__01__interrupted").mkdir()
+    assert run("save", "again").returncode == 0
+    snapshots = [p.name for p in store.iterdir() if not p.name.startswith(".partial-")]
+    for name in snapshots:
+        assert (store / name / "MANIFEST.tsv").exists(), f"{name} 是半成品"
+    assert run("check").returncode == 0, "遗留的 .partial- 目录不该把门禁带红"
 
 
 def test_real_collaboration_docs_are_all_covered(tmp_path):

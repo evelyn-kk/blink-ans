@@ -62,7 +62,42 @@ _manifest_line() {  # <文件名> <路径>
   printf '%s\t%s\t%s\t%s\n' "$1" "$(wc -l < "$2" | tr -d ' ')" "$(wc -c < "$2" | tr -d ' ')" "$(_sha "$2")"
 }
 
-_latest() { ls -1 "$STORE" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z' | sort | tail -1; }
+_snapshot_names() { ls -1 "$STORE" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z' | sort; }
+
+# CR-075：目录名"看起来像时间戳"远不等于它是一份可用的基线。一个
+# `20269999T999999Z__01__bogus`，或一次被打断的 save 留下的半份目录，
+# 会被旧的 `_latest` 选成最新基线，`check` 打印一句 "MANIFEST.tsv: No such
+# file or directory" 之后**照样退出 0**——完整性门禁被整个绕过（我在 R65
+# 自陈里还写过"这类目录会被跳过"，那是错的，审查方独立复现了）。
+# 现在一份快照必须同时满足三条才算有效：时间戳能被 `date` 真正解析、
+# MANIFEST 非空、清单里点名的每份文档都真的躺在目录里。
+_valid_snapshot() {  # <快照目录名>
+  local name="$1" stamp="${1%%__*}" f
+  [ -d "$STORE/$name" ] || return 1
+  date -u -j -f '%Y%m%dT%H%M%SZ' "$stamp" +%s >/dev/null 2>&1 || return 1
+  [ -s "$STORE/$name/MANIFEST.tsv" ] || return 1
+  while IFS=$'\t' read -r f _ _ _ || [ -n "${f:-}" ]; do
+    [ -z "${f:-}" ] && continue
+    [ -f "$STORE/$name/$f" ] || return 1
+  done < "$STORE/$name/MANIFEST.tsv"
+  return 0
+}
+
+_invalid_snapshots() {
+  local n
+  for n in $(_snapshot_names); do
+    _valid_snapshot "$n" || printf '%s\n' "$n"
+  done
+}
+
+# 最新的**有效**快照；一份都没有时返回非零，调用方必须失败关闭。
+_latest() {
+  local n
+  for n in $(_snapshot_names | sort -r); do
+    if _valid_snapshot "$n"; then printf '%s\n' "$n"; return 0; fi
+  done
+  return 1
+}
 
 _prune() {
   # 不用 mapfile：macOS 自带的是 bash 3.2，没有这个内建命令。
@@ -84,7 +119,7 @@ EOF
 }
 
 cmd_save() {
-  local reason="${1:-}" stamp dir f seq
+  local reason="${1:-}" stamp dir f seq tmpdir real_dir
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   # 同一秒里可能存一份以上（accept 紧接着 save）。加两位序号，并且序号
   # 放在说明之前——目录名的字典序必须与创建顺序一致，否则 `_latest` 会
@@ -94,7 +129,12 @@ cmd_save() {
   seq="$(printf '%02d' $(( seq + 1 )))"
   dir="$STORE/${stamp}__${seq}"
   [ -n "$reason" ] && dir="${dir}__$(echo "$reason" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-40)"
-  mkdir -p "$dir"
+  # CR-075：先写进 `.partial-` 开头的临时目录（**不匹配**时间戳格式，
+  # 因此不会被 `_latest`/`_prune` 看见），全部写完再原子改名——中途被打断
+  # 不会留下一份"看起来像基线"的半成品。
+  tmpdir="$STORE/.partial-$(basename "$dir")"
+  rm -rf "$tmpdir"; mkdir -p "$tmpdir"
+  local real_dir="$dir"; dir="$tmpdir"
   : > "$dir/MANIFEST.tsv"
   for f in $DOCS; do
     if [ -f "$ROOT/$f" ]; then
@@ -103,6 +143,7 @@ cmd_save() {
     fi
   done
   [ -n "$reason" ] && printf '%s\n' "$reason" > "$dir/REASON.txt"
+  mv "$tmpdir" "$real_dir"; dir="$real_dir"
   _prune
   echo "快照 $(basename "$dir")：$(wc -l < "$dir/MANIFEST.tsv" | tr -d ' ') 份文档 -> $dir"
   cat "$dir/MANIFEST.tsv" | awk -F'\t' '{printf "  %-24s %6s 行 %9s 字节\n", $1, $2, $3}'
@@ -116,23 +157,49 @@ cmd_list() {
   done
 }
 
-# 某个文件相对快照的删除情况：输出 "净行差 净字节差 最大块删除 总删行 总加行"
+# 某个文件相对快照的删除情况：输出 "真实丢失行数 总删行 总加行"。
+#
+# 判定用的是 `diff` 的**普通格式**（不是 -u），因为它把"改写"和"删除"
+# 分得清清楚楚：`NcM` 是替换、`NdM` 是纯删除、`NaM` 是纯新增。
+#   - `d` 块：删掉的行全部计入丢失；
+#   - `c` 块：只计入 max(0, 删的行 - 加的行)——原地改写（删 3 加 3）
+#     丢失为 0，改写成更少的行才算丢；
+#   - `a` 块：丢失为 0。
+# 为什么不再用 `diff -u` 的"每个 hunk 净删"（CR-071 那版）：删除和随后的
+# 追加如果挨得够近，会被合并进**同一个 hunk**，净删变成负数而漏判——
+# 这个洞是本轮给 CR-074 写"被追加掩盖的分隔线删除"回归时自己撞出来的，
+# 不是审查方指出的。普通格式按命令分块，天然没有这个问题。
+# 另外普通格式的正文行一律带 `< ` / `> ` 前缀，不会像 unified 格式那样
+# 把正文里以 `--` 开头的行误认成文件头（CR-074）。
 _delta() {  # <快照文件> <当前文件>
-  local snap_f="$1" cur_f="$2"
-  { diff -u "$snap_f" "$cur_f" 2>/dev/null || true; } | awk '
-    /^@@/ { if (del - add > worst) worst = del - add; del = 0; add = 0; next }
-    /^---/ || /^\+\+\+/ { next }
-    /^-/ { del++; tdel++; next }
-    /^\+/ { add++; tadd++; next }
-    END { if (del - add > worst) worst = del - add; print worst+0, tdel+0, tadd+0 }
+  { diff "$1" "$2" 2>/dev/null || true; } | awk '
+    function flush() {
+      if (op == "d") loss += del
+      else if (op == "c" && del > add) loss += del - add
+      tdel += del; tadd += add
+      del = 0; add = 0; op = ""
+    }
+    /^[0-9]/ {
+      flush()
+      if ($0 ~ /c/) op = "c"; else if ($0 ~ /d/) op = "d"; else op = "a"
+      next
+    }
+    /^< / { del++; next }
+    /^> / { add++; next }
+    END { flush(); print loss+0, tdel+0, tadd+0 }
   '
 }
 
 cmd_check() {
   local latest dir rc=0 name lines bytes sha now_lines now_bytes now_sha
-  local line_drop byte_drop worst tdel tadd ratio label
-  latest="$(_latest)" || true
+  local line_drop byte_drop loss tdel tadd ratio label broken
+  latest="$(_latest || true)"
   if [ -z "${latest:-}" ]; then
+    if [ -n "$(_invalid_snapshots)" ]; then
+      echo "快照库里只有损坏/不完整的目录，没有一份可用基线——失败关闭：" >&2
+      _invalid_snapshots | sed 's/^/  - /' >&2
+      return 2
+    fi
     echo "没有可比对的快照——先跑一次 docsnap save" >&2
     return 2
   fi
@@ -151,9 +218,9 @@ cmd_check() {
     line_drop=$(( lines - now_lines ))
     byte_drop=$(( bytes - now_bytes ))
     set -- $(_delta "$dir/$name" "$ROOT/$name")
-    worst="${1:-0}"; tdel="${2:-0}"; tadd="${3:-0}"
+    loss="${1:-0}"; tdel="${2:-0}"; tadd="${3:-0}"
 
-    if [ "$line_drop" -gt 0 ] || [ "$byte_drop" -gt 0 ] || [ "$worst" -gt 0 ]; then
+    if [ "$line_drop" -gt 0 ] || [ "$byte_drop" -gt 0 ] || [ "$loss" -gt 0 ]; then
       ratio=0; [ "$lines" -gt 0 ] && [ "$line_drop" -gt 0 ] && ratio=$(( line_drop * 100 / lines ))
       if [ "$line_drop" -ge "$BIG_LINES" ] || { [ "$ratio" -ge "$BIG_RATIO" ] && [ "$line_drop" -gt 0 ]; }; then
         label="疑似大段截断"
@@ -162,15 +229,24 @@ cmd_check() {
       elif [ "$byte_drop" -gt 0 ]; then
         label="行数没少但内容变短"
       else
-        label="净行数没减少，但有 hunk 净删了行"
+        label="净行数没减少，但有内容被删掉"
       fi
       echo "  ✗ $name ${label}：$lines -> $now_lines 行（$bytes -> $now_bytes 字节）；" \
-           "diff 删 $tdel 行 / 加 $tadd 行，单块最多净删 $worst 行" >&2
+           "diff 删 $tdel 行 / 加 $tadd 行，其中真正丢失 $loss 行" >&2
       rc=1
     else
       echo "  + $name $lines -> $now_lines 行（$bytes -> $now_bytes 字节）；删 $tdel 行 / 加 $tadd 行"
     fi
   done < "$dir/MANIFEST.tsv"
+  broken="$(_invalid_snapshots)"
+  if [ -n "$broken" ]; then
+    {
+      echo "  ✗ 快照库里有损坏/不完整的目录（不能当基线，也不该留着）："
+      printf '%s\n' "$broken" | sed 's/^/      /'
+      echo "    确认无用就删掉：rm -rf ${STORE}/<目录名>"
+    } >&2
+    rc=1
+  fi
   if [ "$rc" -ne 0 ]; then
     {
       echo ""
@@ -189,16 +265,16 @@ cmd_check() {
 # 新基线里**只有被点名的那一份**取当前内容，其余全部沿用上一份基线，
 # 因此别的文档如果有未被接受的删除，下一次 check 照样报红。
 cmd_accept() {
-  local file="${1:-}" reason="${2:-}" latest dir newdir name lines bytes sha seq stamp del_total add_total
+  local file="${1:-}" reason="${2:-}" latest dir newdir name lines bytes sha seq stamp del_total add_total loss tdel tadd
   if [ -z "$file" ] || [ -z "$reason" ]; then
     echo "用法: docsnap accept <文件名> \"删了什么、为什么\"" >&2
     echo "  文件名与理由都必填——这是一次有记录的、**逐文件**的基线重建，" >&2
     echo "  不是把判据调松，也不能顺手把别的文档的改动一起洗白。" >&2
     return 2
   fi
-  latest="$(_latest)" || true
+  latest="$(_latest || true)"
   if [ -z "${latest:-}" ]; then
-    echo "还没有基线快照，先跑 docsnap save" >&2; return 2
+    echo "没有可用的基线快照（损坏/不完整的目录不算），先跑 docsnap save" >&2; return 2
   fi
   dir="$STORE/$latest"
   if ! grep -q "^${file}	" "$dir/MANIFEST.tsv" 2>/dev/null; then
@@ -210,7 +286,7 @@ cmd_accept() {
   # `set -o pipefail` 下 diff 的"文件不同"退出码 1 会让整条管道非零，
   # 这里是有意展示差异，不是错误——显式吞掉。
   { diff -u "$dir/$file" "$ROOT/$file" 2>/dev/null || true; } \
-    | awk '/^---/ || /^\+\+\+/ {next} /^-/ {print "  " $0}' | head -40
+    | awk 'NR <= 2 {next} /^@@/ {next} /^-/ {print "  " $0}' | head -40
   echo "（以上最多显示 40 行；完整差异用 docsnap changes ${file}）"
 
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -236,8 +312,11 @@ cmd_accept() {
   # 只是预览：上一基线被保留策略轮换掉之后，这份 diff 就是唯一还能回答
   # "当时到底删了什么"的东西。
   { diff -u "$dir/$file" "$ROOT/$file" 2>/dev/null || true; } > "$newdir/ACCEPTED.diff"
-  del_total="$(awk '/^---/ {next} /^-/ {c++} END {print c+0}' "$newdir/ACCEPTED.diff")"
-  add_total="$(awk '/^\+\+\+/ {next} /^\+/ {c++} END {print c+0}' "$newdir/ACCEPTED.diff")"
+  # CR-074：同上——正文里以 `--`/`++` 开头的行（Markdown 分隔线、YAML
+  # front-matter 的 `---`）删除后在 diff 里长得就像文件头，按字面前缀跳过
+  # 会把它们漏掉，删除总数因此少算甚至归零。文件头恰好是前两行。
+  del_total="$(awk 'NR <= 2 {next} /^@@/ {next} /^-/ {c++} END {print c+0}' "$newdir/ACCEPTED.diff")"
+  add_total="$(awk 'NR <= 2 {next} /^@@/ {next} /^\+/ {c++} END {print c+0}' "$newdir/ACCEPTED.diff")"
   {
     echo "接受的文档: $file"
     echo "理由: $reason"
@@ -246,7 +325,7 @@ cmd_accept() {
     echo "删除行数: $del_total    新增行数: $add_total"
     echo "完整 diff: ACCEPTED.diff（本文件下面只是前 40 行预览）"
     echo "被接受掉的删除行（预览，最多 40 行）:"
-    awk '/^---/ {next} /^-/ {print}' "$newdir/ACCEPTED.diff" | head -40
+    awk 'NR <= 2 {next} /^@@/ {next} /^-/ {print}' "$newdir/ACCEPTED.diff" | head -40
     if [ "$del_total" -gt 40 ]; then
       echo "……其余 $(( del_total - 40 )) 行删除见 ACCEPTED.diff"
     fi
@@ -257,8 +336,8 @@ cmd_accept() {
 # 看清楚到底删了什么：直接给出相对最近快照的 diff。
 cmd_changes() {
   local latest dir name lines bytes sha
-  latest="$(_latest)" || true
-  [ -n "${latest:-}" ] || { echo "还没有快照" >&2; return 2; }
+  latest="$(_latest || true)"
+  [ -n "${latest:-}" ] || { echo "没有可用的快照" >&2; return 2; }
   dir="$STORE/$latest"
   while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
     [ -z "${name:-}" ] && continue
@@ -275,6 +354,9 @@ cmd_restore() {
   [ -n "$snap" ] || { echo "用法: docsnap restore <快照目录名> [文件名]" >&2; return 2; }
   dir="$STORE/$snap"
   [ -d "$dir" ] || { echo "没有这个快照: $snap" >&2; return 2; }
+  _valid_snapshot "$snap" || {
+    echo "这份快照不完整、不能用来恢复（缺 MANIFEST，或清单里的文件不在）: $snap" >&2
+    return 2; }
   while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
     [ -z "${name:-}" ] && continue
     if [ -n "$only" ] && [ "$only" != "$name" ]; then continue; fi
@@ -285,7 +367,9 @@ cmd_restore() {
 
 cmd_diff() {
   local latest dir name lines bytes sha
-  latest="$(_latest)"; dir="$STORE/$latest"
+  latest="$(_latest || true)"
+  [ -n "${latest:-}" ] || { echo "没有可用的快照" >&2; return 2; }
+  dir="$STORE/$latest"
   while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
     [ -z "${name:-}" ] && continue
     if [ -n "${1:-}" ] && [ "$1" != "$name" ]; then continue; fi
@@ -340,6 +424,25 @@ cmd_drill() {
   rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
   [ "$rc" -eq 1 ] || { echo "演练失败：净增长但中间被删 100 行，没有被判非零" >&2; return 1; }
   echo "   ✓ check 退出码 1（净 +200 行，仍然报出整块删除）"
+
+  echo "6.5) 删掉的是 `---` 这类以 -- 开头的正文行、且被追加掩盖（CR-074）"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
+  { printf -- '--- 分隔线 %s\n' 1 2 3 4 5 6 7 8 9 10; cat "$doc"; } > "$doc.tmp" && mv "$doc.tmp" "$doc"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_save "带分隔线" > /dev/null
+  snap="$(STORE="$tmp/store" _latest)"
+  grep -v '^--- 分隔线' "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"
+  seq 1 100 | sed 's/^/追加第 & 行/' >> "$doc"
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：以 -- 开头的正文行被删且被追加掩盖，没有判非零（CR-074）" >&2; return 1; }
+  echo "   ✓ check 退出码 1（10 行分隔线的删除没有被当成 diff 文件头漏掉）"
+
+  echo "6.6) 形似时间戳但不可用的快照目录不能被当成基线（CR-075）"
+  mkdir -p "$tmp/store/20269999T999999Z__01__bogus"
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：坏目录被选成基线、门禁被绕过（CR-075）" >&2; return 1; }
+  rm -rf "$tmp/store/20269999T999999Z__01__bogus"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
+  echo "   ✓ check 仍与真正的基线比对，并把坏目录报出来"
 
   echo "7) 分散的小删除（十处各净删 9 行）+ 追加，同样必须被判非零"
   ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
