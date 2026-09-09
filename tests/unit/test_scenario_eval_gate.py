@@ -747,34 +747,74 @@ def test_cr067_reversed_conclusion_is_no_longer_passed(key):
     assert _status_of(spec, answer) == "review_required"
 
 
-def test_cr067_every_yes_no_question_has_a_negative_constraint():
-    """结构性约束：凡是问"是不是/有没有用/有什么不同"这类有明确结论方向
-    的题，都必须配 `forbid_patterns`——CR-066/067 两轮的共同教训是"漏配
-    一题就漏一题"，靠人记不住，写成测试。
+# "X 不 X" 叠字（能不能 / 是不是 / 会不会 / 要不要 / 需不需要 / 行不行…）是
+# 中文正反问句最稳定的结构特征，比逐个往词表里加词可靠——CR-082 正是
+# 词表漏了"能不能"漏出来的。
+_A_NOT_A = re.compile(r"(.)不\1")
+# 叠字覆盖不到、但同样带明确结论方向的问法，只能显式列。
+_POLARITY_PHRASES = ("吗", "是否", "可否", "能否", "有没有",
+                     "有什么不同", "有什么代价", "先看哪个")
 
-    **2026-09-09（R71）扩到全量**：原来这里写的是 `_QUESTIONS_YAML[-8:]`，
-    只检查最近一批（CR-066 那 8 题）。那等于给此前所有题开了一个不写在
-    豁免名单里的后门：R71 加完第五张卡片后一数，前三张卡片的 Q4/Q5/Q6/
-    Q7/Q10/Q17 六道是非题一条负向约束都没有，而门禁一直是绿的——正是
-    `AGENTS.md` §5.4 说的"哪些输入会让它什么都不判"。改为遍历全部题目，
-    六道旧题在同一轮补齐负向约束。
+
+def _is_yes_no_question(text: str) -> bool:
+    return bool(_A_NOT_A.search(text)) or any(m in text for m in _POLARITY_PHRASES)
+
+
+def test_cr067_every_yes_no_question_has_a_negative_constraint():
+    """结构性约束：凡是有明确结论方向的是非题都必须配 `forbid_patterns`——
+    CR-066/067 两轮的共同教训是"漏配一题就漏一题"，靠人记不住，写成测试。
+
+    **两次修补，两种不同形状的同一个后门**：
+
+    1. **R71（2026-09-09）扩到全量**：原来写的是 `_QUESTIONS_YAML[-8:]`，
+       只检查最近一批。那是个**滑动窗口**——R71 加完第五张卡片后一数，
+       前三张卡片的 Q4/Q5/Q6/Q7/Q10/Q17 六道是非题一条负向约束都没有，
+       而门禁一直是绿的。
+    2. **R72（CR-082）改判定方式**：遍历全量之后仍然漏，因为 `markers`
+       是一份**手工维护的词表**，里面没有"能不能"——Q8/Q13/Q15 三道
+       直接是非题照样在不判定的空间里。词表这种形式的问题和滑动窗口
+       一样：它在写下的那一刻是对的，之后每加一种问法就默默漏一次，
+       且没有任何信号。改用中文正反问句的结构特征"X 不 X"叠字
+       （`_A_NOT_A`）作为主判据，词表退化为叠字覆盖不到的补充项。
+
+    **这条判据能做到什么、做不到什么**（按 CR-082 的要求写清楚，不作
+    全称承诺）：它识别的是**问法形式**，不是"这题有没有结论方向"。
+    形如"用 X 做 Y 好不好"会被识别；而"X 和 Y 哪个更合适"这类没有
+    正反结构、也不含上列短语的选择题不会被识别，仍然要靠出题时自觉。
 
     豁免必须逐条写在 `exempt` 里并说明理由，改动时会被这条测试逼着重新
     解释：
       - Q26：""为什么"型问题，事实性关键点本身就承载方向；
-      - Q34：问的是"怎么确认"，"是不是内存超限"只是宾语从句，
-        没有可反转的是非结论（marker 命中属于中文字面误伤）。
+      - Q34：问的是"怎么确认"，"是不是内存超限"只是宾语从句；
+      - Q14：问的是"为什么会出现超卖"，"判断是否还有余量"是题干里
+        描述的那段错误代码在做什么，不是这题的结论方向。
+    后两条都属于中文字面误伤：句子里出现了正反结构，但它不在问句的
+    主干上。
     """
     exempt = {
         "已经建了包含查询所有列的覆盖索引",
         "容器隔一阵就没了、应用日志里什么都没留下",
+        "秒杀场景下，先 GET 库存判断是否还有余量",
     }
-    markers = ("吗", "是不是", "有什么不同", "有什么代价", "先看哪个")
     for q in _QUESTIONS_YAML:
         if any(q["q"].startswith(e) for e in exempt):
             continue
-        if any(m in q["q"] for m in markers):
+        if _is_yes_no_question(q["q"]):
             assert q.get("forbid_patterns"), f"有结论方向的题必须配负向约束: {q['q'][:40]}"
+
+
+def test_cr082_detector_recognizes_the_phrasings_it_claims_to():
+    """判别性：CR-082 的根因是判定方式识别不了"能不能"。这条把它钉住——
+    也顺带记录这条判据**不**声称能识别的形状。
+    """
+    for text in ("能不能用它实现死信队列", "这样配会不会更慢", "是不是所有异常都重试",
+                 "需不需要再做幂等", "这样算不算超卖", "值不值得加索引",
+                 "这么写行不行", "有没有更好的做法", "能否保证恰好一次",
+                 "是否需要重建索引", "副本数会跟着回滚吗"):
+        assert _is_yes_no_question(text), f"应识别为是非题: {text}"
+    # 明确不声称能识别的：没有正反结构、也不含上列短语的选择/开放题。
+    for text in ("Kafka 和 RabbitMQ 哪个更适合订单场景", "为什么执行计划走了顺序扫描"):
+        assert not _is_yes_no_question(text), f"不应被识别（判据只看问法形式）: {text}"
 
 
 @pytest.mark.parametrize("prefix", sorted(_CR066_CORRECT_ANSWERS))
@@ -866,20 +906,51 @@ _R71_NEGATIVE_CONSTRAINT_CASES = {
 }
 
 
-@pytest.mark.parametrize("key", sorted(_R71_NEGATIVE_CONSTRAINT_CASES))
+# ---- R72（2026-09-09，CR-082）：三道"能不能"型是非题的负向约束 ----
+#
+# 与上面 R71 那组同样成对固定"能抓反例"和"不误伤真实回答"。Q8 的反例
+# 不是构造的：本地后端真的答成了"可实现端到端恰好一次"，逐字取自同一
+# 份报告；它"不该命中"的那一侧才是构造的正确答案。
+_R72_NEGATIVE_CONSTRAINT_CASES = {
+    "Q8": (
+        "Kafka Streams 或事务型生产者能不能让 Outbox",
+        'Kafka Streams 和事务型生产者可实现 Outbox 事件端到端恰好一次处理 [1][2]。  \n需在消费者使用 `read-committed` 隔离级别，并启用事务性生产者（`transactional.id` 配置）[1]。  \n若使用非事务性生产者或默认 `read_uncommitted`，将导致重复处理或丢失 [2]。  \n\n关键前提：必须启用事务性生产者（`transactional.id` 配置）且消费者使用 `read-committed` 隔离级别，否则无法保证端到端恰好一次 [1][2]。',
+        "不能。Kafka 的事务只覆盖到写入侧，端到端不保证恰好一次，"
+        "消费端仍需按业务键幂等 [1]。",
+        "把「端到端做不到 exactly once」反转成「可实现」（真实答错的一次生成）",
+    ),
+    "Q13": (
+        "批量消费的 Kafka Listener 能不能用",
+        "可以。批量监听器同样能用 @RetryableTopic 实现死信队列 [1]。",
+        '不能。`@RetryableTopic` 不支持批量监听器（batch listener）的死信队列功能 [1][2]。需使用 `DefaultErrorHandler` 配合 `DeadLetterPublishingRecoverer` 实现 [2]。  \n配置方式：  \n```java\n@Bean\npublic DefaultErrorHandler defaultErrorHandler() {\n    return new DefaultErrorHandler(\n        new DeadLetterPublishingRecoverer(kafkaTemplate)\n    );\n}\n```  \n关键前提：批量监听器的重试在原消费者线程内进行，无法解耦，存在阻塞风险 [2]。',
+        "把「不支持批量监听器」反转成「可以用」",
+    ),
+    "Q15": (
+        "用 Spring 的 @Transactional 把 Redis",
+        "能。用 @Transactional 把 GET 和 DECR 包在一个事务里就能解决超卖 [1]。",
+        '不能。Redis 事务（如 Spring Data Redis 的 `checkandset.lua` Lua 脚本）依赖 Redis 服务器层面的原子性，而 Spring 的 `@Transactional` 仅对 JDBC 或 JPA 等数据库操作提供事务控制，无法跨 Redis 命令实现读-写原子性 [1][2]。  \n\n正确做法是使用 Redis Lua 脚本将 `GET` 和 `DECR` 包装为单个原子操作 [2]。  \n若使用 Spring Data Redis，应配置 `valueOperations` 通过 `RedisTemplate` 执行 Lua 脚本，例如：  \n```java\nString lua = "if (redis.call(\'GET\', KEYS[1]) >= ARGV[1]) then return redis.call(\'DECRBY\', KEYS[1], ARGV[1]) else return 0 end";\nObject result = redisTemplate.execute(new DefaultRedisScript<>(lua, Long.class, "stock:product:123", "10"));\n```  \n关键前提：Redis 节点必须支持 Lua 脚本执行，且无网络延迟或重试机制干扰 [1][2]。  \n\n风险：若 Lua 脚本执行失败或被中断，可能造成库存不一致，需配合幂等和重试策略 [3][4]。',
+        "把「解决不了」反转成「就能解决超卖」",
+    ),
+}
+
+_NEGATIVE_CONSTRAINT_CASES = {**_R71_NEGATIVE_CONSTRAINT_CASES,
+                              **_R72_NEGATIVE_CONSTRAINT_CASES}
+
+
+@pytest.mark.parametrize("key", sorted(_NEGATIVE_CONSTRAINT_CASES))
 def test_r71_negative_constraint_catches_the_reversed_conclusion(key):
     """判别性：每题的负向约束必须命中它对应的反转结论。"""
-    prefix, inverted_answer, _real, why = _R71_NEGATIVE_CONSTRAINT_CASES[key]
+    prefix, inverted_answer, _real, why = _NEGATIVE_CONSTRAINT_CASES[key]
     spec = _spec(prefix)
     pats = spec.get("forbid_patterns", [])
     assert pats, f"{key} 应当已配负向约束"
     assert [p for p in pats if re.search(p, inverted_answer)], f"{key}（{why}）应被负向约束标出"
 
 
-@pytest.mark.parametrize("key", sorted(_R71_NEGATIVE_CONSTRAINT_CASES))
+@pytest.mark.parametrize("key", sorted(_NEGATIVE_CONSTRAINT_CASES))
 def test_r71_negative_constraint_spares_the_real_answer(key):
     """反向判别性：同一条约束不得命中这题真实跑出来的那次回答。"""
-    prefix, _inverted, real_answer, _why = _R71_NEGATIVE_CONSTRAINT_CASES[key]
+    prefix, _inverted, real_answer, _why = _NEGATIVE_CONSTRAINT_CASES[key]
     spec = _spec(prefix)
     hits = [p for p in spec.get("forbid_patterns", []) if re.search(p, real_answer)]
     assert not hits, f"{key} 的负向约束误伤了真实回答：{hits}"
