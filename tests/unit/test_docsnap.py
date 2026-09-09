@@ -664,7 +664,9 @@ def test_cr077_allow_missing_records_the_gap(tmp_path):
     r = run("save", "--allow-missing", "architecture.md 已按计划移除")
     assert r.returncode == 0, r.stderr
     latest = sorted(p.name for p in store.iterdir())[-1]
-    assert (store / latest / "MISSING.txt").read_text(encoding="utf-8").strip() == "architecture.md"
+    missing = (store / latest / "MISSING.txt").read_text(encoding="utf-8")
+    assert "- architecture.md" in missing
+    assert "architecture.md 已按计划移除" in missing, "CR-079：理由必须一起落盘"
 
 
 def test_cr077_check_flags_a_monitored_doc_not_covered_by_the_baseline(tmp_path):
@@ -717,6 +719,44 @@ def test_cr078_accept_leaves_no_half_written_snapshot(tmp_path):
                 if p.name.startswith(".partial-") and p.name != ".partial-20260101T000000Z__01__interrupted"], \
         "accept 结束后不该留下自己的临时目录"
     assert run("check").returncode == 0
+
+
+# ---- CR-079：--allow-missing 的理由必填 ----
+
+
+def test_cr079_allow_missing_without_a_reason_is_rejected(tmp_path):
+    """`--allow-missing` 是"我知道少了几份文档、照样建基线"的唯一出口。
+    空理由也能建成的话，事后只知道少了哪几份、不知道是有意移除还是某次
+    误删被顺手放行——与 `accept` 同一口径：理由必填。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    (repo / "architecture.md").unlink()
+    before = {p.name for p in store.iterdir()}
+    r = run("save", "--allow-missing")
+    assert r.returncode == 2, "空理由必须被拒绝"
+    assert "理由必填" in r.stdout + r.stderr
+    assert {p.name for p in store.iterdir()} == before, "被拒绝的那次不该留下快照"
+
+
+def test_cr079_plain_save_still_needs_no_reason(tmp_path):
+    """反向：普通的写前快照仍然可以不带说明——理由必填只针对
+    `--allow-missing` 这个明知有缺失还要建基线的动作，不是给日常操作
+    加负担。
+    """
+    _repo, _store, run = _mkrepo2(tmp_path)
+    assert run("save").returncode == 0
+
+
+def test_cr079_missing_txt_records_reason_time_and_files(tmp_path):
+    """存档要能独立回答"少了哪几份、为什么、什么时候"三个问题。"""
+    repo, store, run = _mkrepo2(tmp_path)
+    (repo / "architecture.md").unlink()
+    assert run("save", "--allow-missing", "架构文档已并入 scope.md").returncode == 0
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    text = (store / latest / "MISSING.txt").read_text(encoding="utf-8")
+    assert "理由: 架构文档已并入 scope.md" in text
+    assert "- architecture.md" in text
+    assert "缺失时间: " in text
 
 
 def test_real_collaboration_docs_are_all_covered(tmp_path):
