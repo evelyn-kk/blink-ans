@@ -178,6 +178,22 @@ cmd_save() {
     } >&2
     return 1
   fi
+  # CR-080：`--allow-missing` 的语义是"少了几份，但**仍然建一份基线**"。
+  # 如果一份都没采到，产出的目录 MANIFEST 为空、按 `_valid_snapshot` 必然
+  # 无效——它不是基线，只是一个会让下一次 check 失败关闭的垃圾目录。这种
+  # 情形直接拒绝，并**保留原来的基线不动**：原基线还能恢复文件，一份空
+  # 快照什么都恢复不了。
+  # （这个退化情形我在 R68 修演练时就写进注释了，却没有当场修——又一次
+  # "写下来代替修掉"，见 development-notes 2026-09-09 那条复盘。）
+  if [ ! -s "$dir/MANIFEST.tsv" ]; then
+    rm -rf "$tmpdir"
+    {
+      echo "一份受监控文档都没有采到，这样的快照必然无效，拒绝发布。"
+      [ -n "$missing" ] && { echo "缺失的是："; printf '%s' "$missing" | sed 's/^/  - /'; }
+      echo "原有基线保持不变——它至少还能用来恢复文件，一份空快照什么都恢复不了。"
+    } >&2
+    return 2
+  fi
   if [ -n "$missing" ]; then
     {
       echo "缺失时间: $stamp"
@@ -548,6 +564,18 @@ cmd_drill() {
   grep -q -- '- progress.md' "$tmp/store/$snap/MISSING.txt" || {
     echo "演练失败：MISSING.txt 里没有记录缺的是哪一份（CR-079）" >&2; return 1; }
   echo "   ✓ 空理由被拒（退出码 2），带理由时理由与缺失清单一起落盘"
+
+  echo "7.7) 全部受监控文档都缺时，--allow-missing 也必须拒绝（CR-080）"
+  mv "$tmp/repo/architecture.md" "$tmp/repo/architecture.md.moved"
+  snap="$(STORE="$tmp/store" _latest)"
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" \
+    cmd_save --allow-missing "演练：全都不在了" > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || { echo "演练失败：一份都没采到时仍然发布了空快照（CR-080）" >&2; return 1; }
+  [ "$(STORE="$tmp/store" _latest)" = "$snap" ] || {
+    echo "演练失败：被拒绝的那次动了原有基线（CR-080）" >&2; return 1; }
+  mv "$tmp/repo/architecture.md.moved" "$tmp/repo/architecture.md"
+  echo "   ✓ 退出码 2，原基线原封不动"
+
   mv "$doc.moved" "$doc"
 
   echo "8) 有意删减走 accept <文件> \"理由\"：只接受被点名的那一份"

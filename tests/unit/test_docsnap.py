@@ -759,6 +759,60 @@ def test_cr079_missing_txt_records_reason_time_and_files(tmp_path):
     assert "缺失时间: " in text
 
 
+# ---- CR-080：一份都没采到的"基线"不是基线 ----
+
+
+def test_pre_cr080_empty_snapshot_would_have_been_published():
+    """判别性基线：旧规则只看"有没有缺失 + 有没有给理由"，全缺时两者都
+    满足，于是照样发布——内联复现这个判定，确认它对"全缺"确实放行。
+    """
+    total_docs, missing_docs, allow_missing, reason = 2, 2, True, "全都不在了"
+    old_rule_publishes = allow_missing and bool(reason)
+    assert old_rule_publishes, "旧规则本应（错误地）发布一份 0 份文档的快照"
+    assert missing_docs == total_docs, "构造前提：这是全缺的情形"
+
+
+def test_cr080_all_docs_missing_is_refused_and_baseline_untouched(tmp_path):
+    """全缺时 `--allow-missing` 必须退出 2、不发布任何目录，并且**原基线
+    原封不动**——原基线至少还能恢复文件，一份空快照什么都恢复不了。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    before = {p.name for p in store.iterdir()}
+    (repo / "progress.md").unlink()
+    (repo / "architecture.md").unlink()
+
+    r = run("save", "--allow-missing", "两份都不在了")
+    assert r.returncode == 2, f"全缺时必须拒绝：\n{r.stdout}\n{r.stderr}"
+    assert "拒绝发布" in r.stdout + r.stderr
+    assert {p.name for p in store.iterdir()} == before, "被拒绝的那次不得改动快照库"
+    assert not [p for p in store.iterdir() if p.name.startswith(".partial-")], "不得留下临时目录"
+
+
+def test_cr080_boundary_one_surviving_doc_still_publishes(tmp_path):
+    """边界的另一侧：只要还剩一份文档能采到，`--allow-missing` 仍然应当
+    建出基线——拒绝的判据是"一份都没采到"，不是"有缺失"。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    (repo / "architecture.md").unlink()
+    assert run("save", "--allow-missing", "只剩 progress.md").returncode == 0
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    assert (store / latest / "progress.md").exists()
+    assert (store / latest / "MISSING.txt").exists()
+
+
+def test_cr080_refused_save_leaves_the_old_baseline_usable(tmp_path):
+    """被拒绝之后，原基线必须仍然能用来恢复——这正是"保留原基线"的意义。"""
+    repo, store, run = _mkrepo2(tmp_path)
+    original = (repo / "progress.md").read_text(encoding="utf-8")
+    latest_before = sorted(p.name for p in store.iterdir())[-1]
+    (repo / "progress.md").unlink()
+    (repo / "architecture.md").unlink()
+    run("save", "--allow-missing", "两份都不在了")
+
+    assert run("restore", latest_before, "progress.md").returncode == 0
+    assert (repo / "progress.md").read_text(encoding="utf-8") == original
+
+
 def test_real_collaboration_docs_are_all_covered(tmp_path):
     """`.gitignore` 里那几份没有 git 副本的协作文档，必须全部在 docsnap
     的默认清单里——漏掉哪一份，哪一份就还是裸奔。
