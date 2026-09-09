@@ -155,7 +155,7 @@ def test_cr069_deletion_masked_by_appends_is_flagged(tmp_path):
     doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
     r = run("check")
     assert r.returncode == 1, f"净增长 200 行也必须报出中间那 100 行的删除：\n{r.stdout}\n{r.stderr}"
-    assert "整块删除" in r.stdout + r.stderr
+    assert "净删" in r.stdout + r.stderr
 
 
 def test_cr069_small_in_place_edit_that_grows_is_still_clean(tmp_path):
@@ -190,9 +190,9 @@ def test_cr069_accept_requires_a_reason(tmp_path):
     """`accept` 是"有记录的基线重建"，不是"把判据关掉"：不给理由就拒绝。"""
     doc, _store, run = _mkrepo(tmp_path)
     doc.write_text("只剩一行\n", encoding="utf-8")
-    r = run("accept")
+    r = run("accept", "progress.md")
     assert r.returncode == 2
-    assert "理由必填" in r.stdout + r.stderr
+    assert "都必填" in r.stdout + r.stderr
     assert run("check").returncode == 1, "拒绝之后门禁必须仍然是红的"
 
 
@@ -203,7 +203,7 @@ def test_cr069_accept_records_reason_and_rebaselines(tmp_path):
             if not (400 <= i <= 499)]
     doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
     assert run("check").returncode == 1
-    r = run("accept", "删掉了 400-499 行那段过时记录，已人工确认")
+    r = run("accept", "progress.md", "删掉了 400-499 行那段过时记录，已人工确认")
     assert r.returncode == 0, r.stderr
     assert run("check").returncode == 0, "accept 之后同样的状态不应再报错"
     accepted = list(store.glob("*/ACCEPTED.txt"))
@@ -212,6 +212,139 @@ def test_cr069_accept_records_reason_and_rebaselines(tmp_path):
     # 新基线是"删减后"的内容：能被 restore 回来的必须是当前这份
     latest = sorted(p.name for p in store.iterdir())[-1]
     assert (store / latest / "progress.md").read_text(encoding="utf-8") == doc.read_text(encoding="utf-8")
+
+
+# ---- CR-070 / CR-071：accept 必须逐文件，hunk 净删不设阈值 ----
+#
+# codex R63 复审的两条：
+# - **CR-070（P1）**：`accept "理由"` 把九份文档的当前内容一起做成新基线，
+#   接受 A 的有意删减时 B 的意外截断会被静默洗白，事后也无从追溯。
+# - **CR-071（P2）**：`BLOCK_DELETE=10` 是另一条豁免——十处各净删 9 行、
+#   再追加足量内容，三条判据全部绕过。
+# 两条的共同点与 CR-069 一样：门禁在，却对某一类输入什么都不判。
+
+
+def _mkrepo2(tmp_path, names=("progress.md", "architecture.md"), lines=1000):
+    """两份文档的工作区，用来验证 accept 的作用域。"""
+    repo, store = tmp_path / "repo", tmp_path / "store"
+    repo.mkdir()
+    for n in names:
+        (repo / n).write_text(
+            "\n".join(f"{n} 第 {i} 行" for i in range(1, lines + 1)) + "\n", encoding="utf-8")
+    env = {
+        "DOCSNAP_ROOT": str(repo), "DOCSNAP_STORE": str(store),
+        "DOCSNAP_DOCS": " ".join(names), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+
+    def run(*args):
+        return subprocess.run([str(DOCSNAP), *args], capture_output=True, text=True, env=env, timeout=60)
+
+    run("save", "baseline")
+    return repo, store, run
+
+
+def test_cr070_accepting_one_file_does_not_launder_another(tmp_path):
+    """接受 A 的有意删减之后，B 的未接受截断必须仍让 check 非零。"""
+    repo, _store, run = _mkrepo2(tmp_path)
+    a, b = repo / "progress.md", repo / "architecture.md"
+    a.write_text("\n".join(
+        l for i, l in enumerate(a.read_text(encoding="utf-8").splitlines(), 1)
+        if not (300 <= i <= 399)) + "\n", encoding="utf-8")          # A：有意删 100 行
+    b.write_text("\n".join(b.read_text(encoding="utf-8").splitlines()[:100]) + "\n",
+                 encoding="utf-8")                                     # B：意外截断
+    assert run("check").returncode == 1
+
+    r = run("accept", "progress.md", "删掉了 300-399 那段过时记录，已人工确认")
+    assert r.returncode == 0, r.stderr
+    after = run("check")
+    assert after.returncode == 1, "接受 A 之后，B 的截断必须仍然报红"
+    assert "architecture.md" in after.stdout + after.stderr
+    assert "progress.md" not in [
+        line.split()[1] for line in (after.stdout + after.stderr).splitlines()
+        if line.strip().startswith("✗") and len(line.split()) > 1
+    ], "被接受的 A 不应再报红"
+
+
+def test_cr070_unaccepted_file_keeps_its_old_baseline(tmp_path):
+    """而且 B 在新基线里必须仍是**截断前**的版本——否则事故内容就没了，
+    报红也救不回来。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    a, b = repo / "progress.md", repo / "architecture.md"
+    before_b = b.read_text(encoding="utf-8")
+    a.write_text("\n".join(
+        l for i, l in enumerate(a.read_text(encoding="utf-8").splitlines(), 1)
+        if not (300 <= i <= 399)) + "\n", encoding="utf-8")
+    b.write_text("\n".join(b.read_text(encoding="utf-8").splitlines()[:100]) + "\n",
+                 encoding="utf-8")
+    run("accept", "progress.md", "有意删减")
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    assert (store / latest / "architecture.md").read_text(encoding="utf-8") == before_b
+    assert (store / latest / "progress.md").read_text(encoding="utf-8") == a.read_text(encoding="utf-8")
+
+
+def test_cr070_accept_records_which_file_and_what_was_deleted(tmp_path):
+    """存档必须能追溯"接受的是哪一份、删掉的是什么"，否则橡皮图章盖完
+    什么痕迹都不留。
+    """
+    repo, store, run = _mkrepo2(tmp_path)
+    a = repo / "progress.md"
+    a.write_text("\n".join(
+        l for i, l in enumerate(a.read_text(encoding="utf-8").splitlines(), 1)
+        if not (300 <= i <= 399)) + "\n", encoding="utf-8")
+    run("accept", "progress.md", "删掉了 300-399 那段过时记录")
+    latest = sorted(p.name for p in store.iterdir())[-1]
+    text = (store / latest / "ACCEPTED.txt").read_text(encoding="utf-8")
+    assert "接受的文档: progress.md" in text
+    assert "删掉了 300-399 那段过时记录" in text
+    assert "-progress.md 第 300 行" in text, "存档里要能看到被接受掉的具体行"
+
+
+def test_cr070_accept_rejects_a_file_outside_the_baseline(tmp_path):
+    _repo, _store, run = _mkrepo2(tmp_path)
+    r = run("accept", "不存在.md", "理由")
+    assert r.returncode == 2
+    assert run("check").returncode == 0
+
+
+def test_pre_cr071_block_threshold_would_have_passed_scattered_deletions():
+    """判别性基线：内联复现 `BLOCK_DELETE=10` 的判定——十处各净删 9 行时
+    每个 hunk 都 < 10，旧规则判"正常"。
+    """
+    per_hunk_net_deletes = [9] * 10
+    old_rule_flags = any(d >= 10 for d in per_hunk_net_deletes)
+    assert not old_rule_flags, "旧阈值本应（错误地）放过十处各 9 行的删除"
+
+
+def test_cr071_scattered_small_deletions_masked_by_appends_are_flagged(tmp_path):
+    """新规则：十处各删 9 行 + 末尾追加 300 行（净 +210 行、字节也增长），
+    必须非零。
+    """
+    doc, _store, run = _mkrepo(tmp_path, lines=2000)
+    dropped = set()
+    for k in range(10):
+        lo = 200 + k * 100
+        dropped.update(range(lo, lo + 9))
+    kept = [l for i, l in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1)
+            if i not in dropped]
+    kept += [f"本轮新增第 {i} 行" for i in range(1, 301)]
+    doc.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    assert len(kept) > 2000, "构造前提：净行数必须是增长的，否则测的不是这个形状"
+    r = run("check")
+    assert r.returncode == 1, f"分散的小删除必须被判非零：\n{r.stdout}\n{r.stderr}"
+    assert "净删" in r.stdout + r.stderr
+
+
+def test_cr071_equal_size_rewrite_is_still_clean(tmp_path):
+    """反向判别性：同一处删 1 行加 1 行（净删 0）且内容变长，仍应是 0——
+    去掉阈值不能把普通的原地改写变成红灯。
+    """
+    doc, _store, run = _mkrepo(tmp_path)
+    lines = doc.read_text(encoding="utf-8").splitlines()
+    lines[500] = lines[500] + "：这里补一句说明"
+    doc.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    r = run("check")
+    assert r.returncode == 0, f"原地等量改写（变长）不应报错：\n{r.stdout}\n{r.stderr}"
 
 
 def test_real_collaboration_docs_are_all_covered(tmp_path):

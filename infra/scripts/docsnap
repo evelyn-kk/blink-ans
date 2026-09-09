@@ -11,7 +11,7 @@
 #   docsnap save [说明]     写前快照：把 9 份文档连同行数/字节数/sha256 存一份
 #   docsnap list            列出现有快照
 #   docsnap check           把当前文档与最近一次快照比对，**任何删除**都报错退出
-#   docsnap accept "理由"   有意删减：记录理由并重建基线（理由必填）
+#   docsnap accept <文件> "理由"  有意删减：**逐文件**记录理由并重建基线
 #   docsnap changes [文件]  相对最近快照的完整 diff——先看清楚删了什么
 #   docsnap diff [文件]     显示当前文档与最近快照的行数/字节数差
 #   docsnap restore <快照> [文件]   从指定快照恢复（不带文件名则恢复全部）
@@ -43,14 +43,16 @@ KEEP_DAYS=30
 #   1) **任何**行数或字节数比最近快照少 -> 非零。不再有"少一点点算正常"
 #      的阈值——CR-069 复现过 1000 行文档中部丢 100 行（10%）会被旧的
 #      200 行/20% 阈值放过，而那 100 行完全可能正是一段基准或风险记录。
-#   2) 即使净行数没减少，只要 diff 里存在**一整块被删掉**（某个 hunk 删
-#      的行比加的行多 BLOCK_DELETE 行以上）也判非零——否则"中间删 100 行、
-#      末尾追加 150 行"这种净增长的删除会从计数比较里溜过去。
+#   2) 即使净行数没减少，只要 diff 里**任何一个 hunk 净删 >0 行**（删的
+#      行多于加的行）也判非零——否则"中间删 100 行、末尾追加 150 行"这种
+#      净增长的删除会从计数比较里溜过去。CR-071：这里原来卡在"净删 ≥10
+#      行"，于是"十处各净删 9 行 + 末尾追加"能同时绕过三条判据；阈值本身
+#      就是豁免，现在没有阈值。同一 hunk 里等量或变长的普通改写（删 1 加 1、
+#      删 1 加 2）净删为 0，仍然是 0，不会把正常编辑拦下来。
 #   有意删减走 `docsnap accept "理由"`：它记录理由并重建基线，是一个
 #   显式动作，不是把判据调松。
 # 这两条之外仍然保留一档更醒目的措辞（BIG_*），只影响提示文字、不影响
 # 退出码，方便人一眼区分"顺手删了一段"和"半个文件没了"。
-BLOCK_DELETE=10
 BIG_LINES=200
 BIG_RATIO=20   # 百分比
 
@@ -117,7 +119,7 @@ cmd_list() {
 # 某个文件相对快照的删除情况：输出 "净行差 净字节差 最大块删除 总删行 总加行"
 _delta() {  # <快照文件> <当前文件>
   local snap_f="$1" cur_f="$2"
-  diff -u "$snap_f" "$cur_f" 2>/dev/null | awk '
+  { diff -u "$snap_f" "$cur_f" 2>/dev/null || true; } | awk '
     /^@@/ { if (del - add > worst) worst = del - add; del = 0; add = 0; next }
     /^---/ || /^\+\+\+/ { next }
     /^-/ { del++; tdel++; next }
@@ -151,7 +153,7 @@ cmd_check() {
     set -- $(_delta "$dir/$name" "$ROOT/$name")
     worst="${1:-0}"; tdel="${2:-0}"; tadd="${3:-0}"
 
-    if [ "$line_drop" -gt 0 ] || [ "$byte_drop" -gt 0 ] || [ "$worst" -ge "$BLOCK_DELETE" ]; then
+    if [ "$line_drop" -gt 0 ] || [ "$byte_drop" -gt 0 ] || [ "$worst" -gt 0 ]; then
       ratio=0; [ "$lines" -gt 0 ] && [ "$line_drop" -gt 0 ] && ratio=$(( line_drop * 100 / lines ))
       if [ "$line_drop" -ge "$BIG_LINES" ] || { [ "$ratio" -ge "$BIG_RATIO" ] && [ "$line_drop" -gt 0 ]; }; then
         label="疑似大段截断"
@@ -160,7 +162,7 @@ cmd_check() {
       elif [ "$byte_drop" -gt 0 ]; then
         label="行数没少但内容变短"
       else
-        label="净行数没减少，但有整块删除"
+        label="净行数没减少，但有 hunk 净删了行"
       fi
       echo "  ✗ $name ${label}：$lines -> $now_lines 行（$bytes -> $now_bytes 字节）；" \
            "diff 删 $tdel 行 / 加 $tadd 行，单块最多净删 $worst 行" >&2
@@ -174,39 +176,70 @@ cmd_check() {
       echo ""
       echo "有文档发生了删除。两条路，**都要人先看一眼**："
       echo "  1) 不是有意的  -> docsnap restore $latest <文件名>   从快照恢复"
-      echo "  2) 是有意删的  -> docsnap accept \"删了什么、为什么\"   记录理由并重建基线"
+      echo "  2) 是有意删的  -> docsnap accept <文件名> \"删了什么、为什么\"（逐文件）"
       echo "看清楚删了什么：docsnap changes <文件名>"
     } >&2
   fi
   return "$rc"
 }
 
-# 有意删减的显式接受：必须给理由，落盘存档，并把当前状态设为新基线。
+# 有意删减的显式接受：**必须点名是哪一份文档**，必须给理由。
+# CR-070：原来的 `accept "理由"` 直接把九份文档的当前内容一起做成新基线——
+# 接受 A 的有意删减时，B 的意外截断会被一并洗白，而且事后无从追溯。现在
+# 新基线里**只有被点名的那一份**取当前内容，其余全部沿用上一份基线，
+# 因此别的文档如果有未被接受的删除，下一次 check 照样报红。
 cmd_accept() {
-  local reason="${1:-}" latest dir name lines bytes sha now_lines tdel tadd worst
-  if [ -z "$reason" ]; then
-    echo "用法: docsnap accept \"删了什么、为什么\"（理由必填——这是一次" >&2
-    echo "有记录的基线重建，不是把判据调松）" >&2
+  local file="${1:-}" reason="${2:-}" latest dir newdir name lines bytes sha seq stamp
+  if [ -z "$file" ] || [ -z "$reason" ]; then
+    echo "用法: docsnap accept <文件名> \"删了什么、为什么\"" >&2
+    echo "  文件名与理由都必填——这是一次有记录的、**逐文件**的基线重建，" >&2
+    echo "  不是把判据调松，也不能顺手把别的文档的改动一起洗白。" >&2
     return 2
   fi
   latest="$(_latest)" || true
-  if [ -n "${latest:-}" ]; then
-    dir="$STORE/$latest"
-    echo "相对基线 $latest 的删除情况："
-    while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
-      [ -z "${name:-}" ] && continue
-      [ -f "$ROOT/$name" ] || continue
-      [ "$(_sha "$ROOT/$name")" = "$sha" ] && continue
-      now_lines=$(wc -l < "$ROOT/$name" | tr -d ' ')
-      set -- $(_delta "$dir/$name" "$ROOT/$name")
-      worst="${1:-0}"; tdel="${2:-0}"; tadd="${3:-0}"
-      printf '  %-24s %s -> %s 行；删 %s 行 / 加 %s 行，单块最多净删 %s 行\n' \
-        "$name" "$lines" "$now_lines" "$tdel" "$tadd" "$worst"
-    done < "$dir/MANIFEST.tsv"
+  if [ -z "${latest:-}" ]; then
+    echo "还没有基线快照，先跑 docsnap save" >&2; return 2
   fi
-  cmd_save "accept"
-  printf '%s\n' "$reason" > "$STORE/$(_latest)/ACCEPTED.txt"
-  echo "已记录接受理由并重建基线：$(_latest)"
+  dir="$STORE/$latest"
+  if ! grep -q "^${file}	" "$dir/MANIFEST.tsv" 2>/dev/null; then
+    echo "基线快照里没有这份文档: $file" >&2; return 2
+  fi
+  [ -f "$ROOT/$file" ] || { echo "当前工作区没有这份文档: $file" >&2; return 2; }
+
+  echo "接受 $file 的改动。相对基线 $latest 被删掉的行："
+  # `set -o pipefail` 下 diff 的"文件不同"退出码 1 会让整条管道非零，
+  # 这里是有意展示差异，不是错误——显式吞掉。
+  { diff -u "$dir/$file" "$ROOT/$file" 2>/dev/null || true; } \
+    | awk '/^---/ || /^\+\+\+/ {next} /^-/ {print "  " $0}' | head -40
+  echo "（以上最多显示 40 行；完整差异用 docsnap changes ${file}）"
+
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  seq="$(ls -1 "$STORE" 2>/dev/null | grep -c "^${stamp}__" || true)"
+  seq="$(printf '%02d' $(( seq + 1 )))"
+  newdir="$STORE/${stamp}__${seq}__accept-$(echo "$file" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-24)"
+  mkdir -p "$newdir"
+  : > "$newdir/MANIFEST.tsv"
+  # 被点名的文件取**当前**内容；其余一律沿用上一份基线的内容。
+  while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
+    [ -z "${name:-}" ] && continue
+    if [ "$name" = "$file" ]; then
+      cp "$ROOT/$name" "$newdir/$name"
+    else
+      cp "$dir/$name" "$newdir/$name"
+    fi
+    _manifest_line "$name" "$newdir/$name" >> "$newdir/MANIFEST.tsv"
+  done < "$dir/MANIFEST.tsv"
+
+  {
+    echo "接受的文档: $file"
+    echo "理由: $reason"
+    echo "接受时间: $stamp"
+    echo "上一基线: $latest"
+    echo "被接受掉的删除行（最多 40 行）:"
+    { diff -u "$dir/$file" "$ROOT/$file" 2>/dev/null || true; } \
+      | awk '/^---/ || /^\+\+\+/ {next} /^-/ {print}' | head -40
+  } > "$newdir/ACCEPTED.txt"
+  echo "已重建基线：$(basename "$newdir")（只有 $file 取当前内容，其余沿用上一份基线）"
 }
 
 # 看清楚到底删了什么：直接给出相对最近快照的 diff。
@@ -296,22 +329,45 @@ cmd_drill() {
   [ "$rc" -eq 1 ] || { echo "演练失败：净增长但中间被删 100 行，没有被判非零" >&2; return 1; }
   echo "   ✓ check 退出码 1（净 +200 行，仍然报出整块删除）"
 
-  echo "7) 有意删减走 accept：记录理由并重建基线，之后 check 归零"
-  ROOT="$tmp/repo" STORE="$tmp/store" cmd_accept "演练：确认删掉的是过时段落" > /dev/null
+  echo "7) 分散的小删除（十处各净删 9 行）+ 追加，同样必须被判非零"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
+  awk 'BEGIN{for(i=0;i<10;i++){lo=200+i*100; hi=lo+8; L[lo]=hi}}
+       { drop=0; for (lo in L) if (NR>=lo && NR<=L[lo]) drop=1; if (!drop) print }' \
+      "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"
+  seq 1 300 | sed 's/^/本轮新增第 & 行/' >> "$doc"
   rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || { echo "演练失败：accept 之后 check 应该归零" >&2; return 1; }
+  [ "$rc" -eq 1 ] || { echo "演练失败：十处各删 9 行 + 追加没有被判非零（CR-071）" >&2; return 1; }
+  echo "   ✓ check 退出码 1（净 +210 行，仍然报出每处 9 行的删除）"
+
+  echo "8) 有意删减走 accept <文件> \"理由\"：只接受被点名的那一份"
+  # 再造一份"意外被截断"的文档，验证接受 A 不会把 B 一起洗白（CR-070）
+  printf '第 %s 行\n' $(seq 1 400) > "$tmp/repo/architecture.md"
+  export DOCSNAP_DOCS="progress.md architecture.md"
+  ROOT="$tmp/repo" STORE="$tmp/store" DOCS="progress.md architecture.md" cmd_save "两份" > /dev/null
+  snap="$(STORE="$tmp/store" _latest)"
+  awk 'NR<300 || NR>399' "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"       # A：有意删
+  head -100 "$tmp/repo/architecture.md" > "$tmp/x" && mv "$tmp/x" "$tmp/repo/architecture.md"  # B：意外截断
+  ROOT="$tmp/repo" STORE="$tmp/store" DOCS="progress.md architecture.md" \
+    cmd_accept progress.md "演练：确认删掉的是过时段落" > /dev/null
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" DOCS="progress.md architecture.md" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：接受 A 之后，B 的意外截断被一起洗白了（CR-070）" >&2; return 1; }
+  if ! diff -q "$tmp/store/$snap/architecture.md" \
+       "$tmp/store/$(STORE="$tmp/store" _latest)/architecture.md" > /dev/null; then
+    echo "演练失败：未被接受的 B 在新基线里没有沿用旧版本（CR-070）" >&2; return 1
+  fi
   [ -f "$tmp/store/$(STORE="$tmp/store" _latest)/ACCEPTED.txt" ] || {
     echo "演练失败：accept 没有落盘理由" >&2; return 1; }
-  echo "   ✓ accept 之后 check 退出码 0，理由已存档"
+  echo "   ✓ 只有 progress.md 被接受；architecture.md 的截断仍报红、旧版本仍在基线里"
 
-  echo "演练通过：截断、中段删除、被追加掩盖的删除都拦得住，恢复与显式接受都可用。"
+  echo "演练通过：截断、中段删除、被追加掩盖的删除、分散删除都拦得住；"
+  echo "         恢复可用，accept 逐文件生效且不会顺手洗白别的文档。"
 }
 
 case "${1:-}" in
   save)    shift; cmd_save "${1:-}" ;;
   list)    cmd_list ;;
   check)   cmd_check ;;
-  accept)  shift; cmd_accept "${1:-}" ;;
+  accept)  shift; cmd_accept "${1:-}" "${2:-}" ;;
   changes) shift; cmd_changes "${1:-}" ;;
   diff)    shift; cmd_diff "${1:-}" ;;
   restore) shift; cmd_restore "${1:-}" "${2:-}" ;;
