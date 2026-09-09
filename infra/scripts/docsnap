@@ -10,7 +10,9 @@
 # 用法:
 #   docsnap save [说明]     写前快照：把 9 份文档连同行数/字节数/sha256 存一份
 #   docsnap list            列出现有快照
-#   docsnap check           把当前文档与最近一次快照比对，异常缩水就报错退出
+#   docsnap check           把当前文档与最近一次快照比对，**任何删除**都报错退出
+#   docsnap accept "理由"   有意删减：记录理由并重建基线（理由必填）
+#   docsnap changes [文件]  相对最近快照的完整 diff——先看清楚删了什么
 #   docsnap diff [文件]     显示当前文档与最近快照的行数/字节数差
 #   docsnap restore <快照> [文件]   从指定快照恢复（不带文件名则恢复全部）
 #   docsnap drill           自检演练：在临时目录里真实跑一遍 保存→破坏→恢复
@@ -37,10 +39,20 @@ DOCS="${DOCSNAP_DOCS:-$DEFAULT_DOCS}"
 KEEP_MIN=20
 KEEP_DAYS=30
 
-# check 的告警阈值：任何一份文档比最近快照少这么多行（或这么大比例），
-# 就当作可疑缩水报错。2026-09-08 那次是 2140 -> 561 行，任一条都会触发。
-SHRINK_LINES=200
-SHRINK_RATIO=20   # 百分比
+# check 的判定（CR-069 后收紧）：
+#   1) **任何**行数或字节数比最近快照少 -> 非零。不再有"少一点点算正常"
+#      的阈值——CR-069 复现过 1000 行文档中部丢 100 行（10%）会被旧的
+#      200 行/20% 阈值放过，而那 100 行完全可能正是一段基准或风险记录。
+#   2) 即使净行数没减少，只要 diff 里存在**一整块被删掉**（某个 hunk 删
+#      的行比加的行多 BLOCK_DELETE 行以上）也判非零——否则"中间删 100 行、
+#      末尾追加 150 行"这种净增长的删除会从计数比较里溜过去。
+#   有意删减走 `docsnap accept "理由"`：它记录理由并重建基线，是一个
+#   显式动作，不是把判据调松。
+# 这两条之外仍然保留一档更醒目的措辞（BIG_*），只影响提示文字、不影响
+# 退出码，方便人一眼区分"顺手删了一段"和"半个文件没了"。
+BLOCK_DELETE=10
+BIG_LINES=200
+BIG_RATIO=20   # 百分比
 
 _sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 
@@ -70,9 +82,15 @@ EOF
 }
 
 cmd_save() {
-  local reason="${1:-}" stamp dir f
+  local reason="${1:-}" stamp dir f seq
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  dir="$STORE/$stamp"
+  # 同一秒里可能存一份以上（accept 紧接着 save）。加两位序号，并且序号
+  # 放在说明之前——目录名的字典序必须与创建顺序一致，否则 `_latest` 会
+  # 挑错基线。这条是实测踩出来的：`__accept-` 字典序排在 `__t-` 前面，
+  # accept 之后 check 仍拿旧基线比对，看起来像"接受没生效"。
+  seq="$(ls -1 "$STORE" 2>/dev/null | grep -c "^${stamp}__" || true)"
+  seq="$(printf '%02d' $(( seq + 1 )))"
+  dir="$STORE/${stamp}__${seq}"
   [ -n "$reason" ] && dir="${dir}__$(echo "$reason" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-40)"
   mkdir -p "$dir"
   : > "$dir/MANIFEST.tsv"
@@ -96,8 +114,21 @@ cmd_list() {
   done
 }
 
+# 某个文件相对快照的删除情况：输出 "净行差 净字节差 最大块删除 总删行 总加行"
+_delta() {  # <快照文件> <当前文件>
+  local snap_f="$1" cur_f="$2"
+  diff -u "$snap_f" "$cur_f" 2>/dev/null | awk '
+    /^@@/ { if (del - add > worst) worst = del - add; del = 0; add = 0; next }
+    /^---/ || /^\+\+\+/ { next }
+    /^-/ { del++; tdel++; next }
+    /^\+/ { add++; tadd++; next }
+    END { if (del - add > worst) worst = del - add; print worst+0, tdel+0, tadd+0 }
+  '
+}
+
 cmd_check() {
-  local latest dir rc=0 name lines bytes sha now_lines now_bytes now_sha drop ratio
+  local latest dir rc=0 name lines bytes sha now_lines now_bytes now_sha
+  local line_drop byte_drop worst tdel tadd ratio label
   latest="$(_latest)" || true
   if [ -z "${latest:-}" ]; then
     echo "没有可比对的快照——先跑一次 docsnap save" >&2
@@ -114,22 +145,84 @@ cmd_check() {
     now_bytes=$(wc -c < "$ROOT/$name" | tr -d ' ')
     now_sha="$(_sha "$ROOT/$name")"
     if [ "$now_sha" = "$sha" ]; then echo "  = $name 未改动（$now_lines 行）"; continue; fi
-    drop=$(( lines - now_lines ))
-    ratio=0; [ "$lines" -gt 0 ] && ratio=$(( drop * 100 / lines ))
-    if [ "$drop" -ge "$SHRINK_LINES" ] || [ "$ratio" -ge "$SHRINK_RATIO" ]; then
-      echo "  ✗ $name 疑似异常缩水：$lines -> $now_lines 行（少 $drop 行，$ratio%）" >&2
+
+    line_drop=$(( lines - now_lines ))
+    byte_drop=$(( bytes - now_bytes ))
+    set -- $(_delta "$dir/$name" "$ROOT/$name")
+    worst="${1:-0}"; tdel="${2:-0}"; tadd="${3:-0}"
+
+    if [ "$line_drop" -gt 0 ] || [ "$byte_drop" -gt 0 ] || [ "$worst" -ge "$BLOCK_DELETE" ]; then
+      ratio=0; [ "$lines" -gt 0 ] && [ "$line_drop" -gt 0 ] && ratio=$(( line_drop * 100 / lines ))
+      if [ "$line_drop" -ge "$BIG_LINES" ] || { [ "$ratio" -ge "$BIG_RATIO" ] && [ "$line_drop" -gt 0 ]; }; then
+        label="疑似大段截断"
+      elif [ "$line_drop" -gt 0 ]; then
+        label="行数减少"
+      elif [ "$byte_drop" -gt 0 ]; then
+        label="行数没少但内容变短"
+      else
+        label="净行数没减少，但有整块删除"
+      fi
+      echo "  ✗ $name ${label}：$lines -> $now_lines 行（$bytes -> $now_bytes 字节）；" \
+           "diff 删 $tdel 行 / 加 $tadd 行，单块最多净删 $worst 行" >&2
       rc=1
     else
-      echo "  + $name $lines -> $now_lines 行（$bytes -> $now_bytes 字节）"
+      echo "  + $name $lines -> $now_lines 行（$bytes -> $now_bytes 字节）；删 $tdel 行 / 加 $tadd 行"
     fi
   done < "$dir/MANIFEST.tsv"
   if [ "$rc" -ne 0 ]; then
-    echo "" >&2
-    echo "有文档异常缩水。确认是有意删减就重新 docsnap save；不是的话用" >&2
-    echo "  docsnap restore $latest <文件名>" >&2
-    echo "从快照恢复。" >&2
+    {
+      echo ""
+      echo "有文档发生了删除。两条路，**都要人先看一眼**："
+      echo "  1) 不是有意的  -> docsnap restore $latest <文件名>   从快照恢复"
+      echo "  2) 是有意删的  -> docsnap accept \"删了什么、为什么\"   记录理由并重建基线"
+      echo "看清楚删了什么：docsnap changes <文件名>"
+    } >&2
   fi
   return "$rc"
+}
+
+# 有意删减的显式接受：必须给理由，落盘存档，并把当前状态设为新基线。
+cmd_accept() {
+  local reason="${1:-}" latest dir name lines bytes sha now_lines tdel tadd worst
+  if [ -z "$reason" ]; then
+    echo "用法: docsnap accept \"删了什么、为什么\"（理由必填——这是一次" >&2
+    echo "有记录的基线重建，不是把判据调松）" >&2
+    return 2
+  fi
+  latest="$(_latest)" || true
+  if [ -n "${latest:-}" ]; then
+    dir="$STORE/$latest"
+    echo "相对基线 $latest 的删除情况："
+    while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
+      [ -z "${name:-}" ] && continue
+      [ -f "$ROOT/$name" ] || continue
+      [ "$(_sha "$ROOT/$name")" = "$sha" ] && continue
+      now_lines=$(wc -l < "$ROOT/$name" | tr -d ' ')
+      set -- $(_delta "$dir/$name" "$ROOT/$name")
+      worst="${1:-0}"; tdel="${2:-0}"; tadd="${3:-0}"
+      printf '  %-24s %s -> %s 行；删 %s 行 / 加 %s 行，单块最多净删 %s 行\n' \
+        "$name" "$lines" "$now_lines" "$tdel" "$tadd" "$worst"
+    done < "$dir/MANIFEST.tsv"
+  fi
+  cmd_save "accept"
+  printf '%s\n' "$reason" > "$STORE/$(_latest)/ACCEPTED.txt"
+  echo "已记录接受理由并重建基线：$(_latest)"
+}
+
+# 看清楚到底删了什么：直接给出相对最近快照的 diff。
+cmd_changes() {
+  local latest dir name lines bytes sha
+  latest="$(_latest)" || true
+  [ -n "${latest:-}" ] || { echo "还没有快照" >&2; return 2; }
+  dir="$STORE/$latest"
+  while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
+    [ -z "${name:-}" ] && continue
+    if [ -n "${1:-}" ] && [ "$1" != "$name" ]; then continue; fi
+    [ -f "$ROOT/$name" ] || continue
+    [ "$(_sha "$ROOT/$name")" = "$sha" ] && continue
+    echo "=== ${name}（相对快照 ${latest}）"
+    diff -u "$dir/$name" "$ROOT/$name" || true
+  done < "$dir/MANIFEST.tsv"
 }
 
 cmd_restore() {
@@ -186,13 +279,40 @@ cmd_drill() {
   fi
   [ "$(wc -l < "$doc" | tr -d ' ')" = "2000" ] || { echo "演练失败：恢复后行数不对" >&2; return 1; }
   echo "   ✓ 2000 行原样找回，sha256 与快照一致"
-  echo "演练通过：这套快照确实能把被截断的文档找回来。"
+
+  # CR-069：只演练"大截断"不够——审查方复现的是 1000 行里中部丢 100 行
+  # （10%），旧阈值会放过。这里把两种更隐蔽的形状也纳入演练。
+  echo "5) 中段小删除（2000 行里删中间 100 行，5%）也必须被判非零"
+  awk 'NR<900 || NR>999' "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：中段删 100 行没有被判非零" >&2; return 1; }
+  echo "   ✓ check 退出码 1"
+
+  echo "6) 被追加掩盖的删除（净行数增加）同样必须被判非零"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
+  awk 'NR<900 || NR>999' "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"
+  seq 1 300 | sed 's/^/本轮新增第 & 行/' >> "$doc"
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：净增长但中间被删 100 行，没有被判非零" >&2; return 1; }
+  echo "   ✓ check 退出码 1（净 +200 行，仍然报出整块删除）"
+
+  echo "7) 有意删减走 accept：记录理由并重建基线，之后 check 归零"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_accept "演练：确认删掉的是过时段落" > /dev/null
+  rc=0; ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || { echo "演练失败：accept 之后 check 应该归零" >&2; return 1; }
+  [ -f "$tmp/store/$(STORE="$tmp/store" _latest)/ACCEPTED.txt" ] || {
+    echo "演练失败：accept 没有落盘理由" >&2; return 1; }
+  echo "   ✓ accept 之后 check 退出码 0，理由已存档"
+
+  echo "演练通过：截断、中段删除、被追加掩盖的删除都拦得住，恢复与显式接受都可用。"
 }
 
 case "${1:-}" in
   save)    shift; cmd_save "${1:-}" ;;
   list)    cmd_list ;;
   check)   cmd_check ;;
+  accept)  shift; cmd_accept "${1:-}" ;;
+  changes) shift; cmd_changes "${1:-}" ;;
   diff)    shift; cmd_diff "${1:-}" ;;
   restore) shift; cmd_restore "${1:-}" "${2:-}" ;;
   drill)   cmd_drill ;;
