@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# 未版本控制的协作文档的写前快照 / 完整性检查 / 恢复（CR-068）。
+#
+# 为什么需要它：`AGENTS.md`、`progress.md` 等 9 份协作文档全部在
+# `.gitignore` 里（AGENTS.md §7 的既定安排），没有 git 副本。2026-09-08
+# 一次批量替换脚本误用开放式切片，把 `progress.md` 从中部截断到文件末尾，
+# 约 1400 行历史记录不可恢复——当时既没有快照，也没有任何"文件突然
+# 少了一大半"的检测。CR-068 要求把"操作约束"升级成真正的恢复能力。
+#
+# 用法:
+#   docsnap save [说明]     写前快照：把 9 份文档连同行数/字节数/sha256 存一份
+#   docsnap list            列出现有快照
+#   docsnap check           把当前文档与最近一次快照比对，异常缩水就报错退出
+#   docsnap diff [文件]     显示当前文档与最近快照的行数/字节数差
+#   docsnap restore <快照> [文件]   从指定快照恢复（不带文件名则恢复全部）
+#   docsnap drill           自检演练：在临时目录里真实跑一遍 保存→破坏→恢复
+#
+# 环境变量（仅供测试/演练覆盖，正常使用不需要设置）:
+#   DOCSNAP_ROOT   文档所在目录，默认仓库根
+#   DOCSNAP_STORE  快照存放目录，默认 $DOCSNAP_ROOT/data/doc-snapshots
+#   DOCSNAP_DOCS   要快照的文件名清单（空格分隔），默认下面的 DEFAULT_DOCS
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="${DOCSNAP_ROOT:-$REPO_ROOT}"
+# 快照放在 data/ 下：这个目录本来就在 .gitignore 里（`/data/`），因此
+# 不需要动用户的 .gitignore 就能保证快照不会被提交。**代价**：谁要是
+# 为了重建索引整个删掉 data/，快照会一并没了——所以 KEEP_MIN 保得住的
+# 只是"没人删目录"这个前提下的历史。
+STORE="${DOCSNAP_STORE:-$ROOT/data/doc-snapshots}"
+
+DEFAULT_DOCS="AGENTS.md scope.md architecture.md development.md development-notes.md plan.md progress.md code-review.md wait-for-review.md"
+DOCS="${DOCSNAP_DOCS:-$DEFAULT_DOCS}"
+
+# 保留策略：至少留最近 KEEP_MIN 份；超过 KEEP_MIN 的部分里，超过
+# KEEP_DAYS 天的删掉。两条一起保证"最近的一定在"且"不会无限增长"。
+KEEP_MIN=20
+KEEP_DAYS=30
+
+# check 的告警阈值：任何一份文档比最近快照少这么多行（或这么大比例），
+# 就当作可疑缩水报错。2026-09-08 那次是 2140 -> 561 行，任一条都会触发。
+SHRINK_LINES=200
+SHRINK_RATIO=20   # 百分比
+
+_sha() { shasum -a 256 "$1" | awk '{print $1}'; }
+
+_manifest_line() {  # <文件名> <路径>
+  printf '%s\t%s\t%s\t%s\n' "$1" "$(wc -l < "$2" | tr -d ' ')" "$(wc -c < "$2" | tr -d ' ')" "$(_sha "$2")"
+}
+
+_latest() { ls -1 "$STORE" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z' | sort | tail -1; }
+
+_prune() {
+  # 不用 mapfile：macOS 自带的是 bash 3.2，没有这个内建命令。
+  local all count keep_from i=0 name age_days now
+  all="$(ls -1 "$STORE" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z' | sort || true)"
+  [ -z "$all" ] && return 0
+  count="$(printf '%s\n' "$all" | wc -l | tr -d ' ')"
+  [ "$count" -le "$KEEP_MIN" ] && return 0
+  keep_from=$(( count - KEEP_MIN ))   # 前 keep_from 个是"超出保底数量"的老快照
+  now="$(date -u +%s)"
+  while IFS= read -r name; do
+    i=$(( i + 1 ))
+    [ "$i" -gt "$keep_from" ] && break
+    age_days=$(( ( now - $(date -u -j -f '%Y%m%dT%H%M%SZ' "${name%%__*}" +%s 2>/dev/null || echo "$now") ) / 86400 ))
+    if [ "$age_days" -gt "$KEEP_DAYS" ]; then rm -rf "${STORE:?}/$name"; fi
+  done <<EOF
+$all
+EOF
+}
+
+cmd_save() {
+  local reason="${1:-}" stamp dir f
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  dir="$STORE/$stamp"
+  [ -n "$reason" ] && dir="${dir}__$(echo "$reason" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-40)"
+  mkdir -p "$dir"
+  : > "$dir/MANIFEST.tsv"
+  for f in $DOCS; do
+    if [ -f "$ROOT/$f" ]; then
+      cp "$ROOT/$f" "$dir/$f"
+      _manifest_line "$f" "$ROOT/$f" >> "$dir/MANIFEST.tsv"
+    fi
+  done
+  [ -n "$reason" ] && printf '%s\n' "$reason" > "$dir/REASON.txt"
+  _prune
+  echo "快照 $(basename "$dir")：$(wc -l < "$dir/MANIFEST.tsv" | tr -d ' ') 份文档 -> $dir"
+  cat "$dir/MANIFEST.tsv" | awk -F'\t' '{printf "  %-24s %6s 行 %9s 字节\n", $1, $2, $3}'
+}
+
+cmd_list() {
+  local d
+  [ -d "$STORE" ] || { echo "还没有任何快照（$STORE 不存在）"; return 0; }
+  for d in $(ls -1 "$STORE" | grep -E '^[0-9]{8}T[0-9]{6}Z' | sort); do
+    printf '%s  %s\n' "$d" "$(cat "$STORE/$d/REASON.txt" 2>/dev/null || echo '-')"
+  done
+}
+
+cmd_check() {
+  local latest dir rc=0 name lines bytes sha now_lines now_bytes now_sha drop ratio
+  latest="$(_latest)" || true
+  if [ -z "${latest:-}" ]; then
+    echo "没有可比对的快照——先跑一次 docsnap save" >&2
+    return 2
+  fi
+  dir="$STORE/$latest"
+  echo "与快照 $latest 比对："
+  while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
+    [ -z "${name:-}" ] && continue
+    if [ ! -f "$ROOT/$name" ]; then
+      echo "  ✗ $name 不存在了（快照里有 $lines 行）" >&2; rc=1; continue
+    fi
+    now_lines=$(wc -l < "$ROOT/$name" | tr -d ' ')
+    now_bytes=$(wc -c < "$ROOT/$name" | tr -d ' ')
+    now_sha="$(_sha "$ROOT/$name")"
+    if [ "$now_sha" = "$sha" ]; then echo "  = $name 未改动（$now_lines 行）"; continue; fi
+    drop=$(( lines - now_lines ))
+    ratio=0; [ "$lines" -gt 0 ] && ratio=$(( drop * 100 / lines ))
+    if [ "$drop" -ge "$SHRINK_LINES" ] || [ "$ratio" -ge "$SHRINK_RATIO" ]; then
+      echo "  ✗ $name 疑似异常缩水：$lines -> $now_lines 行（少 $drop 行，$ratio%）" >&2
+      rc=1
+    else
+      echo "  + $name $lines -> $now_lines 行（$bytes -> $now_bytes 字节）"
+    fi
+  done < "$dir/MANIFEST.tsv"
+  if [ "$rc" -ne 0 ]; then
+    echo "" >&2
+    echo "有文档异常缩水。确认是有意删减就重新 docsnap save；不是的话用" >&2
+    echo "  docsnap restore $latest <文件名>" >&2
+    echo "从快照恢复。" >&2
+  fi
+  return "$rc"
+}
+
+cmd_restore() {
+  local snap="${1:-}" only="${2:-}" dir name lines bytes sha
+  [ -n "$snap" ] || { echo "用法: docsnap restore <快照目录名> [文件名]" >&2; return 2; }
+  dir="$STORE/$snap"
+  [ -d "$dir" ] || { echo "没有这个快照: $snap" >&2; return 2; }
+  while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
+    [ -z "${name:-}" ] && continue
+    if [ -n "$only" ] && [ "$only" != "$name" ]; then continue; fi
+    cp "$dir/$name" "$ROOT/$name"
+    echo "已恢复 ${name}（$lines 行，$bytes 字节）"
+  done < "$dir/MANIFEST.tsv"
+}
+
+cmd_diff() {
+  local latest dir name lines bytes sha
+  latest="$(_latest)"; dir="$STORE/$latest"
+  while IFS=$'\t' read -r name lines bytes sha || [ -n "${name:-}" ]; do
+    [ -z "${name:-}" ] && continue
+    if [ -n "${1:-}" ] && [ "$1" != "$name" ]; then continue; fi
+    printf '%-24s 快照 %6s 行 / 现在 %6s 行\n' "$name" "$lines" "$(wc -l < "$ROOT/$name" | tr -d ' ')"
+  done < "$dir/MANIFEST.tsv"
+}
+
+# 演练：在临时目录里真跑一遍"写前快照 → 把文件截断成事故那种样子 →
+# check 必须报错 → restore 必须逐字节还原"。不碰真实文档。
+cmd_drill() {
+  local tmp doc snap rc
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  mkdir -p "$tmp/repo"
+  doc="$tmp/repo/progress.md"
+  seq 1 2000 | sed 's/^/第 & 行：历史实测记录/' > "$doc"
+  export DOCSNAP_ROOT="$tmp/repo" DOCSNAP_STORE="$tmp/store" DOCSNAP_DOCS="progress.md"
+
+  echo "1) 写前快照"
+  ROOT="$tmp/repo" STORE="$tmp/store" DOCS="progress.md" cmd_save "drill" > /dev/null
+  snap="$(STORE="$tmp/store" _latest)"
+
+  echo "2) 模拟 2026-09-08 那次事故：从中部截断到文件末尾"
+  head -561 "$doc" > "$doc.tmp" && mv "$doc.tmp" "$doc"
+
+  echo "3) check 必须发现缩水"
+  rc=0
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_check > /dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || { echo "演练失败：check 没有把 2000 -> 561 行判成异常" >&2; return 1; }
+  echo "   ✓ check 退出码 1"
+
+  echo "4) restore 必须逐字节还原"
+  ROOT="$tmp/repo" STORE="$tmp/store" cmd_restore "$snap" progress.md > /dev/null
+  if ! diff -q "$tmp/store/$snap/progress.md" "$doc" > /dev/null; then
+    echo "演练失败：恢复后的文件与快照不一致" >&2; return 1
+  fi
+  [ "$(wc -l < "$doc" | tr -d ' ')" = "2000" ] || { echo "演练失败：恢复后行数不对" >&2; return 1; }
+  echo "   ✓ 2000 行原样找回，sha256 与快照一致"
+  echo "演练通过：这套快照确实能把被截断的文档找回来。"
+}
+
+case "${1:-}" in
+  save)    shift; cmd_save "${1:-}" ;;
+  list)    cmd_list ;;
+  check)   cmd_check ;;
+  diff)    shift; cmd_diff "${1:-}" ;;
+  restore) shift; cmd_restore "${1:-}" "${2:-}" ;;
+  drill)   cmd_drill ;;
+  *) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

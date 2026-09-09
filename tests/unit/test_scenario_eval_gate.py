@@ -683,6 +683,85 @@ _CR066_CORRECT_ANSWERS = {
 }
 
 
+# ---- CR-067：CR-066 漏掉的三题（先讲对机制、后反转结论）----
+#
+# codex R61 复审指出：CR-066 给 Q20/Q22/Q23 配了负向约束，却把
+# Q19/Q24/Q25 当成"绑定式正向关键点就够了"的例外。审查方用当前规则
+# 独立复现，三题分别 2/2、2/2、3/3 命中、无 forbidden_hit、
+# `_case_status()` 全返回 `passed`——正是 R61 自己定义为"正向正则判不了
+# 结论方向、应进三态人工复核"的那种形状。下面三条例句逐字取自
+# `code-review.md` 的 CR-067 记录。
+
+_CR067_REVERSED_AFTER_CORRECT = {
+    "Q19": (
+        "pg_stat_statements 的 query 列显示的语句",
+        "语句会归一化，常量显示 $1，但 query 仍逐字等于原文。",
+        "前半句讲对了归一化，后半句否认它",
+    ),
+    "Q24": (
+        "计划里 Index Scan 估计返回 10 行",
+        "不是统计信息不准；LIMIT 会提前停止，但这依然说明统计信息不准。",
+        "先答对再反转回「统计信息不准」",
+    ),
+    "Q25": (
+        "两个 WHERE 条件涉及的列都刚 ANALYZE 过",
+        "列相关，独立性假设不成立；可以用 CREATE STATISTICS，"
+        "再跑 ANALYZE 没用，但总体重跑 ANALYZE 就能解决。",
+        "三条 keypoint 都被前半句满足，结论在后半句反转",
+    ),
+}
+
+
+@pytest.mark.parametrize("key", sorted(_CR067_REVERSED_AFTER_CORRECT))
+def test_pre_cr067_rules_would_have_passed_the_reversed_conclusion(key):
+    """判别性基线：只用 CR-066 那版规则（正向关键点，Q19/Q24/Q25 当时
+    没有任何负向约束），这三个例句全部 `passed`——复现审查方的结论，
+    不是采信它。
+    """
+    prefix, answer, _why = _CR067_REVERSED_AFTER_CORRECT[key]
+    spec = _spec(prefix)
+    hit, missed, forbidden, failures = _score(answer, spec["expect_keypoints"], [])  # 无负向约束
+    assert not missed, f"正向关键点本应全中（这正是问题所在）：{missed}"
+    assert not failures
+    case = ScenarioCase(
+        question=spec["q"], expect_keypoints=spec["expect_keypoints"], expect_sources=[],
+        forbid_patterns=[], answer_text=answer, keypoints_hit=hit, forbidden_hit=[], failures=[],
+    )
+    assert _case_status(case, []) == "passed", "旧规则下这个反转结论会被判通过"
+
+
+@pytest.mark.parametrize("key", sorted(_CR067_REVERSED_AFTER_CORRECT))
+def test_cr067_reversed_conclusion_is_no_longer_passed(key):
+    """新规则：三题各自的负向约束必须把它拦成 `review_required`
+    （正向关键点仍然全中——反转发生在下一句，这正是为什么只能靠
+    负向通道）。
+    """
+    prefix, answer, why = _CR067_REVERSED_AFTER_CORRECT[key]
+    spec = _spec(prefix)
+    hit, missed, forbidden, failures = _score(
+        answer, spec["expect_keypoints"], spec.get("forbid_patterns", [])
+    )
+    assert not missed and not failures, "正向关键点依然全中，说明拦住它的确实是负向约束"
+    assert forbidden, f"{key}（{why}）必须被负向约束标出"
+    assert _status_of(spec, answer) == "review_required"
+
+
+def test_cr067_every_yes_no_question_has_a_negative_constraint():
+    """结构性约束：这批题里凡是问"是不是/有没有用/有什么不同"这类
+    有明确结论方向的，都必须配 `forbid_patterns`——CR-066/067 两轮的
+    共同教训是"漏配一题就漏一题"，靠人记不住，写成测试。
+    唯一豁免的是 Q26（"为什么"型问题，事实性关键点本身就承载方向），
+    在这里显式列出，改动时会被这条测试逼着重新解释理由。
+    """
+    exempt = {"已经建了包含查询所有列的覆盖索引"}
+    markers = ("吗", "是不是", "有什么不同", "有什么代价", "先看哪个")
+    for q in _QUESTIONS_YAML[-8:]:
+        if any(q["q"].startswith(e) for e in exempt):
+            continue
+        if any(m in q["q"] for m in markers):
+            assert q.get("forbid_patterns"), f"有结论方向的题必须配负向约束: {q['q'][:40]}"
+
+
 @pytest.mark.parametrize("prefix", sorted(_CR066_CORRECT_ANSWERS))
 def test_cr066_new_rules_still_pass_a_correct_answer(prefix):
     """反向判别性：按卡片正文写的正确答案在新判据下必须仍然 `passed`，
