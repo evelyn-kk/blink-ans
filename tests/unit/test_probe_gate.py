@@ -33,23 +33,23 @@ def mk(rank, *, baseline=None, known_open=False, top_k=TOP_K):
 
 
 def test_regression_against_baseline_is_reported():
-    regressed, below = evaluate([mk(6, baseline=1)], TOP_K)
+    regressed, below, needs = evaluate([mk(6, baseline=1)], TOP_K)
     assert len(regressed) == 1
 
 
 def test_falling_out_of_candidates_is_a_regression():
-    regressed, _ = evaluate([mk(None, baseline=1)], TOP_K)
+    regressed, _, _ = evaluate([mk(None, baseline=1)], TOP_K)
     assert len(regressed) == 1
 
 
 def test_known_open_gap_does_not_fail_when_stable():
     """既有缺口停在基线上不算退步，否则每次改动都被同一批红叉淹没。"""
-    regressed, below = evaluate([mk(11, baseline=11, known_open=True)], TOP_K)
+    regressed, below, needs = evaluate([mk(11, baseline=11, known_open=True)], TOP_K)
     assert not regressed and not below
 
 
 def test_known_open_gap_still_fails_when_it_gets_worse():
-    regressed, _ = evaluate([mk(20, baseline=11, known_open=True)], TOP_K)
+    regressed, _, _ = evaluate([mk(20, baseline=11, known_open=True)], TOP_K)
     assert len(regressed) == 1
 
 
@@ -59,13 +59,13 @@ def test_missing_baseline_still_gated_by_top_k():
     旧实现只看退步，`baseline is None` 时整条判据跳过，
     刚修好的题恰好失去门禁。
     """
-    regressed, below = evaluate([mk(9, baseline=None)], TOP_K)
+    regressed, below, needs = evaluate([mk(9, baseline=None)], TOP_K)
     assert not regressed          # 无基线，谈不上退步
     assert len(below) == 1        # 但没进 top_k，必须失败
 
 
 def test_passing_probe_fails_nothing():
-    regressed, below = evaluate([mk(1, baseline=1)], TOP_K)
+    regressed, below, needs = evaluate([mk(1, baseline=1)], TOP_K)
     assert not regressed and not below
 
 
@@ -152,11 +152,121 @@ def test_gold_contains_must_accompany_a_title_path_gold():
 # ---------- CR-085：地板基线 not_in_candidates ----------
 
 def test_floor_baseline_does_not_report_regression_when_still_absent():
-    """已经在地板上，没有更差的状态可退——这不是豁免，是没有可判的退步。"""
-    regressed, below = evaluate(
+    """已经在地板上，没有更差的状态可退——这不是豁免，是没有可判的退步。
+
+    这是地板基线**唯一**允许静默通过的情形（仍然缺席）。
+    """
+    regressed, below, needs = evaluate(
         [mk(None, baseline=NOT_IN_CANDIDATES, known_open=True)], TOP_K)
     assert regressed == []
     assert below == []
+    assert needs == []
+
+
+def _r75_verdict(results, top_k):
+    """R75 那版 `evaluate` 的判据，逐字复刻在这里。
+
+    为什么要复刻：把 `probe_ranking.py` 换回旧版跑下面几条用例，失败原因是
+    `evaluate` 只返回两元组（解包 ValueError），那属于 §5.2 说的**弱判别性**
+    ——因为形状不同而失败，不是因为判断不同。复刻一份不依赖新代码的旧判据，
+    才能把"旧判据放它过、新判据拦下来"这个真正的差别写成断言。
+    """
+    regressed = [r for r in results
+                 if isinstance(r.baseline, int) and (r.rank is None or r.rank > r.baseline)]
+    below = [r for r in results if not r.passed and not r.known_open]
+    return 1 if (regressed or below) else 0
+
+
+# CR-086：地板值被突破必须非零退出，否则它就是个什么都不判的后门。
+# 这四个名次正是审查方独立构造出来、旧实现全部静默通过的那组。
+@pytest.mark.parametrize("rank", [20, 6, 5, 1])
+def test_floor_baseline_entering_candidates_must_fail(rank):
+    """从"未进候选"改善到任意名次，都必须报出来并强制固化数字基线。
+
+    这不是退步，但门禁描述的现实已经变了，不固化就等于永久失去信号。
+    """
+    probe = mk(rank, baseline=NOT_IN_CANDIDATES, known_open=True)
+
+    # 真正的判别性对照，不依赖新代码的形状：同一个输入，旧判据判过、新判据判失败。
+    assert _r75_verdict([probe], TOP_K) == 0, f"R75 那版对第 {rank} 名确实是静默通过的"
+
+    regressed, below, needs = evaluate([probe], TOP_K)
+    assert regressed == [], "这不是退步"
+    assert len(needs) == 1, f"第 {rank} 名必须触发基线固化"
+    assert needs[0].rank == rank
+
+
+def test_floor_baseline_upgraded_to_number_then_catches_falling_back():
+    """固化成数字基线之后，再掉回未进候选必须按退步报出来。
+
+    这是 CR-086 要求的闭环后半段：None -> 20 触发固化，
+    固化成 `baseline: 20` 之后 20 -> None 必须再次失败。
+    """
+    regressed, below, needs = evaluate(
+        [mk(None, baseline=20, known_open=True)], TOP_K)
+    assert len(regressed) == 1, "数字基线之下掉回未进候选就是退步"
+    assert needs == []
+
+
+def test_numeric_baseline_improvement_must_also_be_fixed():
+    """数字基线变好也必须固化——否则从新水平滑回旧基线是**静默**的。
+
+    与地板值那一半是同一个洞（超出 CR-086 字面范围，一并补上）：
+    `baseline=5, rank=1` 在旧判据下同样退出 0。
+    """
+    probe = mk(1, baseline=5, known_open=False)
+    assert _r75_verdict([probe], TOP_K) == 0, "旧判据对 5 -> 1 是静默通过的"
+    regressed, below, needs = evaluate([probe], TOP_K)
+    assert regressed == [] and below == []
+    assert len(needs) == 1 and needs[0].rank == 1
+
+
+def test_baseline_equal_to_measured_rank_is_silent():
+    """名次与基线相符是唯一该安静的常态，别把它也判成失败。"""
+    assert any(evaluate([mk(5, baseline=5)], TOP_K)) is False
+    assert any(evaluate([mk(1, baseline=1)], TOP_K)) is False
+
+
+# §5.4「列一遍：哪些输入会让它什么都不判」。把整个输入空间钉死，
+# 将来任何改动只要多开出一个静默格子，这条就会失败。
+def test_which_inputs_make_the_gate_judge_nothing():
+    """穷举 (baseline 种类 × rank × known_open)，锁住允许静默的那几格。"""
+    silent = set()
+    for baseline, tag in [(None, "null"), (NOT_IN_CANDIDATES, "floor"), (5, "num5")]:
+        for rank in (None, 1, 5, 6, 20):
+            for known_open in (False, True):
+                probe = mk(rank, baseline=baseline, known_open=known_open)
+                if not any(evaluate([probe], TOP_K)):
+                    silent.add((tag, rank, known_open))
+
+    expected = {
+        # baseline: null —— 「从未测过」。它确实两道闸都不判，这正是 CR-015
+        # 描述的洞；防线不在 evaluate 而在 YAML 层：
+        # test_no_probe_uses_null_baseline_as_a_backdoor 禁止 null + known_open，
+        # test_every_probe_records_a_baseline 禁止漏写 baseline。
+        ("null", None, True), ("null", 6, True), ("null", 20, True),
+        ("null", 1, False), ("null", 1, True), ("null", 5, False), ("null", 5, True),
+        # 地板值：只剩「仍然缺席」这一格，也就是它本来的语义（CR-086 之后）。
+        ("floor", None, True),
+        # 数字基线：只有「进了 top_k 且不比基线好」才安静。
+        ("num5", 5, False), ("num5", 5, True),
+    }
+    assert silent == expected, (
+        f"静默格子变了。多出来的: {silent - expected}；少掉的: {expected - silent}"
+    )
+
+
+def test_floor_baseline_probe_exit_code_is_nonzero_on_breach():
+    """把三类判据合起来看一眼退出码：任一非空都必须失败。"""
+    breached_probe = mk(3, baseline=NOT_IN_CANDIDATES, known_open=True)
+    stable_probe = mk(None, baseline=NOT_IN_CANDIDATES, known_open=True)
+
+    assert any(evaluate([breached_probe], TOP_K)) is True, "地板被突破 -> 非零"
+    assert any(evaluate([stable_probe], TOP_K)) is False, "仍然缺席 -> 零"
+
+    # 旧判据对这两种输入都给 0——这正是 CR-086 说的"什么都不判"。
+    assert _r75_verdict([breached_probe], TOP_K) == 0
+    assert _r75_verdict([stable_probe], TOP_K) == 0
 
 
 def test_floor_baseline_without_known_open_still_fails():
@@ -165,7 +275,7 @@ def test_floor_baseline_without_known_open_still_fails():
     判别性：这正是它与 `baseline: null` 的区别——null 是两道闸同时打开
     （CR-015），地板基线只关掉"退步"这一道，因为那一道本来就无从判起。
     """
-    regressed, below = evaluate(
+    regressed, below, needs = evaluate(
         [mk(None, baseline=NOT_IN_CANDIDATES, known_open=False)], TOP_K)
     assert regressed == []
     assert len(below) == 1
@@ -181,7 +291,7 @@ def test_floor_baseline_probe_must_declare_known_open():
 
 def test_numeric_baseline_still_catches_falling_out_of_candidates():
     """加了地板取值之后，数字基线的退步判据必须原样有效（防止改坏 CR-015 的修复）。"""
-    regressed, _ = evaluate([mk(None, baseline=6, known_open=True)], TOP_K)
+    regressed, _, _ = evaluate([mk(None, baseline=6, known_open=True)], TOP_K)
     assert len(regressed) == 1
 
 

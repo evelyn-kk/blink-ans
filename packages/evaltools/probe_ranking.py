@@ -44,9 +44,15 @@ PROBES = Path(__file__).resolve().parents[2] / "knowledge" / "eval" / "ranking_p
 #
 # `not_in_candidates` 补上这个缺口，语义是**地板**而不是豁免：
 #   - 已经在地板上，退步判据无从再判，这不是"开后门"，是没有更差的状态了；
-#   - 一旦它进了候选，就必须把基线改成那个具体名次，从此按数字受门禁约束；
-#   - 因此它只能停在地板或往上走，不存在"用它吸收一次退步"的用法
-#     （CR-048 那种把 baseline 改成退步后数值的操作，在这里改不动）。
+#   - 一旦它进了候选，`evaluate()` 会把它归进 **needs_baseline 并让命令
+#     非零退出**，强制把基线改成实测名次、从此按数字受约束；
+#   - 因此它只能停在地板，或者往上走一步就被门禁拦下来要求固化。
+#
+# **CR-086 的教训**：R75 第二条最初只写在注释里（"一旦进了候选就必须改成
+# 具体名次"），没有落成判据。结果 `baseline=not_in_candidates,
+# known_open=True` 的探针在 rank 为 None/20/6/5/1 时**一律静默通过**——
+# known_open 关掉 top_k 那道闸，字符串基线又让退步判据跳过它。
+# 一句写在注释里的承诺不是门禁；判据没写出来，它就不存在。
 # 使用要求：必须配 `known_open: true` 与说明测量过程的 `note`。
 NOT_IN_CANDIDATES = "not_in_candidates"
 
@@ -101,30 +107,53 @@ def _matches_gold(hit: Hit, gold: str, project: str | None,
     return hit.title_path == gold or hit.title_path.startswith(gold + " › ")
 
 
-def evaluate(results: list[ProbeResult], top_k: int) -> tuple[list[ProbeResult], list[ProbeResult]]:
-    """把结果分成"退步"与"未达标"两类，并决定命令是否失败。
+def evaluate(
+    results: list[ProbeResult], top_k: int
+) -> tuple[list[ProbeResult], list[ProbeResult], list[ProbeResult]]:
+    """把结果分成"退步""未达标""基线待固化"三类，并决定命令是否失败。
 
     纯函数，不碰索引与模型，因此可以单测——门禁自身也需要回归保护（CR-015）。
 
-    两条判据缺一不可：
+    三条判据缺一不可：
 
-    - **退步**：名次比记录的基线更差。`known_open` 的既有缺口也适用，
+    - **退步**：名次比记录的数字基线更差。`known_open` 的既有缺口也适用，
       只是它们的基线本来就不是第 1 名。
     - **未达标**：非 `known_open` 却没进前 `top_k`。
       只看退步是不够的——`baseline is null` 的题（新加入、或修复前根本没进候选）
       从第 1 名跌到未进候选时 `r.baseline is None`，退步判据整个跳过它，
       于是**刚修好的题恰好失去门禁**。CR-015 指出的正是这个洞。
+    - **基线待固化**（CR-086）：实测比基线好——地板值这次**进了候选**，
+      或数字基线这次排到了更前面。这不是退步，是"门禁描述的现实已经变了"，
+      必须当场把基线改成实测名次。
+      两种情形合成一类，因为漏掉它们的后果相同：基线停在一个比现实更宽松的
+      值上，此后从新水平滑回旧基线**不会有任何信号**。YAML 头部那句
+      "基线记录上次验收通过时的名次、改动被接受后要就地更新"由此成为判据，
+      不再只是一句要求人手执行的话。
+      **超出 CR-086 字面范围的部分**：审查方点名的是地板值那一半；数字基线
+      变好的那一半是同一个洞（`baseline=5, rank=1` 旧实现同样静默通过），
+      一并补上。若认为这会让正常改进变得吵闹，删掉 `_improved_numeric`
+      那一个分支即可，其余逻辑不受影响。
 
-    基线为 `NOT_IN_CANDIDATES` 时不参与退步判据——**因为它已经在地板上**，
-    没有更差的状态可退（详见该常量处的说明）。它仍受 `known_open` 约束：
-    不写 `known_open` 就会落进 `below`、照样让命令失败。
+    CR-086 记的就是漏掉第三条的后果：R75 我在文档里写下"一旦进了候选就必须
+    改成具体名次"，却只写在注释里、没有落成判据。于是
+    `baseline=not_in_candidates, known_open=True` 的探针在 rank 为
+    `None/20/6/5/1` 时**一律静默通过**——`known_open` 关掉了 top_k 那道闸，
+    字符串基线又让退步判据跳过它，两道闸同时打开，正是 CR-015 的同款空间。
+    **承诺必须落成判据，写在注释里的承诺不是门禁。**
     """
     regressed = [
         r for r in results
         if isinstance(r.baseline, int) and (r.rank is None or r.rank > r.baseline)
     ]
     below = [r for r in results if not r.passed and not r.known_open]
-    return regressed, below
+    def _breached_floor(r: ProbeResult) -> bool:
+        return r.baseline == NOT_IN_CANDIDATES and r.rank is not None
+
+    def _improved_numeric(r: ProbeResult) -> bool:
+        return isinstance(r.baseline, int) and r.rank is not None and r.rank < r.baseline
+
+    needs_baseline = [r for r in results if _breached_floor(r) or _improved_numeric(r)]
+    return regressed, below, needs_baseline
 
 
 def run(spec: dict, store: ChunkStore, embedder: Embedder,
@@ -174,7 +203,7 @@ def main() -> int:
     elapsed = time.perf_counter() - t0
 
     passed = sum(r.passed for r in results)
-    regressed, below = evaluate(results, top_k)
+    regressed, below, needs_baseline = evaluate(results, top_k)
     for r in results:
         mark = "✓" if r.passed else ("○" if r.known_open else "✗")
         pos = f"第 {r.rank} 名" if r.rank else "未进候选"
@@ -203,6 +232,12 @@ def main() -> int:
         for r in below:
             print(f"  {r.question}: "
                   + (f"第 {r.rank} 名" if r.rank else "未进候选"))
+    if needs_baseline:
+        print("基线待固化（实测比基线好，必须改成实测名次）:")
+        for r in needs_baseline:
+            was = "未进候选" if r.baseline == NOT_IN_CANDIDATES else f"第 {r.baseline} 名"
+            print(f"  {r.question}: 基线 {was} -> 实测第 {r.rank} 名；"
+                  f"请把 ranking_probe.yaml 里这条的 baseline 改成 {r.rank}")
 
     if args.json:
         args.json.write_text(json.dumps(
@@ -214,8 +249,10 @@ def main() -> int:
         print(f"已写入 {args.json}")
 
     store.close()
-    # 退步或未达标都失败。既有缺口（known_open）不阻塞，但一旦比基线更差立刻报出来。
-    return 1 if (regressed or below) else 0
+    # 退步、未达标、基线待固化都失败。既有缺口（known_open）不阻塞，
+    # 但一旦比基线更差、或地板值被突破，立刻报出来（CR-086：改善也要报，
+    # 否则地板基线就成了一个什么都不判的后门）。
+    return 1 if (regressed or below or needs_baseline) else 0
 
 
 if __name__ == "__main__":
