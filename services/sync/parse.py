@@ -186,6 +186,16 @@ _ADOC_SRC_ATTR = re.compile(r"^\[source[^\]]*\]\s*$", re.M)
 _ADOC_ID_ATTR = re.compile(r'^\[id=["\']([\w.:$-]+)["\'][^\]]*\]\s*$', re.M)
 _ADOC_BLOCK_ATTR = re.compile(r"^\[[A-Za-z][^\]]*\]\s*$", re.M)
 _ADOC_FENCE = re.compile(r"^----+\s*$", re.M)
+# Antora 的 include 指令行（CR-084）。`include-code::` 引代码样例、
+# `include::` 引另一份 adoc，**两者引的正文都不在这个文件里**，我们也不解析
+# 它们——原样入库就是把一行指令当成证据。实测危害：spring-framework 的
+# `The following example shows C3P0 configuration:` + 一行 include-code
+# （121 字符）在 `keyword_search("Spring C3P0 configuration", technology="spring")`
+# 里排**第 1**，而真正的配置代码根本不在块内，照它作答给不出配置。
+# 删掉指令行之后，这类块的正文会跌破既有的 `MIN_TOKENS=20` 门槛而被丢弃
+# ——**不需要新加阈值**，让既有门槛看见真实长度就够了。
+# 只在代码围栏之外删：listing 块里出现的 include:: 是被展示的语法本身。
+_ADOC_INCLUDE = re.compile(r"^[ \t]*include(?:-code)?::[^\n]*$", re.M)
 
 
 def parse_asciidoc(text: str, doc_title: str) -> list[Section]:
@@ -197,6 +207,7 @@ def parse_asciidoc(text: str, doc_title: str) -> list[Section]:
     parts = text.split("```")
     for i in range(0, len(parts), 2):      # 偶数段在代码块之外
         parts[i] = _ADOC_ATTR.sub("", parts[i])
+        parts[i] = _ADOC_INCLUDE.sub("", parts[i])
         parts[i] = _ADOC_SRC_ATTR.sub("", parts[i])
         parts[i] = _ADOC_ID_ATTR.sub(r"[[\1]]", parts[i])
         parts[i] = _ADOC_BLOCK_ATTR.sub("", parts[i])

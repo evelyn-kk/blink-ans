@@ -254,6 +254,137 @@ def test_asciidoc_attributes_inside_listing_are_preserved():
     assert "[main]" in body and ":mode: fast" in body
 
 
+def test_asciidoc_include_directive_is_not_evidence():
+    """CR-084：`include-code::` / `include::` 引的正文不在这个文件里。
+
+    我们不解析这两个指令，原样入库等于把一行指令当成证据。实测危害：
+    spring-framework 的这一块（121 字符）在
+    `keyword_search("Spring C3P0 configuration", technology="spring")`
+    里排**第 1**，而真正的配置代码根本不在块内。
+    """
+    adoc = (
+        "== Using `DataSource`\n\n"
+        "The following example shows C3P0 configuration:\n\n"
+        "include-code::./ComboPooledDataSourceConfiguration[tag=snippet,indent=0]\n"
+    )
+    body = parse_asciidoc(adoc, "Doc")[-1].body
+    assert "include-code::" not in body
+    assert "ComboPooledDataSourceConfiguration" not in body
+    assert "C3P0 configuration" in body, "散文本身必须留下，删的只是指令行"
+
+
+def test_asciidoc_plain_include_directive_is_also_dropped():
+    """裸 `include::` 是同一个毛病，且更严重。
+
+    实测合入前的库里有 6 块**整块只有 include 指令**（spring-data-redis 5 块、
+    spring-kafka 1 块），去掉指令后正文为空。CR-084 只点名了 include-code::，
+    这一条是同一次一并修掉的。
+    """
+    adoc = (
+        "== Custom Implementations\n\n"
+        "include::{commons}@data-commons::page$repositories/custom-implementations.adoc[]\n"
+    )
+    # 正文清空后整节被既有的空正文规则跳过，连 Section 都不产出。
+    secs = [x for x in parse_asciidoc(adoc, "Doc")
+            if x.title_path[-1] == "Custom Implementations"]
+    assert secs == [], "整节只有一行 include 指令时不应产出任何小节"
+
+
+def test_include_only_section_falls_below_min_tokens_and_is_dropped():
+    """去掉指令行后，这类块靠既有的 MIN_TOKENS 门槛被丢弃——不需要新阈值。
+
+    判别性：这条测的是"块数为 0"，而修复前同一段 AsciiDoc 会产出 1 块
+    （30 token，指令行本身贡献了 19 个）。
+    """
+    from services.sync.chunk import MIN_TOKENS, estimate_tokens
+
+    raw = ("The following example shows C3P0 configuration:\n\n"
+           "include-code::./ComboPooledDataSourceConfiguration[tag=snippet,indent=0]")
+    assert estimate_tokens(raw) >= MIN_TOKENS, "修复前它够长，所以当初进了索引"
+
+    adoc = f"== Using `DataSource`\n\n{raw}\n"
+    secs = parse_asciidoc(adoc, "Doc")
+    chunks = sections_to_chunks(secs, src(), Path("modules/ROOT/pages/x.adoc"), "c", "2026-09-10T00:00:00Z")
+    assert chunks == [], "只剩一句引子的块不构成证据"
+
+
+def test_fenced_include_does_not_count_toward_evidence_length():
+    """围栏内的 include 删不得（删了留下空代码块），但不得计入证据长度。
+
+    实测两块 spring-kafka 内容（estimate 55 / 130 token）扣掉指令后只剩
+    16 / 14 token——**整块只有 Antora 标签页脚手架和 include 行，一个字
+    正文都没有**。与 CR-084 点名的 C3P0 块同一形状，只是样例包在围栏里。
+
+    判别性说明（§5.2）：把 `chunk.py` 换回旧版跑这条用例，它是因为
+    `evidence_tokens` 不存在而 ImportError——那属于弱判别性。真正的对照
+    写在用例体内且不依赖新函数：同一段正文 `estimate_tokens >= MIN_TOKENS`
+    （旧判据放它进来）而 `evidence_tokens < MIN_TOKENS`（新判据拦下）。
+    """
+    from services.sync.chunk import MIN_TOKENS, estimate_tokens, evidence_tokens
+
+    # 取自合入前索引里的真实块（spring-kafka，estimate 130 / evidence 14）：
+    # 整块只有 Antora 的标签页脚手架和 6 行 include，一个字正文都没有。
+    body = (
+        "======\nJava::\n+\n```\n"
+        "include::{java-examples}/started/noboot/Sender.java[tag=startedNoBootSender]\n\n"
+        "include::{java-examples}/started/noboot/Listener.java[tag=startedNoBootListener]\n"
+        "```\nKotlin::\n+\n```\n"
+        "include::{kotlin-examples}/started/noboot/Sender.kt[tag=startedNoBootSender]\n\n"
+        "include::{kotlin-examples}/started/noboot/Config.kt[tag=startedNoBootConfig]\n"
+        "```\n======"
+    )
+    assert estimate_tokens(body) >= MIN_TOKENS, "算上指令行它够长——旧判据就是这样放它进来的"
+    assert evidence_tokens(body) < MIN_TOKENS, "只按正文算就不够格"
+
+    adoc = f"== Testing\n\n{body}\n"
+    chunks = sections_to_chunks(parse_asciidoc(adoc, "Doc"), src(),
+                                Path("modules/ROOT/pages/x.adoc"), "c", "2026-09-10T00:00:00Z")
+    assert chunks == []
+
+
+def test_fenced_include_with_enough_prose_survives_intact():
+    """正文充足的块必须原样留下，包括围栏里的 include 行——不能顺手删成空代码块。"""
+    prose = ("If you define a `KafkaAdmin` bean in your application context, it can "
+             "automatically add topics to the broker. To do so, you can add a "
+             "`NewTopic` bean for each topic to the application context. " * 3)
+    adoc = f"== Configuring Topics\n\n{prose}\n\n```\ninclude::{{java-examples}}/topics/Config.java[tag=bean]\n```\n"
+    chunks = sections_to_chunks(parse_asciidoc(adoc, "Doc"), src(),
+                                Path("modules/ROOT/pages/x.adoc"), "c", "2026-09-10T00:00:00Z")
+    assert len(chunks) >= 1
+    assert any("include::" in c.text for c in chunks), "围栏内的指令行必须留着，删了就是个空代码块"
+
+
+def test_include_directive_inside_listing_is_preserved():
+    """listing 块里的 include:: 是被展示的语法本身，删掉就损坏了示例。
+
+    与 `test_asciidoc_attributes_inside_listing_are_preserved` 同一条理由。
+    """
+    adoc = ("== 怎么写 include\n\n说明文字足够长，用来保证这一节不会因为太短被丢弃，"
+            "这里再补一些正文让它稳稳超过最小 token 门槛。\n\n"
+            "----\ninclude::partial$foo.adoc[]\n----\n")
+    body = parse_asciidoc(adoc, "Doc")[-1].body
+    assert "include::partial$foo.adoc[]" in body
+
+
+def test_include_directive_removal_keeps_surrounding_prose():
+    """绝大多数含指令的块正文充足，只应少掉那一行，不得被整块丢弃。
+
+    实测：合入前 277 个含 `include-code::` 的块里，去掉指令后跌破门槛的
+    只有 3 块，其余 274 块正文完整保留。
+    """
+    adoc = (
+        "== Connections\n\n"
+        "The following section uses Spring's `DriverManagerDataSource` implementation.\n"
+        "Several other `DataSource` variants are covered later.\n\n"
+        "include-code::./DriverManagerDataSourceConfiguration[tag=snippet,indent=0]\n\n"
+        "The next two examples show the basic connectivity and configuration for DBCP and C3P0.\n"
+    )
+    body = parse_asciidoc(adoc, "Doc")[-1].body
+    assert "include-code::" not in body
+    assert "DriverManagerDataSource` implementation" in body
+    assert "DBCP and C3P0" in body
+
+
 def test_navigation_page_is_dropped():
     """纯 xref 导航页没有技术结论，只会挤占索引与上下文预算。
 

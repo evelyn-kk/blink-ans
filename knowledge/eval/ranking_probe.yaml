@@ -25,7 +25,17 @@ top_k: 5
 #   - 它记录**上次验收通过时**的名次，改动被接受后要就地更新，否则门禁会逐渐失真。
 #   - `null` 只用于「从未测过」，**不要**用它表示「当前没进候选」——
 #     退步判据会跳过 baseline 为 null 的题，等于给它开了个后门。
+#   - 「测过、当时就没进候选」写 `not_in_candidates`（CR-085 新增）。
+#     它是**地板**不是豁免：已经在最差状态、无从再判退步，而 top_k 那道闸
+#     照常生效（必须同时写 `known_open: true`，有测试锁死）。一旦它进了候选，
+#     基线必须改成那个具体名次，从此按数字受约束——所以它只能停在地板或往上走，
+#     不存在 CR-048 那种「把基线改成退步后的数值」的用法。
 #   - 门禁有两条：比基线更差算退步；非 known_open 却没进 top_k 算未达标。两者都会让命令失败。
+#
+# gold 的定位精度（CR-085）：默认按 title_path **前缀**匹配；`gold_exact: true`
+# 只认这一层、不认子小节；`gold_contains` 再往下，在同一小节被切成多块时用一段
+# 人工抄自官方正文的短语指认是哪一块。**`gold_contains` 只能与 title_path gold
+# 合用**，不得单独拿关键词圈 gold（见本文件开头的禁令）。
 
 probes:
   # ---- CR-013 直接针对的两道（T-025 新增）----
@@ -224,3 +234,68 @@ probes:
       结论、baseline（12）与 T-112 的既有结论均不受影响——机制解释仍是
       "关键词路完全缺席 + 向量路强相关但非满分"的组合被"两路都中等"的
       新候选挤过，只是"满分"这个措辞对本题不准确，已更正。
+
+  # ---- CR-085：T-114 新增的 spring-framework 必须有声明式事务语义的金标准 ----
+  # 三条 gold 都是先人工打开 `data/corpus/spring-framework/.../data-access/
+  # transaction/declarative/*.adoc` 读过正文、确认它确实回答该问题，才写进来的。
+  # 判别性（沿用 CR-039 的做法）：在合入前的索引副本 `premerge-r74.db`
+  # （14608 块，无 spring-framework）上，三条**全部 rank=None**；
+  # 在当前索引上分别为 2 / 60 / 2。
+  - q: Spring 事务里抛了受检异常为什么没有回滚
+    project: spring-framework
+    gold: "Rolling Back › Rolling Back a Declarative Transaction"
+    baseline: 2
+    note: |
+      官方原文就在这一节：`In its default configuration, the Spring
+      Framework's transaction infrastructure code marks a transaction for
+      rollback only in the case of runtime, unchecked exceptions.`
+      ——即默认只对 `RuntimeException`/`Error` 回滚，受检异常不回滚。
+      这一节被切成 7 块，都属于同一条 title_path，任一块命中都算：
+      本题它们讲的是同一件事（回滚规则及其覆盖方式），不存在下一条探针
+      那种"同名小节里各块讲的是不同主题"的问题，故不加 gold_contains。
+
+  - q: 同一个类里的方法互相调用时 @Transactional 为什么不生效
+    project: spring-framework
+    gold: "Annotations › Using `@Transactional`"
+    gold_exact: true
+    gold_contains: "only external method calls coming in through the proxy are intercepted"
+    baseline: not_in_candidates
+    known_open: true
+    note: |
+      官方原文：`In proxy mode (which is the default), only external method
+      calls coming in through the proxy are intercepted. This means that
+      self-invocation ... does not lead to an actual transaction at runtime
+      even if the invoked method is marked with @Transactional.`
+      **这条探针的第一版差点变成一个假绿，记在这里当教训**：
+      `Annotations › Using \`@Transactional\`` 这一节有 **12 块**共用同一条
+      title_path，各块主题完全不同（代理边界、`@EnableTransactionManagement`
+      扫描范围、多事务管理器、组合注解……）。只按 title_path 判：
+      前缀匹配报第 2 名（命中子小节"多事务管理器"）、exact 报第 4 名
+      （命中同名小节里讲扫描范围的另一块），而**真正讲自调用的那块在第 60 名**。
+      因此本条同时用 `gold_exact` 与 `gold_contains` 定位到块级
+      （`gold_contains` 的使用纪律见 `probe_ranking.py:_matches_gold`）。
+      **基线为什么是 `not_in_candidates` 而不是 60**：那个 60 是我用
+      `limit=200/candidates=200` 深搜量出来的，而探针本身按 `limit=20`
+      跑，这块**根本进不了它的窗口**，探针如实报 `rank=None`。写成 60
+      会让门禁每次都判"退步"，等于把整个探针钉死在红色。
+      `not_in_candidates` 是"测过、就是没进候选"这个真实状态的地板值
+      （语义见 `probe_ranking.py` 的 NOT_IN_CANDIDATES）。
+      **另外实测了四种更自然的中文问法**（"Spring 事务自调用为什么不生效"
+      "@Transactional 自调用 代理 不拦截""为什么类内部直接调用自己的事务
+      方法事务不起作用"等），深搜名次 21/31/45/124，**没有一种进得了
+      探针窗口**——这不是问法没挑好，是一个真实的检索缺口。
+      根因初步观察与 T-112 同类（这块是一段 331 字符的 NOTE，短块在关键词
+      路上竞争不过长块），已登记 **T-115**。
+      **它现在就有门禁意义**：一旦有改动让它进了候选，基线必须改成那个
+      具体名次，从此按数字受约束；它只能停在地板或往上走。
+
+  - q: Spring 事务传播行为 REQUIRES_NEW 和 REQUIRED 有什么区别
+    project: spring-framework
+    gold: "Tx Propagation › Transaction Propagation › Understanding `PROPAGATION_REQUIRES_NEW`"
+    baseline: 2
+    note: |
+      官方原文：`PROPAGATION_REQUIRES_NEW, in contrast to
+      PROPAGATION_REQUIRED, always uses an independent physical transaction
+      for each affected transaction scope`——独立物理事务、内层提交回滚
+      互不影响，正是"对账明细记失败但主事务别回滚"要用的那条语义。
+      这条 title_path 在当前索引里**唯一对应 1 块**，不需要额外定位。

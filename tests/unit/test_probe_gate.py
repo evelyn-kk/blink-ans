@@ -18,7 +18,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.evaltools.probe_ranking import (  # noqa: E402
-    PROBES, ProbeResult, evaluate,
+    NOT_IN_CANDIDATES, PROBES, ProbeResult, evaluate,
 )
 
 TOP_K = 5
@@ -81,6 +81,108 @@ def test_no_probe_uses_null_baseline_as_a_backdoor():
         if p.get("known_open") and p.get("baseline") is None
     ]
     assert not offenders, f"这些题同时豁免了两道闸: {offenders}"
+
+
+# ---------- CR-085：gold 的定位精度 ----------
+
+def _hit(title_path: str, text: str = "", project: str = "spring-framework"):
+    """只带 _matches_gold 用得上的三个字段的最小替身。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(title_path=title_path, text=text, source_project=project)
+
+
+_SECTION = "Annotations › Using `@Transactional`"
+_SELF_INVOCATION = "only external method calls coming in through the proxy are intercepted"
+
+
+def test_prefix_gold_matches_unrelated_subsection():
+    """前缀匹配会把子小节也算成命中——这是本轮实测到的假绿来源。
+
+    真实案例：`… › Multiple Transaction Managers with @Transactional`
+    与"自调用为什么不生效"毫无关系，却在第 2 名让探针判通过。
+    """
+    from packages.evaltools.probe_ranking import _matches_gold
+
+    other = _hit(_SECTION + " › Multiple Transaction Managers with `@Transactional`",
+                 "Most Spring applications need only a single transaction manager")
+    assert _matches_gold(other, _SECTION, "spring-framework") is True
+
+
+def test_exact_gold_rejects_subsections_but_not_same_section_siblings():
+    """exact 挡住子小节；但同名小节的**兄弟块**它挡不住——所以还需要 contains。
+
+    真实案例：exact 之下命中的是同一条 title_path 的另一块，讲的是
+    `@EnableTransactionManagement` 的扫描范围，仍然不是自调用。
+    """
+    from packages.evaltools.probe_ranking import _matches_gold
+
+    sub = _hit(_SECTION + " › Custom Composed Annotations", "compose your own annotation")
+    assert _matches_gold(sub, _SECTION, "spring-framework", exact=True) is False
+
+    sibling = _hit(_SECTION, "`@EnableTransactionManagement` ... look for `@Transactional` "
+                             "only on beans in the same application context")
+    assert _matches_gold(sibling, _SECTION, "spring-framework", exact=True) is True
+
+
+def test_contains_pins_gold_to_the_manually_verified_chunk():
+    """exact + contains 才真正指到人工核对过的那一块。"""
+    from packages.evaltools.probe_ranking import _matches_gold
+
+    sibling = _hit(_SECTION, "`@EnableTransactionManagement` scanning scope ...")
+    real = _hit(_SECTION, f"NOTE: In proxy mode (which is the default), {_SELF_INVOCATION}. "
+                          "This means that self-invocation ...")
+
+    assert _matches_gold(sibling, _SECTION, "spring-framework",
+                         exact=True, contains=_SELF_INVOCATION) is False
+    assert _matches_gold(real, _SECTION, "spring-framework",
+                         exact=True, contains=_SELF_INVOCATION) is True
+
+
+def test_gold_contains_must_accompany_a_title_path_gold():
+    """纪律锁死：contains 只做同小节内的定位，不得单独拿关键词圈 gold。
+
+    单独用关键词圈 gold 会把上百块全算对（`ranking_probe.yaml` 开头的禁令）。
+    """
+    spec = yaml.safe_load(PROBES.read_text(encoding="utf-8"))
+    offenders = [p["q"] for p in spec["probes"]
+                 if p.get("gold_contains") and not str(p.get("gold", "")).strip()]
+    assert not offenders, f"gold_contains 必须与 title_path gold 合用: {offenders}"
+
+
+# ---------- CR-085：地板基线 not_in_candidates ----------
+
+def test_floor_baseline_does_not_report_regression_when_still_absent():
+    """已经在地板上，没有更差的状态可退——这不是豁免，是没有可判的退步。"""
+    regressed, below = evaluate(
+        [mk(None, baseline=NOT_IN_CANDIDATES, known_open=True)], TOP_K)
+    assert regressed == []
+    assert below == []
+
+
+def test_floor_baseline_without_known_open_still_fails():
+    """地板基线不豁免 top_k 那道闸：不写 known_open 照样让命令失败。
+
+    判别性：这正是它与 `baseline: null` 的区别——null 是两道闸同时打开
+    （CR-015），地板基线只关掉"退步"这一道，因为那一道本来就无从判起。
+    """
+    regressed, below = evaluate(
+        [mk(None, baseline=NOT_IN_CANDIDATES, known_open=False)], TOP_K)
+    assert regressed == []
+    assert len(below) == 1
+
+
+def test_floor_baseline_probe_must_declare_known_open():
+    """YAML 里用地板基线就必须配 known_open，否则等于悄悄留一条永远红的探针。"""
+    spec = yaml.safe_load(PROBES.read_text(encoding="utf-8"))
+    offenders = [p["q"] for p in spec["probes"]
+                 if p.get("baseline") == NOT_IN_CANDIDATES and not p.get("known_open")]
+    assert not offenders, f"地板基线必须配 known_open: {offenders}"
+
+
+def test_numeric_baseline_still_catches_falling_out_of_candidates():
+    """加了地板取值之后，数字基线的退步判据必须原样有效（防止改坏 CR-015 的修复）。"""
+    regressed, _ = evaluate([mk(None, baseline=6, known_open=True)], TOP_K)
+    assert len(regressed) == 1
 
 
 def test_every_probe_records_a_baseline():

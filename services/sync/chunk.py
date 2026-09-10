@@ -24,6 +24,25 @@ MIN_TOKENS = 20          # 低于此长度不成为独立证据，并入相邻�
 
 _CODE_FENCE = re.compile(r"^```", re.M)
 _ADOC_ANCHOR = re.compile(r"^\[\[([\w.-]+)\]\]\s*$", re.M)
+# Antora 的 include 指令行（CR-084）。围栏**之外**的这类行由
+# `parse.py` 直接删掉；但围栏**之内**的删不得——删了会留下一个空代码块，
+# 等于把"这里本来有段代码"换成"这里什么都没有"，比留着更误导。
+# 于是改成：留在正文里，但**不计入证据长度**。
+# 判据名要对得上它测的东西（AGENTS.md §5.3）：MIN_TOKENS 问的是
+# "这块有没有足够的**正文**可作证据"，一行指向别处的指令从来不是正文。
+# 实测：spring-kafka 有两块（55 / 130 token）扣掉指令后只剩 16 / 14 token，
+# 正文只有一句"The following example shows how to use ..."，与 CR-084 点名的
+# C3P0 块是同一形状，只是它的样例恰好包在围栏里。
+_INCLUDE_LINE = re.compile(r"^[ \t]*include(?:-code)?::[^\n]*$", re.M)
+
+
+def evidence_tokens(text: str) -> int:
+    """作为证据的正文长度：include 指令行不算数。
+
+    与 `estimate_tokens` 的区别只在这一点；上下文预算等别处仍用后者，
+    因为那里关心的是"这块会占多少 token"，指令行确实占。
+    """
+    return estimate_tokens(_INCLUDE_LINE.sub("", text))
 
 
 def build_url(src: Source, rel_path: Path, anchor: str | None, page_id: str | None = None) -> str:
@@ -230,12 +249,12 @@ def _merge_small(pieces: list[str]) -> list[str]:
     """
     out: list[str] = []
     for p in pieces:
-        if out and estimate_tokens(p) < MIN_TOKENS:
+        if out and evidence_tokens(p) < MIN_TOKENS:
             out[-1] = f"{out[-1]}\n\n{p}"
         else:
             out.append(p)
     # 首片过短时向后并
-    while len(out) > 1 and estimate_tokens(out[0]) < MIN_TOKENS:
+    while len(out) > 1 and evidence_tokens(out[0]) < MIN_TOKENS:
         out[1] = f"{out[0]}\n\n{out[1]}"
         out.pop(0)
     return out
@@ -261,7 +280,7 @@ def sections_to_chunks(
         url = build_url(src, rel_path, sec.anchor, getattr(sec, "page_id", None))
 
         for piece in _merge_small(_split_body(body)):
-            if estimate_tokens(piece) < MIN_TOKENS:
+            if evidence_tokens(piece) < MIN_TOKENS:
                 continue
             chunks.append(
                 Chunk(
