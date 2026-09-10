@@ -933,8 +933,67 @@ _R72_NEGATIVE_CONSTRAINT_CASES = {
     ),
 }
 
+# ---- R78（2026-09-10）：第六张卡片（订单/对账）5 道是非/选择题的负向约束 ----
+#
+# 与前两批同样的两侧判别性：既要命中结论反转，又不得误伤这题真实跑出来的
+# 那次回答。本批里 Q38 和 Q40 的第一版都是被"不得误伤真实回答"这一侧当场
+# 抓出来改掉的（详见 scenario_questions.yaml 里各自的校准注释）：
+#   - Q38 第一版被真实答案"事务将不会回滚"误伤——`(?<!不)` 只挡住了紧邻
+#     "将"之前的否定，否定词落在"将"和"回滚"中间的间隔里照样匹配；
+#   - Q40 第一版**一条都没打中**它的动机例句——那次真实回答给出的正是
+#     反转结论（"则事务会生效"），却因为词序（"事务会生效"而非
+#     "生效…事务"）和距离而漏掉。
+# 因此 Q40 这条用真实答错的那次生成当反转例、另写一份按卡片正文的正确
+# 回答当"不得误伤"的样本（写法沿用 R72 的 Q8/Q13/Q15）。
+_R78_NEGATIVE_CONSTRAINT_CASES = {
+    "Q38": (
+        "在 @Transactional 方法里把异常 catch 住",
+        "把异常 catch 住只记日志之后，事务仍然会自动回滚 [1]。",
+        "不会回滚 [2]。若在 @Transactional 方法中捕获异常后仅记录日志，未调用 "
+        "`status.setRollbackOnly()`，事务将不会回滚 [2]。  \n需确保在异常处理中显式调用 "
+        "`status.setRollbackOnly()` 才能触发回滚 [1][3]。",
+        "把「catch 住就不回滚」反转成「仍然会回滚」",
+    ),
+    "Q40": (
+        "同一个类里 placeOrder",
+        "同一个类中 `placeOrder` 调用 `writeLedger` 时，`@Transactional` 是否生效取决于是否"
+        "配置了事务管理器且方法被正确代理。若 `writeLedger` 上有 `@Transactional` 注解，"
+        "且 Spring 容器已注册 `PlatformTransactionManager` 并启用 `@Transactional` 处理"
+        "（如通过 `<tx:annotation-driven/>`），则事务会生效 [4]。",
+        "不生效。代理模式下只有经过代理进来的外部调用才会被拦截，同一个类里的自调用"
+        "不经过代理，因此 `writeLedger` 上的 `@Transactional` 不会生效 [1]。"
+        "若确实需要自调用也开启事务，官方给的替代方案是改用 AspectJ 模式 [1]。",
+        "把「自调用不生效」反转成「事务会生效」（真实答错的一次生成）",
+    ),
+    "Q42": (
+        "对账方法上标了 readOnly",
+        "会生效。方法上标的隔离级别会按注解生效，Spring 会为它单独开一个事务 [1]。",
+        "readOnly和隔离级别设置在被上层事务调用时**不生效**：  \n- Spring事务配置中"
+        "`read-only`和`isolation`仅对`REQUIRED`或`REQUIRES_NEW`传播生效，且仅作用于"
+        "当前事务边界 [2]；  \n- 若上层事务已管理事务上下文，底层方法的"
+        "`@Transactional(readOnly = true, isolation = ...)`将被覆盖或忽略 [2][4]。",
+        "把「参与外层事务时被静默忽略」反转成「按注解生效」",
+    ),
+    "Q44": (
+        "REQUIRES_NEW 和 NESTED 有什么不同",
+        "NESTED 的内层提交能在外层回滚之后独立保留下来，所以审计记录应该用 NESTED [1]。",
+        "`REQUIRES_NEW` 创建独立事务，内层提交可存活于外层回滚；`NESTED` 依赖单事务"
+        "多保存点，内层失败可回滚但不持久 [1][2]。审计记录需在主事务回滚后留存，"
+        "应选 `REQUIRES_NEW` [1]。",
+        "把「NESTED 是保存点、不独立提交」反转成「能独立留下来」",
+    ),
+    "Q46": (
+        "对账任务在一个事务里先统计订单再统计支付",
+        "在同一个事务里两次查询一定一致，默认隔离级别下就能保证 [1]。",
+        "否，两次查询看到的数据不一致 [3][4]。  \n在默认隔离级别（如 Read Committed）下，"
+        "统计支付时可能读取到已提交但未同步的订单变更 [3]。",
+        "把「默认级别下两次查询可能不同」反转成「一定一致」",
+    ),
+}
+
 _NEGATIVE_CONSTRAINT_CASES = {**_R71_NEGATIVE_CONSTRAINT_CASES,
-                              **_R72_NEGATIVE_CONSTRAINT_CASES}
+                              **_R72_NEGATIVE_CONSTRAINT_CASES,
+                              **_R78_NEGATIVE_CONSTRAINT_CASES}
 
 
 @pytest.mark.parametrize("key", sorted(_NEGATIVE_CONSTRAINT_CASES))
