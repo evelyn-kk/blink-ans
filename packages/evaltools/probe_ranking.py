@@ -122,8 +122,9 @@ def evaluate(
       只看退步是不够的——`baseline is null` 的题（新加入、或修复前根本没进候选）
       从第 1 名跌到未进候选时 `r.baseline is None`，退步判据整个跳过它，
       于是**刚修好的题恰好失去门禁**。CR-015 指出的正是这个洞。
-    - **基线待固化**（CR-086）：实测比基线好——地板值这次**进了候选**，
-      或数字基线这次排到了更前面。这不是退步，是"门禁描述的现实已经变了"，
+    - **基线待固化**（CR-086、CR-087）：门禁记的基线已经描述不了现实——
+      地板值这次**进了候选**、数字基线这次排到了**更前面**，
+      或者压根**还没记过基线**（`null`）而这一跑测出了名次。这不是退步，是"门禁描述的现实已经变了"，
       必须当场把基线改成实测名次。
       两种情形合成一类，因为漏掉它们的后果相同：基线停在一个比现实更宽松的
       值上，此后从新水平滑回旧基线**不会有任何信号**。YAML 头部那句
@@ -152,7 +153,18 @@ def evaluate(
     def _improved_numeric(r: ProbeResult) -> bool:
         return isinstance(r.baseline, int) and r.rank is not None and r.rank < r.baseline
 
-    needs_baseline = [r for r in results if _breached_floor(r) or _improved_numeric(r)]
+    def _never_recorded(r: ProbeResult) -> bool:
+        # CR-087：`baseline: null` 的语义是"从未测过"，而这一跑就测到了。
+        # 不当场固化的话，用 null 首次测到第 1 名、此后跌到第 5 名**全程无信号**
+        # （两名都在 top_k 内，below 不判；baseline 不是 int，退步判据跳过）。
+        # rank 为 None 的那一侧不归这里：非 known_open 已由 below 判失败，
+        # known_open + null 由 YAML 层的 schema 测试禁止。
+        return r.baseline is None and r.rank is not None
+
+    needs_baseline = [
+        r for r in results
+        if _breached_floor(r) or _improved_numeric(r) or _never_recorded(r)
+    ]
     return regressed, below, needs_baseline
 
 
@@ -233,9 +245,14 @@ def main() -> int:
             print(f"  {r.question}: "
                   + (f"第 {r.rank} 名" if r.rank else "未进候选"))
     if needs_baseline:
-        print("基线待固化（实测比基线好，必须改成实测名次）:")
+        print("基线待固化（记的基线描述不了现实，必须改成实测名次）:")
         for r in needs_baseline:
-            was = "未进候选" if r.baseline == NOT_IN_CANDIDATES else f"第 {r.baseline} 名"
+            if r.baseline is None:
+                was = "从未记录"
+            elif r.baseline == NOT_IN_CANDIDATES:
+                was = "未进候选"
+            else:
+                was = f"第 {r.baseline} 名"
             print(f"  {r.question}: 基线 {was} -> 实测第 {r.rank} 名；"
                   f"请把 ranking_probe.yaml 里这条的 baseline 改成 {r.rank}")
 

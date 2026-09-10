@@ -163,6 +163,27 @@ def test_floor_baseline_does_not_report_regression_when_still_absent():
     assert needs == []
 
 
+def _r76_verdict(results, top_k):
+    """R76 那版 `evaluate` 的判据，逐字复刻（CR-087 的对照基准）。
+
+    与 `_r75_verdict` 同一个用途、同一条理由：把实现换回旧版跑这些用例，
+    失败原因会是别的（这次连形状都没变，更需要真对照）。
+    这些复刻件是**冻结的历史快照**，故意不随实现演进——它们的职责只是
+    回答"旧判据当时对这个输入怎么判"。
+    """
+    def _breached_floor(r):
+        return r.baseline == NOT_IN_CANDIDATES and r.rank is not None
+
+    def _improved_numeric(r):
+        return isinstance(r.baseline, int) and r.rank is not None and r.rank < r.baseline
+
+    regressed = [r for r in results
+                 if isinstance(r.baseline, int) and (r.rank is None or r.rank > r.baseline)]
+    below = [r for r in results if not r.passed and not r.known_open]
+    needs = [r for r in results if _breached_floor(r) or _improved_numeric(r)]
+    return 1 if (regressed or below or needs) else 0
+
+
 def _r75_verdict(results, top_k):
     """R75 那版 `evaluate` 的判据，逐字复刻在这里。
 
@@ -221,6 +242,48 @@ def test_numeric_baseline_improvement_must_also_be_fixed():
     assert len(needs) == 1 and needs[0].rank == 1
 
 
+# CR-087：`baseline: null` 的语义是「从未测过」，而这一跑就测到了。
+# 不当场固化，就会留下 1 -> 5 全程无信号的后门（两名都在 top_k 内）。
+@pytest.mark.parametrize("rank", [1, 5, 6, 20])
+def test_null_baseline_with_a_measured_rank_must_be_fixed(rank):
+    probe = mk(rank, baseline=None, known_open=False)
+
+    # 真行为对照：R76 那版对 1 / 5 两格是静默通过的（6 / 20 则由 below 判失败）。
+    expected_old = 0 if rank <= TOP_K else 1
+    assert _r76_verdict([probe], TOP_K) == expected_old
+
+    regressed, below, needs = evaluate([probe], TOP_K)
+    assert len(needs) == 1, f"null 基线测到第 {rank} 名必须要求固化"
+    assert needs[0].rank == rank
+
+
+def test_null_baseline_backdoor_closed_end_to_end():
+    """CR-087 点名的闭环：null 首次测到第 1 名要求固化，固化成 1 之后跌到 5 报退步。"""
+    # 第一步：null + 第 1 名 —— R76 静默，现在要求固化。
+    first = mk(1, baseline=None, known_open=False)
+    assert _r76_verdict([first], TOP_K) == 0, "这正是 CR-087 复现出来的那格"
+    _, _, needs = evaluate([first], TOP_K)
+    assert len(needs) == 1 and needs[0].rank == 1
+
+    # 第二步：按要求把 baseline 固化成 1，此后跌到第 5 名 —— 必须报退步。
+    later = mk(5, baseline=1, known_open=False)
+    regressed, _, needs_after = evaluate([later], TOP_K)
+    assert len(regressed) == 1, "固化之后 1 -> 5 必须有信号"
+    assert needs_after == []
+
+
+def test_null_baseline_still_absent_is_left_to_the_yaml_layer():
+    """null + 仍未进候选：非 known_open 由 below 判失败；
+
+    known_open 的那一格 `evaluate` 确实不判，靠 YAML 层禁止这个组合本身
+    （见 test_no_probe_uses_null_baseline_as_a_backdoor）。这是 R76 那句
+    "防线在 YAML 层"**唯一**成立的一格——CR-087 指出它当时被过度推广到了 7 格。
+    """
+    _, below, needs = evaluate([mk(None, baseline=None, known_open=False)], TOP_K)
+    assert len(below) == 1 and needs == []
+    assert any(evaluate([mk(None, baseline=None, known_open=True)], TOP_K)) is False
+
+
 def test_baseline_equal_to_measured_rank_is_silent():
     """名次与基线相符是唯一该安静的常态，别把它也判成失败。"""
     assert any(evaluate([mk(5, baseline=5)], TOP_K)) is False
@@ -240,12 +303,18 @@ def test_which_inputs_make_the_gate_judge_nothing():
                     silent.add((tag, rank, known_open))
 
     expected = {
-        # baseline: null —— 「从未测过」。它确实两道闸都不判，这正是 CR-015
-        # 描述的洞；防线不在 evaluate 而在 YAML 层：
-        # test_no_probe_uses_null_baseline_as_a_backdoor 禁止 null + known_open，
-        # test_every_probe_records_a_baseline 禁止漏写 baseline。
-        ("null", None, True), ("null", 6, True), ("null", 20, True),
-        ("null", 1, False), ("null", 1, True), ("null", 5, False), ("null", 5, True),
+        # baseline: null + known_open + 仍未进候选。**只有这一格**靠 YAML 层
+        # 兜底（test_no_probe_uses_null_baseline_as_a_backdoor 禁止
+        # null + known_open 这个组合本身）。
+        #
+        # CR-087 的教训就写在这里：R76 我把 null 的 **7 格**全列成允许静默，
+        # 理由写的是"防线在 YAML 层"——**那句话我没核实**。实际上
+        # test_no_probe_uses_null_baseline_as_a_backdoor 只禁止
+        # null + known_open，test_every_probe_records_a_baseline 只检查
+        # `"baseline" not in p`（显式写 `baseline: null` 时键是在的），
+        # 两条都放行 `null + known_open=False`。于是用 null 首次测到第 1 名、
+        # 此后跌到第 5 名**全程无信号**。现在 null 只要测出名次就必须固化。
+        ("null", None, True),
         # 地板值：只剩「仍然缺席」这一格，也就是它本来的语义（CR-086 之后）。
         ("floor", None, True),
         # 数字基线：只有「进了 top_k 且不比基线好」才安静。
