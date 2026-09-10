@@ -80,8 +80,8 @@ liveness probe alone is no longer safe: "if your container usually starts in mor
 `initialDelaySeconds + failureThreshold × periodSeconds`, you should specify a startup
 probe that checks the same endpoint as the liveness probe." Note that this budget is a sum
 of the liveness probe's own settings, so the question to ask about a JVM service that
-takes ninety seconds to serve traffic is not "is the app slow" but "does ninety seconds
-fit inside that expression" — if it does not, the liveness probe will kill the container
+takes ninety seconds to serve traffic is not 'is the app slow' but 'does ninety seconds
+fit inside that expression' — if it does not, the liveness probe will kill the container
 mid-startup and the Deployment will never converge. The prescribed shape of the fix is
 also specific: "the default for `periodSeconds` is 10s. You should then set its
 `failureThreshold` high enough to allow the container to start, without changing the
@@ -137,7 +137,7 @@ source: kubernetes https://v1-36.docs.kubernetes.io/docs/concepts/workloads/cont
 
 `kubectl rollout undo deployment/<name>` reverts to the previous revision, and
 `--to-revision=<n>` selects a specific one. What that operation covers is narrower than
-"undo the last change": "a Deployment's revision is created when a Deployment's rollout is
+'undoing the last change': "a Deployment's revision is created when a Deployment's rollout is
 triggered. This means that the new revision is created if and only if the Deployment's Pod
 template (`.spec.template`) is changed, for example if you update the labels or container
 images of the template. Other updates, such as scaling the Deployment, do not create a
@@ -157,9 +157,9 @@ rather than taking the service down.
 source: kubernetes https://v1-36.docs.kubernetes.io/docs/concepts/workloads/controllers/deployment/#clean-up-policy
 
 Rollback history is not stored separately — it lives in the old ReplicaSets, and
-`.spec.revisionHistoryLimit` "specifies how many old ReplicaSets for this Deployment you
-want to retain. The rest will be garbage-collected in the background. By default, it is
-10." Setting it to zero is the trap, because it reads like a tidiness preference and is not
+`.spec.revisionHistoryLimit` is the knob: "You can set `.spec.revisionHistoryLimit` field
+in a Deployment to specify how many old ReplicaSets for this Deployment you want to retain.
+The rest will be garbage-collected in the background. By default, it is 10." Setting it to zero is the trap, because it reads like a tidiness preference and is not
 rejected: "explicitly setting this field to 0, will result in cleaning up all the history
 of your Deployment thus that Deployment will not be able to roll back." Nothing warns at
 apply time; the cost is discovered during the incident, when `rollout undo` has no revision

@@ -56,10 +56,10 @@ rules matter for a node inside a nested loop: when a subplan is executed more th
 once, `loops` reports the number of executions and the actual time and rows shown are
 averages per execution, so the total time spent in that node is the per-loop figure
 multiplied by `loops`. And a `Rows Removed by Filter` line reports how many scanned
-rows a filter condition rejected, which is what distinguishes "this node read little"
-from "this node read a lot and threw most of it away." Adding the `BUFFERS` option
-reports shared block hits and reads per node, whose "numbers help to identify which
-parts of the query are the most I/O-intensive."
+rows a filter condition rejected, which is what distinguishes 'this node read little'
+from 'this node read a lot and threw most of it away'. Adding the `BUFFERS` option
+reports shared block hits and reads per node: "The numbers provided by BUFFERS help to
+identify which parts of the query are the most I/O-intensive."
 
 ## An estimate that does not match the actual count is not automatically an estimation error
 source: postgresql https://www.postgresql.org/docs/17/using-explain.html#USING-EXPLAIN-CAVEATS

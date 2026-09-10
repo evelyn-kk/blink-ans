@@ -955,15 +955,15 @@ _R78_NEGATIVE_CONSTRAINT_CASES = {
         "把「catch 住就不回滚」反转成「仍然会回滚」",
     ),
     "Q40": (
-        "同一个类里 placeOrder",
-        "同一个类中 `placeOrder` 调用 `writeLedger` 时，`@Transactional` 是否生效取决于是否"
-        "配置了事务管理器且方法被正确代理。若 `writeLedger` 上有 `@Transactional` 注解，"
-        "且 Spring 容器已注册 `PlatformTransactionManager` 并启用 `@Transactional` 处理"
-        "（如通过 `<tx:annotation-driven/>`），则事务会生效 [4]。",
-        "不生效。代理模式下只有经过代理进来的外部调用才会被拦截，同一个类里的自调用"
-        "不经过代理，因此 `writeLedger` 上的 `@Transactional` 不会生效 [1]。"
-        "若确实需要自调用也开启事务，官方给的替代方案是改用 AspectJ 模式 [1]。",
-        "把「自调用不生效」反转成「事务会生效」（真实答错的一次生成）",
+        "外层 placeOrder 已经标了 @Transactional",
+        "会跑在新事务里 [3]。  \n配置 `@Transactional(REQUIRES_NEW)` 时，会创建独立于外层"
+        "事务的全新事务 [3]。  \n若外层事务已提交或回滚，内层事务不受影响，需确保事务"
+        "管理器支持跨事务传播 [5]。",
+        "不会。同一个类里的自调用不经过代理，`writeLedger` 上的 `@Transactional(REQUIRES_NEW)` "
+        "不生效，不会新开事务 [1]。这次写操作仍然跑在 `placeOrder` 开的那个外层事务里，"
+        "跟着它一起提交或回滚，它自己声明的传播行为、隔离级别都不作数 [1]。要真拿到独立"
+        "事务，得把 `writeLedger` 挪到另一个 bean，或改用 AspectJ 模式 [1]。",
+        "把「不会新开事务、仍在外层事务里」反转成「会新开一个事务」（CR-089 改题后真实答错的一次生成）",
     ),
     "Q42": (
         "对账方法上标了 readOnly",
@@ -991,9 +991,59 @@ _R78_NEGATIVE_CONSTRAINT_CASES = {
     ),
 }
 
+# ---- R79（CR-089）：把"内层注解不生效"与"完全没有事务"分开 ----
+#
+# CR-089 指出卡片标题与原 Q40 把两种局面合并成一个结论。改题之后这一对题
+# 才真正可判别：**同一个把两者混为一谈的答案，必然在这两题里至少错一题**。
+# 因此除了常规的两侧判别性，下面另有一条专门的交叉用例。
+_R79_NEGATIVE_CONSTRAINT_CASES = {
+    "Q41": (
+        "如果外层 placeOrder 自己没标",
+        "能保住。`writeLedger` 上标了 `@Transactional`，这次写库仍然在事务保护里，出错会回滚 [1]。",
+        "不能保住，外层方法无 @Transactional 时，内部方法的事务不会自动传播 [3]。"
+        "需在调用链中显式使用 `@Transactional(propagation = Propagation.REQUIRES_NEW)` [1]。",
+        "把「没有外层事务时根本没有事务」反转成「仍受事务保护、会回滚」",
+    ),
+}
+
+# 这段话是 CR-089 描述的那种答案：前半句（代理只拦外部调用、自调用不生效）
+# 完全正确，后半句把它推成"完全没有事务"。**改题之前它在 Q40 上是 passed**
+# ——本轮用 `git show HEAD:knowledge/eval/scenario_questions.yaml` 取改题前的
+# 判据实跑过，关键点 2/2、负向约束 0 命中（不手抄历史判据，避免再造一份
+# 与实现脱钩的复刻件，那是 R76/R77 已经登记过的问题）。
+_CR089_CONFLATED_ANSWER = (
+    "不生效。代理只拦截经过代理进来的外部调用，同一个类里的自调用不生效 [1]，"
+    "所以 `writeLedger` 里的写操作完全没有事务，出错也不会回滚 [1]。"
+)
+
+
+def test_cr089_conflating_no_inner_boundary_with_no_transaction_is_caught():
+    """CR-089 的核心判别性：一个把"内层注解不生效"直接推成"完全没有事务"的
+    答案，在**外层已有事务**那道题上必须被负向约束标出。
+
+    这正是改题之前判据抓不到的那种错误——旧 Q40 只问"生不生效"，这段话
+    回答得"对"，却会让读者以为订单写入根本没有被任何事务保护。
+    """
+    spec = _spec("外层 placeOrder 已经标了 @Transactional")
+    hits = [p for p in spec["forbid_patterns"] if re.search(p, _CR089_CONFLATED_ANSWER)]
+    assert hits, "把「无内层边界」说成「完全无事务」必须被标出"
+    assert _status_of(spec, _CR089_CONFLATED_ANSWER) != "passed"
+
+
+def test_cr089_the_same_sentence_is_correct_on_the_no_outer_transaction_question():
+    """同一段话在**外层没有事务**那道题上是正确答案，不得被标出——
+    两题合起来才把两种局面分开；只有一题的话，判据分不出对错。
+    """
+    spec = _spec("如果外层 placeOrder 自己没标")
+    hits = [p for p in spec.get("forbid_patterns", []) if re.search(p, _CR089_CONFLATED_ANSWER)]
+    assert not hits, f"这段话对这道题是对的，不该被负向约束命中：{hits}"
+    assert _status_of(spec, _CR089_CONFLATED_ANSWER) == "passed"
+
+
 _NEGATIVE_CONSTRAINT_CASES = {**_R71_NEGATIVE_CONSTRAINT_CASES,
                               **_R72_NEGATIVE_CONSTRAINT_CASES,
-                              **_R78_NEGATIVE_CONSTRAINT_CASES}
+                              **_R78_NEGATIVE_CONSTRAINT_CASES,
+                              **_R79_NEGATIVE_CONSTRAINT_CASES}
 
 
 @pytest.mark.parametrize("key", sorted(_NEGATIVE_CONSTRAINT_CASES))

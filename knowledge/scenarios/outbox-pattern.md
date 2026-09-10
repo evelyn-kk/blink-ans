@@ -20,15 +20,15 @@ The outbox pattern avoids this by turning the second write into something the fi
 write's transaction already covers. Instead of calling the broker directly, the
 service inserts a row describing the event into an outbox table in the same database,
 as part of the same transaction as the business change. A separate process reads that
-table and forwards the events to the broker. Because "record the business change" and
-"record the intent to publish" now happen atomically in one transaction, the
+table and forwards the events to the broker. Because 'record the business change' and
+'record the intent to publish' now happen atomically in one transaction, the
 inconsistency window described above disappears — you can lose the forwarder for a
 while, but you cannot lose the event once the transaction has committed.
 
 ## How the Outbox Event Router turns a table row into a Kafka message
 source: debezium https://debezium.io/documentation/reference/3.6/transformations/outbox-event-router.html#basic-outbox-table
 
-Debezium's Outbox Event Router is the "separate process" from the paragraph above,
+Debezium's Outbox Event Router is the 'separate process' from the paragraph above,
 implemented as a single message transform (SMT) on top of a normal Debezium CDC
 connector. The connector already streams every row change from the outbox table via
 the database's own change data capture mechanism (for example logical decoding on

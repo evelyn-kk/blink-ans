@@ -8,6 +8,7 @@ version_or_commit/license/technology 全部照抄它引用的真实来源。这�
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.schemas.chunk import Chunk, utc_now  # noqa: E402
 from services.retrieval import store as store_mod  # noqa: E402
 from services.retrieval.embed import DIM  # noqa: E402
-from services.retrieval.store import IndexBuilder  # noqa: E402
+from services.retrieval.store import ChunkStore, IndexBuilder  # noqa: E402
 from services.sync import cards  # noqa: E402
 from services.sync.registry import RegistryError, Source, load_registry  # noqa: E402
 
@@ -416,3 +417,112 @@ def test_fetched_format_still_requires_fetch_fields(tmp_path):
     })
     with pytest.raises(RegistryError, match="缺少必填字段"):
         load_registry(p)
+
+
+# ---- R79：卡片引文必须真的出自它引用的那一页（CR-089 的邻居） ----
+#
+# `_build_chunk()` 的 CR-045 校验只保证**引用的 URL** 在语料里真实存在，
+# 完全不看引号里的内容是不是抄自那一页。R78 写第六张卡片时是用一个一次性
+# 脚本核对的 43 段引文，当时就在自陈里登记了"没有留成回归"——CR-089 恰好
+# 指出的是同一小节里另一种失真（标题把结论说过头），说明卡片正文这一层
+# 确实需要机械判据。这一条把当时那个脚本固化下来。
+#
+# 判据的边界（§5.3，不作全称承诺）：它验的是**双引号里的每一段都能在被引用
+# 那一页的正文里逐字找到**（归一化掉大小写/标点/空白/反引号，`…` 处切开），
+# 因此卡片正文里的双引号被约定为"只用于引文"——想写强调或反问句，用单引号。
+# 它**不**验证引文有没有被断章取义，也不验证卡片自己的推断部分是否正确。
+_CARD_DIR = Path(__file__).resolve().parents[2] / "knowledge" / "scenarios"
+
+
+def _quoted_spans(body: str) -> list[str]:
+    """按双引号切开，取**奇数段**当引文。
+
+    不用"配对正则"去匹配一整段引文：官方正文自己就带引号（`"check-and-set"`、
+    `"undo the last change"`），配对正则要么把相邻两段引文连同中间的过渡语
+    并成一段，要么在嵌套处错位——第一版就是这么误报的。改成按引号切分，
+    偶数段是卡片作者的过渡语、奇数段是引文，嵌套与相邻两种情形都自然成立，
+    前提正是本判据要求的那条约定：**卡片正文里的双引号只用于引文**。
+    """
+    parts = body.split('"')
+    if len(parts) % 2 == 0:          # 引号不成对，本身就是格式错误
+        raise AssertionError(f"卡片正文里的双引号不成对（共 {len(parts) - 1} 个）")
+    return parts[1::2]
+
+
+# 官方正文里的行内链接 `[restart policy](/docs/...)`，引用时按惯例只保留可读的
+# 那部分（"its restart policy."）。归一化必须先把链接目标去掉，否则一段完全
+# 忠实的引文会因为 URL 里的字母数字对不上而误报——第一版就误报了 k8s 卡片
+# 里两段引文。
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# 同理，官方正文里的行内 LaTeX（k8s 那句判定式写成 `\\( a + b \\times c \\)`）
+# 在卡片里按渲染后的样子引用（`a + b × c`）。这里把两种写法都折成同一个词，
+# **只折这一组数学记号**，不做通用的 LaTeX 解析——列清楚它等同了什么，
+# 免得日后有人以为这条判据能容忍任意改写（§5.3）。
+_MATH_EQUIV = ((r"\times", "times"), ("×", "times"), (r"\\(", " "), (r"\\)", " "))
+
+
+def _normalize_for_quote_match(text: str) -> str:
+    text = _MD_LINK.sub(r"\1", text)
+    for src, dst in _MATH_EQUIV:
+        text = text.replace(src, dst)
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _card_sections(path: Path):
+    body = path.read_text(encoding="utf-8")
+    for sec in re.split(r"^## ", body, flags=re.M)[1:]:
+        lines = sec.splitlines()
+        m = re.match(r"source:\s+(\S+)\s+(\S+)", lines[1])
+        assert m, f"{path.name} § {lines[0][:40]}: 第二行必须是 source 指令"
+        yield lines[0], m.group(1), m.group(2), "\n".join(lines[2:])
+
+
+@pytest.mark.skipif(not store_mod.CURRENT.exists(),
+                    reason="需要本机已建好的 current.db 才能取到被引用页的正文（语料与索引都不入库）")
+@pytest.mark.parametrize("card_path", sorted(_CARD_DIR.glob("*.md")), ids=lambda p: p.name)
+def test_every_quoted_span_in_a_card_appears_in_the_cited_page(card_path):
+    """判别性验证（写这条时实际做过）：把第六张卡片里一段引文改掉一个词，
+    这条立刻失败；把它改回来即通过。它在 R78 那个一次性脚本下也确实抓出过
+    两处会写错的地方（引文跨块、标点走样）。
+    """
+    store = ChunkStore(store_mod.CURRENT, check_dictionary=False)
+    try:
+        checked = 0
+        for heading, project, url, body in _card_sections(card_path):
+            # 比对范围是**整页**而不是"URL 逐字相同的那一块"：一页会被切成
+            # 多块，很多来源还把锚点写进 source_url，于是被引用的那一条锚点
+            # 地址常常只对应页面里的一小段，而引文来自同一页的另一块。第一版
+            # 按 URL 逐字取块，六张卡片里有四张因此误报——判据自己搞错了范围。
+            page_url = url.split("#")[0]
+            rows = store.execute(
+                "SELECT text FROM chunks WHERE source_project = ? "
+                "AND (source_url = ? OR source_url LIKE ?) "
+                "AND (source_path IS NULL OR source_path NOT LIKE 'knowledge/scenarios%') "
+                # 必须按 id 排序再拼：一段引文可能横跨相邻两块，乱序拼接会把
+                # 本来连续的正文接断，判据就会误报"引文找不到"（第一版如此）。
+                "ORDER BY id",
+                (project, page_url, page_url + "#%"),
+            )
+            assert rows, f"{card_path.name} § {heading[:40]}: 引用的页面在语料里没有对应的原生块"
+            page = _normalize_for_quote_match(" ".join(r["text"] for r in rows))
+            for quoted in _quoted_spans(body):
+                for part in re.split(r"\u2026|\s\.\.\.\s", quoted):
+                    part = part.strip(" ,.;")
+                    if len(part) < 12:      # 太短的片段（字段名、单词）不足以定位，跳过
+                        continue
+                    checked += 1
+                    assert _normalize_for_quote_match(part) in page, (
+                        f"{card_path.name} § {heading[:40]}: 这段引文在被引用页里找不到"
+                        f"（若本意是强调而非引用，请改用单引号）: {part[:80]!r}"
+                    )
+        # 这里**不**断言"每张卡片至少要有一段引文"。第一版这么写，结果把
+        # `kafka-consumer-retry-dlq.md` 判失败——那张卡片通篇是转述（只在
+        # `source:` 指令里给出处），而"卡片必须逐字引用"从来不是卡片契约
+        # （见 architecture.md §5.3 与 services/sync/cards.py），是我顺手加的
+        # 新规矩。**代价要写清楚**（§5.4：哪些输入会让它什么都不判）：全篇
+        # 转述的卡片在这条判据下 checked=0，等于不受任何检查——它验的是
+        # "引号里的话是不是原话"，验不了"转述得对不对"。
+        if not checked:
+            pytest.skip(f"{card_path.name} 通篇转述、没有双引号引文，这条判据对它不判任何东西")
+    finally:
+        store.close()

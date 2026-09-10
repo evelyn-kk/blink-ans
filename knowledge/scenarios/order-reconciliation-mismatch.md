@@ -31,7 +31,7 @@ programmatic one is
 documentation permits but discourages: "You are strongly encouraged to use the declarative
 approach to rollback, if at all possible."
 
-## A `@Transactional` method called from inside the same object runs with no transaction at all
+## A `@Transactional` method called from inside the same object never gets the transaction it declares — it runs in whatever the caller already had
 source: spring-framework https://docs.spring.io/spring-framework/reference/7.0/data-access/transaction/declarative/annotations.html
 
 The annotation is only metadata: "the mere presence of the `@Transactional` annotation is
@@ -45,11 +45,19 @@ coming in through the proxy are intercepted. This means that self-invocation (in
 method within the target object calling another method of the target object) does not lead
 to an actual transaction at runtime even if the invoked method is marked with
 `@Transactional`." So `placeOrder()` calling `this.writeLedgerEntry()` runs the ledger
-write with whatever transaction (possibly none) the caller had — the annotation on the
-inner method is inert, and no rollback protects it. The same section adds a second timing
-trap: "the proxy must be fully initialized to provide the expected behavior, so you should
-not rely on this feature in your initialization code -- for example, in a `@PostConstruct`
-method." If self-invocation genuinely must be transactional, the documented alternative is
+write with whatever transaction the caller already had — the annotation on the inner method
+is inert. Read that sentence precisely, because the two cases it covers fail in different
+ways and the difference decides what you look for during an incident. If `placeOrder()` is
+itself transactional, the ledger write silently *joins that outer transaction*: the write
+is still transactional, but everything `writeLedgerEntry()` declared for itself is ignored
+— a `REQUIRES_NEW` does not start a second transaction, a different isolation level or
+timeout is not applied, and a failure there rolls back the order too. If the caller is not
+transactional, then nothing is: the write commits on its own and no rollback protects it.
+Both look identical in the source code, which is why 'the annotation is there, so the
+method is transactional' is the wrong question to ask — the right one is which method the
+call entered the object through. The same section adds a second timing trap: "the proxy
+must be fully initialized to provide the expected behavior, so you should not rely on this
+feature in your initialization code -- for example, in a `@PostConstruct` method." If self-invocation genuinely must be transactional, the documented alternative is
 AspectJ mode — "In this case, there is no proxy in the first place. Instead, the target
 class is woven (that is, its byte code is modified)". One further silent failure is worth
 knowing because it produces the same symptom without any self-call: Spring recommends
