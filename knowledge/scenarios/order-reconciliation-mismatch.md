@@ -52,10 +52,17 @@ itself transactional, the ledger write silently *joins that outer transaction*: 
 is still transactional, but everything `writeLedgerEntry()` declared for itself is ignored
 — a `REQUIRES_NEW` does not start a second transaction, a different isolation level or
 timeout is not applied, and a failure there rolls back the order too. If the caller is not
-transactional, then nothing is: the write commits on its own and no rollback protects it.
-Both look identical in the source code, which is why 'the annotation is there, so the
-method is transactional' is the wrong question to ask — the right one is which method the
-call entered the object through. The same section adds a second timing trap: "the proxy
+transactional either, then no transaction is started at all — and this is the point to stop
+and not over-read the sentence: what then happens to the write itself is decided by the
+data access API and its configuration, not by the proxy rule quoted above. Depending on
+that API an unmanaged write may go through on its own, or be rejected outright, and this
+section deliberately cites no evidence for either outcome. What the quoted rule does
+establish is narrower and still enough to act on: no transaction boundary was created
+here, so nothing in this call path will roll the write back, and any reasoning that starts
+with 'the ledger row is safely committed' is unsupported. Both cases look identical in the
+source code, which is why 'the annotation is there, so the method is transactional' is the
+wrong question to ask — the right one is which method the call entered the object
+through. The same section adds a second timing trap: "the proxy
 must be fully initialized to provide the expected behavior, so you should not rely on this
 feature in your initialization code -- for example, in a `@PostConstruct` method." If self-invocation genuinely must be transactional, the documented alternative is
 AspectJ mode — "In this case, there is no proxy in the first place. Instead, the target

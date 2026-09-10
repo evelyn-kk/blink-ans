@@ -1040,6 +1040,67 @@ def test_cr089_the_same_sentence_is_correct_on_the_no_outer_transaction_question
     assert _status_of(spec, _CR089_CONFLATED_ANSWER) == "passed"
 
 
+# ---- R80（CR-090）：另一侧的过度外推——"没有事务" ≠ "写库必然已落盘" ----
+#
+# CR-089 收窄标题之后，卡片仍然断言"外层没有事务时，写操作会自行提交"。
+# 审查方指出这同样没有证据：被引用的那一页只说明自调用不会建立内层注解声明的
+# 事务边界，管不着数据访问 API 在无事务时的行为——transaction-scoped 的 JPA
+# `EntityManager` 在没有活动事务时 `persist`/`merge` 要抛
+# `TransactionRequiredException`（Jakarta Persistence 3.1 §3.3）。本机八个来源的
+# 语料里 `TransactionRequiredException` 与 `transaction-scoped` **各 0 块**，
+# 两种结果都拿不出可引用的出处，因此卡片改成不承诺具体持久化结果。
+#
+# 判据这一侧的分工要说清楚：这条负向约束**不判它必错**（纯 JDBC 自动提交下
+# "会提交"可能是对的），判的是"这份证据支撑不了这个断言"，因此走人工复核通道。
+_CR090_OVERREACHING_ANSWERS = {
+    "会自动提交": "保不住。自调用不经过代理，注解不生效，所以这次写库会自动提交，"
+                  "出错也不会回滚 [1]。",
+    "会直接落库": "不能保住。没有事务，写入会直接落库，无法回滚 [1]。",
+}
+
+# 两句都按卡片改后的正文写，都必须**不被**任何负向约束命中。第二句是这次
+# 重新校准的直接动机：它里面的"没有任何东西会回滚它"曾被 R79 那条裸的
+# "(会|仍然|…)…回滚" 误伤——定长逆序断言挡不住出现在句子更早处的"没有"。
+_CR090_FAITHFUL_ANSWERS = (
+    "保不住。`placeOrder` 自己没标 `@Transactional`，同一个类里的自调用不经过代理，"
+    "`writeLedger` 上的注解不生效 [1]，所以根本没有事务被开启 [1]。",
+    "保不住。`placeOrder` 自己没标 `@Transactional`，同一个类里的自调用不经过代理，"
+    "`writeLedger` 上的注解不生效 [1]，所以根本没有事务被开启，这条调用链里没有任何"
+    "东西会回滚它 [1]。",
+)
+
+
+@pytest.mark.parametrize("key", sorted(_CR090_OVERREACHING_ANSWERS))
+def test_cr090_claiming_the_write_just_commits_is_flagged(key):
+    """判别性，**两句的旧行为不一样，如实分开写**（用
+    `git show HEAD:knowledge/eval/scenario_questions.yaml` 取旧判据实跑，不手抄）：
+
+    - "会自动提交"那句在旧判据下**关键点 2/2、负向约束 0 命中，判定 passed**
+      ——这是这条约束真正补上的洞；
+    - "会直接落库"那句当时也被标出了，但命中的是讲**回滚**的那个分支，而且是
+      靠"无法回滚"里的"无"从间隔类里漏过去的**误命中**，不是因为它断言了提交。
+      也就是说这一句的旧"拦下"是巧合，不能算判别性证据。
+
+    现在两句都必须因为"断言了证据支撑不了的持久化结果"而被标出、不得判过。
+    """
+    spec = _spec("如果外层 placeOrder 自己没标")
+    answer = _CR090_OVERREACHING_ANSWERS[key]
+    assert [p for p in spec["forbid_patterns"] if re.search(p, answer)], \
+        f"「{key}」这种无证据的持久化断言必须进人工复核通道"
+    assert _status_of(spec, answer) != "passed"
+
+
+@pytest.mark.parametrize("answer", _CR090_FAITHFUL_ANSWERS)
+def test_cr090_constraint_spares_answers_that_stop_where_the_evidence_stops(answer):
+    """反向判别性：只说到证据支持的那一步（没有事务被开启、这条链路里没有
+    任何东西回滚它）的答案不得被标出，否则这条约束就成了"只会变红"。
+    """
+    spec = _spec("如果外层 placeOrder 自己没标")
+    hits = [p for p in spec["forbid_patterns"] if re.search(p, answer)]
+    assert not hits, f"忠实于证据的回答被负向约束误伤：{hits}"
+    assert _status_of(spec, answer) == "passed"
+
+
 _NEGATIVE_CONSTRAINT_CASES = {**_R71_NEGATIVE_CONSTRAINT_CASES,
                               **_R72_NEGATIVE_CONSTRAINT_CASES,
                               **_R78_NEGATIVE_CONSTRAINT_CASES,
