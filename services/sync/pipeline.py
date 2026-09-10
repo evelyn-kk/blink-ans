@@ -332,25 +332,43 @@ def sync(
             if r.error or (r.source_id in authored_ids and r.rejected)
         ]
 
+        if failed and not allow_partial:
+            report.incomplete = True
+
         # T-118：上面那道门只看"本轮同步的来源有没有失败"，看不见"某张卡片
         # 压根没进这个索引"。丢失可以发生在完全不涉及卡片来源的一次合并里
         # （见 _uncovered_card_files 的说明），因此按注册表逐个文件核对覆盖，
         # 而不是相信同步清单。
         # verify 模式的暂存索引本来就只含被点名的来源，缺卡片是这个模式的
         # 定义而不是缺陷；它也永不激活。只在会激活整份索引的 full/merge 上判。
+        #
+        # **这一项不进 `failed`，也不受 `--allow-partial` 放行**（CR-088）：
+        # 第一版把它追加进 `failed`，于是通用豁免顺手也豁免了它——实测
+        # `sync(allow_partial=True)` 在日志点名缺了 outbox-pattern.md 的同时
+        # 照样 `activated=True` 并替换 current.db，正是这道门禁最该拦下的
+        # 那一个输入（与 CR-015/CR-048 同形）。`--allow-partial` 的语义是
+        # "我知道某个来源这次没拉全，仍然要上线"，那是一个可以由人承担的
+        # 取舍；而"索引里整张卡片不见了"是**证据丢失**，且它恰好能让门禁
+        # 变绿（T-118 已经发生过一次），没有"知情放行"的余地。
         uncovered = (
             _uncovered_card_files(stats.path, ingestible(load_registry()))
             if mode != "verify" else []
         )
+        report.uncovered_cards = uncovered
         if uncovered:
             log(f"  索引里缺少这些卡片文件的全部小节: {', '.join(uncovered)}")
-            failed = failed + [f"卡片缺失({len(uncovered)} 份)"]
-
-        if failed and not allow_partial:
             report.incomplete = True
 
         if mode == "verify":
             log(f"局部验证模式不激活索引；暂存索引留在 {stats.path} 供检查与 kb search --index")
+        elif report.uncovered_cards:
+            # 单独一条文案：这条路径拒绝激活的理由不是"某个来源没拉全"，
+            # 而且 --allow-partial 对它无效，不能给出那句建议（CR-088）。
+            log(f"待激活索引里缺少这些卡片文件的全部小节: "
+                f"{', '.join(report.uncovered_cards)}；这是证据丢失，"
+                f"**--allow-partial 不放行**。请修好卡片引用后重新同步，"
+                f"或先把它从 knowledge/sources.yaml 的 authored 来源里正式去掉"
+                + (f"（本次另有来源未完整同步: {', '.join(failed)}）" if failed else ""))
         elif report.incomplete:
             log(f"{', '.join(failed)} 未能完整同步，索引不完整，拒绝激活；"
                 f"确认要带着缺口上线请加 --allow-partial")

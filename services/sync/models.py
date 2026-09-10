@@ -34,5 +34,8 @@ class SyncReport:
     regression_skipped: list[str] = field(default_factory=list)
     activated: bool = False
     incomplete: bool = False     # 有来源未能同步，索引缺内容
+    # 待激活索引里一块都没有的卡片文件（CR-088）。与 incomplete 分开记：
+    # incomplete 可以由 --allow-partial 放行，这一项不能。
+    uncovered_cards: list[str] = field(default_factory=list)
     index_path: Path | None = None
     staging_path: Path | None = None

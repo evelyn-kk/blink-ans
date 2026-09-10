@@ -244,6 +244,51 @@ def test_a_card_file_with_no_chunks_blocks_activation(monkeypatch, tmp_path):
     assert any(missing in line for line in lines), "必须点名是哪份卡片缺了"
 
 
+def test_allow_partial_does_not_open_the_card_coverage_gate(monkeypatch, tmp_path):
+    """CR-088：`--allow-partial` **不得**放行"索引里整张卡片不见了"。
+
+    判别性：R78 那版把 `uncovered` 追加进 `failed`，于是通用豁免顺手把这道
+    新门禁也豁免了——codex 独立复现：漏掉 `outbox-pattern.md` 后
+    `sync(allow_partial=True)` 日志点名缺卡片、却仍然 `activated=True` 并
+    替换了 `current.db`，正是这道门禁最该拦下的那一个输入（CR-015/CR-048
+    同形）。这条用例在旧实现上通过不了。
+
+    两种失败的语义不同，因此判定也分开：`--allow-partial` 说的是"我知道某个
+    来源这次没拉全，仍然要上线"，那是一个人可以承担的取舍；而"整张卡片没进
+    索引"是证据丢失，而且它**恰好能让门禁变绿**（T-118 已经真的发生过一次），
+    没有知情放行的余地。
+    """
+    missing = "outbox-pattern.md"
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set(), skip_cards={missing})
+    lines: list[str] = []
+    rep = pl.sync(allow_partial=True, log=lines.append)
+
+    # 先断行为、再断字段：字段是 CR-088 才加的，若把它写在前面，这条用例在
+    # 旧实现上会因为 AttributeError 而失败——那是"名字不存在"，不是"行为不同"
+    # （AGENTS.md §5.2 的弱判别性，上一轮刚踩过一次）。
+    assert not rep.activated, "--allow-partial 不得放行缺卡片的索引"
+    assert not (tmp_path / "current.db").exists()
+    assert rep.incomplete
+    assert rep.uncovered_cards == [f"knowledge/scenarios/{missing}"]
+    assert any("--allow-partial" in line and "不放行" in line for line in lines), (
+        "拒绝理由必须说清 --allow-partial 对这道门无效，不能沿用那句"
+        "「确认要带着缺口上线请加 --allow-partial」的建议"
+    )
+
+
+def test_allow_partial_still_opts_into_a_merely_incomplete_source(monkeypatch, tmp_path):
+    """反向边界（CR-088 收紧不得殃及既有语义）：来源拉取失败但卡片齐全时，
+    `--allow-partial` 照旧放行。否则这次收紧就成了"把豁免整个关掉"。
+
+    **如实说明：这条不是判别性用例**——它在修复前后都通过（旧实现同样会
+    放行）。它的作用是把"这次收紧的边界在哪里"钉住：不是判据在变严，
+    是把两种语义不同的失败分开。
+    """
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing={"kafka"})
+    rep = pl.sync(allow_partial=True, log=lambda *_: None)
+    assert rep.activated and not rep.incomplete
+
+
 def test_merging_a_cited_source_keeps_every_card_file(monkeypatch, tmp_path):
     """R78 实测那次丢失的端到端复现：合并一个**被卡片引用**的来源，
     合并完之后每份卡片文件都必须还在索引里。
@@ -455,10 +500,25 @@ def test_authored_rejection_without_error_blocks_activation(monkeypatch, tmp_pat
     assert not (tmp_path / "current.db").exists(), "authored 来源有拒绝时不得激活"
 
 
-def test_authored_rejection_allow_partial_still_opts_in(monkeypatch, tmp_path):
+def test_authored_rejection_is_not_opt_in_able_anymore(monkeypatch, tmp_path):
+    """CR-088 收紧后这条的期望**反过来了**，改动理由记在这里。
+
+    原来（CR-046 那轮）断言的是"卡片被拒绝时，`--allow-partial` 仍可放行
+    激活"——当时 `--allow-partial` 是一把统一的"我知道有缺口，仍要上线"。
+    CR-088 之后不再如此：卡片来源零产出意味着**待激活索引里整张卡片不见了**，
+    与 T-118 那次真实的证据丢失是同一个终局状态，而那次丢失恰好让一道门禁
+    变绿。因此这条路径现在一律不激活，`--allow-partial` 不放行。
+
+    CR-046 的原意（"拒绝"必须和硬错误一样拦下激活）没有被削弱，反而更强：
+    从"默认拦下、可豁免"变成"拦下且不可豁免"。要带着一张坏卡片上线，只能
+    先把它从注册表的 authored 来源里正式去掉——那是一个留痕的决定，不是
+    一个命令行开关。
+    """
     pl = _fake_sync_env(monkeypatch, tmp_path, failing=set(), rejected={"scenario-cards"})
     rep = pl.sync(allow_partial=True, log=lambda *_: None)
-    assert rep.activated and not rep.incomplete
+    # 同样先断行为：旧实现在这里 activated=True，是真行为差异。
+    assert not rep.activated and rep.incomplete
+    assert rep.uncovered_cards, "卡片零产出 = 每一份卡片文件都没进索引"
 
 
 def test_merge_authored_rejection_does_not_wipe_existing_cards(monkeypatch, tmp_path):
