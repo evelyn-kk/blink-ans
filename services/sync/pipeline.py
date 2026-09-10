@@ -26,7 +26,8 @@ from .models import SourceResult, SyncReport  # noqa: E402
 from .parse import parse_file  # noqa: E402
 from .registry import Source, ingestible, load_registry  # noqa: E402
 
-REGRESSION_PATH = Path(__file__).resolve().parents[2] / "knowledge" / "regression_queries.yaml"
+ROOT = Path(__file__).resolve().parents[2]
+REGRESSION_PATH = ROOT / "knowledge" / "regression_queries.yaml"
 EMBED_BATCH = 16
 
 
@@ -168,7 +169,58 @@ def _resolve_sources(only: list[str] | None, mode: str) -> list[Source]:
     if unknown:
         # 打错一个来源 id 就静默少同步一个来源，比直接失败糟得多
         raise ValueError(f"未登记或不入库的来源: {', '.join(unknown)}")
+
+    if mode == "merge":
+        # authored 来源（场景卡片）在 merge 模式下**永远参与同步**，哪怕
+        # --only 没点名它。理由是一次真实的静默证据丢失（T-118，R78 实测
+        # 复现）：卡片小节的 `source_project` 是它引用的真实来源（如
+        # spring-kafka），而 `carry_over()` 按 `source_project` 排除本轮同步
+        # 的来源——于是 `--only spring-kafka --mode merge` 会把引用
+        # spring-kafka 的卡片小节一并排除，而卡片来源又不在本轮同步清单里、
+        # 不会被重建，那些小节就**从索引里消失了**，且全程没有任何报错。
+        # R75 那次重同步五个 asciidoc 来源，正是这样让 12 个卡片块（DLQ 5 +
+        # Redis 5 + Outbox 2）静默出局，还顺带让两条排序探针"变好"了。
+        #
+        # 修法只能是重建而不是搬运：卡片块的 version_or_commit/license 抄自
+        # 被引用来源，被引用来源刚换了版本，旧卡片块就是过期元数据；重建还会
+        # 顺带重跑 CR-045 的"引用 URL 必须在语料里真实存在"校验。
+        picked_ids = {s.id for s in picked}
+        picked += [s for s in everything if s.format == "authored" and s.id not in picked_ids]
     return picked
+
+
+def _uncovered_card_files(index_path: Path, sources: list[Source]) -> list[str]:
+    """注册表里每一份卡片文件，在即将激活的索引里都必须至少有一块。
+
+    这是 T-118 那次静默丢失的**门禁**，和"为什么会丢"这个具体原因解耦：
+    不管是 carry_over 的排除条件写错、authored 来源没进同步清单、还是将来
+    某条新路径，只要激活前的索引里少了某个卡片文件的全部小节，这里就会
+    报出来并拦下激活。回归的 6 条烟雾查询做不到这件事——它们几乎不可能
+    恰好覆盖某一张卡片。
+    """
+    store = ChunkStore(index_path, check_dictionary=False)
+    try:
+        present = {
+            r["source_path"] for r in store.execute(
+                "SELECT DISTINCT source_path FROM chunks WHERE source_path IS NOT NULL"
+            )
+        }
+    finally:
+        store.close()
+
+    missing: list[str] = []
+    for src in sources:
+        if src.format != "authored":
+            continue
+        for rel in src.paths:
+            base = ROOT / rel
+            if not base.exists():
+                continue
+            for f in sorted(base.glob("*.md")):
+                rel_path = f"{rel.rstrip('/')}/{f.name}"
+                if rel_path not in present:
+                    missing.append(rel_path)
+    return missing
 
 
 def sync(
@@ -279,6 +331,21 @@ def sync(
             r.source_id for r in report.sources
             if r.error or (r.source_id in authored_ids and r.rejected)
         ]
+
+        # T-118：上面那道门只看"本轮同步的来源有没有失败"，看不见"某张卡片
+        # 压根没进这个索引"。丢失可以发生在完全不涉及卡片来源的一次合并里
+        # （见 _uncovered_card_files 的说明），因此按注册表逐个文件核对覆盖，
+        # 而不是相信同步清单。
+        # verify 模式的暂存索引本来就只含被点名的来源，缺卡片是这个模式的
+        # 定义而不是缺陷；它也永不激活。只在会激活整份索引的 full/merge 上判。
+        uncovered = (
+            _uncovered_card_files(stats.path, ingestible(load_registry()))
+            if mode != "verify" else []
+        )
+        if uncovered:
+            log(f"  索引里缺少这些卡片文件的全部小节: {', '.join(uncovered)}")
+            failed = failed + [f"卡片缺失({len(uncovered)} 份)"]
+
         if failed and not allow_partial:
             report.incomplete = True
 

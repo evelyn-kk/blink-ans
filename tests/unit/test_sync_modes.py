@@ -20,6 +20,8 @@ from services.retrieval.embed import DIM  # noqa: E402
 from services.retrieval.store import ChunkStore, IndexBuilder, IndexError_  # noqa: E402
 from services.sync.pipeline import _resolve_sources, run_regression  # noqa: E402
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 # ---------- 模式与 --only 的组合约束 ----------
 
@@ -175,6 +177,94 @@ def test_carry_over_excludes_authored_chunks_by_source_path_not_project(tmp_path
         s.close()
 
 
+# ---------- T-118：合并某个来源会静默带走引用它的卡片小节 ----------
+
+def test_carry_over_drops_card_chunks_whose_cited_project_is_being_synced(tmp_path, monkeypatch):
+    """先把丢失的**机制**钉住（这条在修复前后都通过，是机制说明不是判别性
+    测试）：卡片小节的 `source_project` 是被引用来源，于是
+    `carry_over(..., exclude_projects={"spring-kafka"})` 会把引用
+    spring-kafka 的卡片小节和 spring-kafka 官方块一起排除掉。
+
+    这本身没有错——排除是为了让本轮重建的新块写进来。真正的缺陷在于
+    "卡片来源不在本轮同步清单里，于是没有任何东西把它重建回来"，见下面
+    两条判别性测试。
+    """
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    b = IndexBuilder("t118base")
+    card = _chunk("spring-kafka", "spring-kafka", 1, "卡片小节：非阻塞重试的等待发生在重试主题上。",
+                  source_path="knowledge/scenarios/kafka-consumer-retry-dlq.md")
+    native = _chunk("spring-kafka", "spring-kafka", 2, "spring-kafka 官方文档正文。")
+    other = _chunk("postgresql", "postgresql", 3, "postgresql 官方文档正文。")
+    for c in (card, native, other):
+        c.validate()
+    b.add([card, native, other], [_vec(0), _vec(1), _vec(2)])
+    b.finalize({"spring-kafka": "aaa", "postgresql": "bbb"}, "synthetic")
+    b.activate()
+
+    merged = IndexBuilder("t118merged")
+    moved = merged.carry_over(tmp_path / "t118base.db", {"spring-kafka"}, "synthetic")
+    assert moved == 1, "卡片小节随被引用来源一起被排除——这正是它必须被重建的原因"
+
+
+def test_merge_always_syncs_authored_sources_even_when_only_names_another():
+    """判别性：修复前 `_resolve_sources(["spring-kafka"], "merge")` 只返回
+    spring-kafka，卡片来源不在清单里 → 被 carry_over 排除掉的卡片小节没有
+    任何东西重建它们 → 静默消失。R75 就是这样丢了 12 块。
+    """
+    got = [s.id for s in _resolve_sources(["spring-kafka"], "merge")]
+    assert "scenario-cards" in got, "merge 模式必须连带重建卡片，否则引用该来源的小节会丢"
+    assert got[-1] == "scenario-cards", (
+        "卡片必须排在最后同步：它要引用本轮刚同步来源的新版本号与新块地址"
+    )
+    assert "spring-kafka" in got
+
+
+def test_verify_mode_does_not_pull_in_authored_sources():
+    """反向边界：verify 只建被点名来源的局部索引、永不激活，
+    不该顺手把卡片也拉进来（卡片的引用校验要看整份语料）。"""
+    got = [s.id for s in _resolve_sources(["spring-kafka"], "verify")]
+    assert got == ["spring-kafka"]
+
+
+def test_a_card_file_with_no_chunks_blocks_activation(monkeypatch, tmp_path):
+    """判别性：即使同步清单里每个来源都"成功"了，只要某张卡片文件在即将
+    激活的索引里一块都没有，就必须拦下激活。
+
+    这道门与"为什么会丢"解耦——`failing`/`rejected` 都是空的，来源全部
+    报成功，旧实现在这里直接激活。
+    """
+    missing = "outbox-pattern.md"
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set(), skip_cards={missing})
+    lines: list[str] = []
+    rep = pl.sync(log=lines.append)
+
+    assert rep.regression_passed, "回归本身是过的——拦下它的必须是卡片覆盖检查"
+    assert rep.incomplete and not rep.activated
+    assert not (tmp_path / "current.db").exists()
+    assert any(missing in line for line in lines), "必须点名是哪份卡片缺了"
+
+
+def test_merging_a_cited_source_keeps_every_card_file(monkeypatch, tmp_path):
+    """R78 实测那次丢失的端到端复现：合并一个**被卡片引用**的来源，
+    合并完之后每份卡片文件都必须还在索引里。
+
+    修复前这里会掉到 0（卡片块按 source_project 被排除，又没被重建）。
+    """
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    pl.sync(log=lambda *_: None)
+    before = _count_card_chunks(tmp_path / "current.db")
+    assert before
+
+    monkeypatch.setattr(store_mod, "CURRENT", tmp_path / "current.db")
+    monkeypatch.setattr(pl, "CURRENT", tmp_path / "current.db")
+    rep = pl.sync(["kafka"], mode="merge", log=lambda *_: None)
+
+    assert rep.activated and not rep.incomplete
+    assert _count_card_chunks(tmp_path / "current.db") == before, (
+        "合并一个被卡片引用的来源，不得让卡片小节静默出局"
+    )
+
+
 def test_merge_refuses_when_embedding_model_differs(base_index):
     """向量不重算，模型不一致就是在混用语义不同的向量——必须直接拒绝。"""
     b = IndexBuilder("merged3")
@@ -229,10 +319,32 @@ class _StubEmbedder:
         return [0.0] * DIM
 
 
+def _count_card_chunks(index_path: Path) -> int:
+    """按 `source_path` 前缀数卡片块。
+
+    **不能按 `source_project` 数**（这条测试原来就是这么写的）：真实卡片块的
+    `source_project` 是它引用的来源（debezium / spring-kafka / ...），
+    "scenario-cards" 这个项目名在索引里一条都不存在。按项目数在旧的仿真
+    环境里恰好成立，因此那条断言从来没有真正验证过卡片是否还在（T-118）。
+    """
+    s = ChunkStore(index_path, check_dictionary=False)
+    try:
+        rows = s.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE source_path LIKE 'knowledge/scenarios%'"
+        )
+        return rows[0]["n"]
+    finally:
+        s.close()
+
+
 # ---------- 来源失败时不得激活 ----------
 
-def _fake_sync_env(monkeypatch, tmp_path, failing: set[str], rejected: set[str] = frozenset()):
+def _fake_sync_env(monkeypatch, tmp_path, failing: set[str], rejected: set[str] = frozenset(),
+                   skip_cards: set[str] = frozenset()):
     """把 sync() 的网络与模型依赖换掉，只保留控制流。
+
+    `skip_cards`：让 authored 来源在本轮"漏掉"指定的卡片文件，用来构造
+    T-118 那种"某张卡片一块都没进索引"的局面。
 
     `rejected`：模拟 CR-046 场景——来源本轮返回 0 块且 `res.rejected>0`，
     但 `res.error` 仍是 `None`（authored 来源格式/引用错误就是这样报告的，
@@ -258,6 +370,22 @@ def _fake_sync_env(monkeypatch, tmp_path, failing: set[str], rejected: set[str] 
             res.rejected = 1
             return [], res
         res.commit = "aaa"
+        if src.format == "authored":
+            # authored 来源必须仿真到两个关键属性上，否则用它做的实验证明不了
+            # 任何关于卡片的事（T-118）：块的 `source_project` 是**被引用的
+            # 真实来源**（这里统一用 kafka），`source_path` 是卡片文件自身的
+            # 相对路径。前者正是 carry_over 按项目排除时误伤卡片的原因，
+            # 后者是逐文件覆盖检查的依据。
+            chunks = []
+            for rel in src.paths:
+                for i, f in enumerate(sorted((REPO_ROOT / rel).glob("*.md"))):
+                    if f.name in skip_cards:
+                        continue
+                    c = _chunk("kafka", "kafka", 100 + i, f"{f.name} 的卡片小节正文。",
+                               source_path=f"{rel.rstrip('/')}/{f.name}")
+                    c.validate()
+                    chunks.append(c)
+            return chunks, res
         c = _chunk(src.project, src.technology, 1, f"{src.project} 的一段说明文字。")
         c.validate()
         return [c], res
@@ -340,9 +468,7 @@ def test_merge_authored_rejection_does_not_wipe_existing_cards(monkeypatch, tmp_
     可能覆盖到具体某张卡片，拦不住这种情况。"""
     pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
     pl.sync(log=lambda *_: None)  # 先建一个包含 scenario-cards 的完整索引
-    before = ChunkStore(tmp_path / "current.db", check_dictionary=False)
-    cards_before = before.stats().get("scenario-cards")
-    before.close()
+    cards_before = _count_card_chunks(tmp_path / "current.db")
     assert cards_before
 
     monkeypatch.setattr(store_mod, "CURRENT", tmp_path / "current.db")
@@ -354,7 +480,7 @@ def test_merge_authored_rejection_does_not_wipe_existing_cards(monkeypatch, tmp_
     assert rep.incomplete and not rep.activated
     after = ChunkStore(tmp_path / "current.db", check_dictionary=False)
     try:
-        assert after.stats().get("scenario-cards") == cards_before, (
+        assert _count_card_chunks(tmp_path / "current.db") == cards_before, (
             "当前索引不得被清空了卡片内容的合并结果覆盖"
         )
     finally:
