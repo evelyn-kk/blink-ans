@@ -15,5 +15,7 @@ queries:
     expect_project: spring-boot
   - text: PostgreSQL 执行计划 慢查询
     expect_project: postgresql
+  - text: Spring 声明式事务 传播行为 回滚规则
+    expect_project: spring-framework
   - text: 连接池 配置
     expect_project: null      # 任意来源命中即可，验证中文检索整体可用

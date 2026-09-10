@@ -12,6 +12,9 @@
 # 2026-09-06（T-018）：为 I3 场景卡片补消息可靠性投递（DLQ/重试）与 Outbox/CDC
 #            对账两类场景的权威出处，新增 spring-kafka、debezium 两个来源；
 #            决策记录见 development-notes.md。license/paths 经 GitHub API 核实。
+# 2026-09-10（T-114）：为 I3 第六张场景卡片「订单/对账」补 Spring 声明式事务
+#            的权威出处，新增 spring-framework（只取 data-access/）；
+#            决策记录见 development-notes.md。license/paths 经 GitHub API 核实。
 
 version: 1
 
@@ -171,6 +174,48 @@ sources:
     # 站点检索覆盖，不因此阻塞该来源整体入库。
     paths:
       - documentation/modules/ROOT/pages/transformations
+    ingest: true
+    sync_frequency: monthly
+
+  - id: spring-framework
+    project: spring-framework
+    # technology 用 `spring`，与 spring-boot 同域，**不是**沿用 spring-kafka
+    # 那种独立标签（T-114 决策，见 development-notes.md 2026-09-10）：
+    # `detect_technology()` 只认 PROJECT_TERMS 里的字面词，"spring" 会判成
+    # `spring`。若这里填 `spring-framework`，那么"Spring 事务为什么没回滚"
+    # 这类提问会被过滤到 technology='spring'，**把本来源整个排除在候选之外**
+    # ——恰好是最该命中它的问题。spring-kafka 当初能独立成域，是因为
+    # PROJECT_TERMS 里有"死信/dlq"这类词把提问直接判到那个标签上；
+    # spring-framework 没有这样的专属触发词。
+    # 代价（已实测，见 development-notes.md）：与 spring-boot 共用候选池，
+    # 有 CR-040 那种"同域内互相挤占"的风险，本轮用排序探针前后对照量化。
+    technology: spring
+    repo: https://github.com/spring-projects/spring-framework
+    # 固定发布 tag。选 v7.0.9 不是因为它是最新，而是因为已登记的
+    # spring-boot v4.1.1 在 gradle.properties 里把 springFrameworkVersion
+    # 钉死在 7.0.9——两个来源同版本，回答里不会出现互相矛盾的行为描述。
+    ref: v7.0.9
+    license: Apache-2.0
+    license_file: LICENSE.txt
+    format: asciidoc
+    locale: en
+    # 与 spring-kafka 4.1 同一情形：/7.0/ 是当前版本路径，实测 302 到无版本
+    # 地址（`.../reference/data-access/...`，内容相同）；历史版本 /6.2/ 与
+    # 下一版 /7.1/ 都直接 200。按 CR-005"ref 与 base_url 同版本"取 /7.0/，
+    # 不用会随发布漂移的无版本地址。
+    base_url: https://docs.spring.io/spring-framework/reference/7.0/
+    # 只取 data-access/：事务传播、回滚规则、代理边界、只读事务这些
+    # 「订单/对账」场景需要的正文全在这一棵子树里，且**都是自包含的散文**
+    # ——抽查 rolling-back / tx-propagation / annotations 三个文件，
+    # 只有 `include-code::` 引入代码样例，没有 debezium connectors 那种
+    # 用 `include::{partialsdir}` 把整节正文放在未登记目录的写法。
+    # core/aop（代理机制的完整解释）本轮不取：自调用不走代理这条事实在
+    # data-access/transaction/declarative/annotations.adoc 里已有原文
+    # （"only external method calls coming in through the proxy are
+    # intercepted"），为它引入整个 core/ 子树不划算。写卡片时若发现
+    # 确实需要更深的解释，再单独评估。
+    paths:
+      - framework-docs/modules/ROOT/pages/data-access
     ingest: true
     sync_frequency: monthly
 

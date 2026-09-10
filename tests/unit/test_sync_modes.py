@@ -182,7 +182,12 @@ def test_merge_refuses_when_embedding_model_differs(base_index):
         b.carry_over(base_index, {"kafka"}, "another-embedding-model")
 
 
-def test_merge_requires_existing_base(tmp_path):
+def test_merge_requires_existing_base(tmp_path, monkeypatch):
+    # 本轮（T-114）顺带修掉：这条用例原来不取 base_index fixture，于是
+    # store_mod.INDEX_DIR 没被改写，IndexBuilder 直接在**生产索引目录**
+    # data/index/ 里建 merged4.building.db，每跑一次测试就留一份 84 KB
+    # 的垃圾在真实数据目录里（实测确认该文件由本用例产生）。
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
     b = IndexBuilder("merged4")
     with pytest.raises(IndexError_, match="不存在"):
         b.carry_over(tmp_path / "nope.db", {"kafka"}, "synthetic")
