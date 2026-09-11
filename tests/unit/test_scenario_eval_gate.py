@@ -1008,10 +1008,16 @@ _R79_NEGATIVE_CONSTRAINT_CASES = {
 }
 
 # 这段话是 CR-089 描述的那种答案：前半句（代理只拦外部调用、自调用不生效）
-# 完全正确，后半句把它推成"完全没有事务"。**改题之前它在 Q40 上是 passed**
-# ——本轮用 `git show HEAD:knowledge/eval/scenario_questions.yaml` 取改题前的
-# 判据实跑过，关键点 2/2、负向约束 0 命中（不手抄历史判据，避免再造一份
+# 完全正确，后半句把它推成"完全没有事务"。**改题之前它在 Q40 上是 passed**：
+#
+#     git show 057bfed:knowledge/eval/scenario_questions.yaml
+#
+# 在那一版上实跑为关键点 2/2、负向约束 0 命中（不手抄历史判据，避免再造一份
 # 与实现脱钩的复刻件，那是 R76/R77 已经登记过的问题）。
+# **更正（CR-093，R82）**：这里原来写的是 `git show HEAD:...`，而 `HEAD` 会
+# 漂移——照抄那条命令取到的是当前判据，复现不出所述旧行为。这是 CR-083 已经
+# 定过一次的规矩（审计记录里指向提交的引用一律用固定 SHA）第二次被违反，
+# 保留原文痕迹在此。
 _CR089_CONFLATED_ANSWER = (
     "不生效。代理只拦截经过代理进来的外部调用，同一个类里的自调用不生效 [1]，"
     "所以 `writeLedger` 里的写操作完全没有事务，出错也不会回滚 [1]。"
@@ -1074,10 +1080,46 @@ def test_cr091_answers_that_stop_at_the_annotation_still_pass(answer):
     assert _status_of(spec, answer) == "passed"
 
 
+# ---- R82（CR-092）：范围词判定误伤"就事论事"的正确结论 ----
+#
+# CR-091 那条负向约束第一版按**全称范围词**（整条/整个/后续/任何/根本/完全/
+# 压根）判推广。审查方复现：一句正确的局部结论——"这个注解根本没有建立事务
+# 边界，因为自调用不经过代理"——两条正向关键点全中，却同时被这条负向约束
+# 标出；同一输入在 `999b340` 上负向是 `[False, False]`，在 R81 那版上变成
+# `[False, False, True]`。根因是"根本/完全/压根"只是语气副词，不表示"整条
+# 链路"，恰好与本轮要保留的局部回答重叠。
+#
+# 改法：按**主语**判，不按语气词判——"没有事务"的主语是写操作/数据/调用链/
+# 后续调用/下游这类**结果或链路**时才算推广；主语是注解、`@Transactional`、
+# 事务边界时一律放过，语气副词退化为可选。
+#
+# 下面两句**必须通过**，第一句逐字取自审查方给的复现输入（自己写的最小样例
+# 证明不了不误伤——这是意见里点名的要求）。
+_CR092_LOCAL_BUT_CORRECT_ANSWERS = (
+    "不会；这个注解根本没有建立事务边界，因为自调用不经过代理 [1]。",
+    "不会建立。代理只拦截经过代理进来的外部调用，所以 `@Transactional` 完全没有"
+    "起作用，也就没有开启事务 [1]。",
+)
+
+
+@pytest.mark.parametrize("answer", _CR092_LOCAL_BUT_CORRECT_ANSWERS)
+def test_cr092_local_conclusions_about_the_annotation_are_not_flagged(answer):
+    """反向判别性：只对**这个注解**下结论的正确回答不得被范围词约束误伤。
+
+    判别性：这两句在 R81 那版（`fdbbbd0`）上都会被第三条负向约束标出，
+    在 `999b340` 与现在都不会。
+    """
+    spec = _spec("外层 placeOrder 没标")
+    hits = [p for p in spec["forbid_patterns"] if re.search(p, answer)]
+    assert not hits, f"就事论事的局部结论被误伤：{hits}"
+    assert _status_of(spec, answer) == "passed"
+
+
 def test_cr091_extending_to_the_whole_call_chain_is_flagged():
     """判别性：把"这个注解不建边界"推广成"整条调用链都没有事务、没人回滚"
-    必须被标出。**改题前这句话是 `passed`**——本轮用
-    `git show HEAD:knowledge/eval/scenario_questions.yaml` 取旧判据实跑确认。
+    必须被标出。**改题前这句话是 `passed`**——在 `999b340` 那一版上实跑确认
+    （`git show 999b340:knowledge/eval/scenario_questions.yaml`，关键点 2/2、
+    负向 0 命中）。更正见 `_CR089_CONFLATED_ANSWER` 上方关于 CR-093 的说明。
     """
     answer = ("不会。自调用不经过代理，注解不生效 [1]，所以整条调用链都没有事务，"
               "没有任何东西会回滚它 [1]。")
@@ -1122,8 +1164,9 @@ _CR090_FAITHFUL_ANSWERS = (
 
 @pytest.mark.parametrize("key", sorted(_CR090_OVERREACHING_ANSWERS))
 def test_cr090_claiming_the_write_just_commits_is_flagged(key):
-    """判别性，**两句的旧行为不一样，如实分开写**（用
-    `git show HEAD:knowledge/eval/scenario_questions.yaml` 取旧判据实跑，不手抄）：
+    """判别性，**两句的旧行为不一样，如实分开写**（在 `4e4ea67` 那一版上实跑，
+    `git show 4e4ea67:knowledge/eval/scenario_questions.yaml`，不手抄；
+    更正见 `_CR089_CONFLATED_ANSWER` 上方关于 CR-093 的说明）：
 
     - "会自动提交"那句在旧判据下**关键点 2/2、负向约束 0 命中，判定 passed**
       ——这是这条约束真正补上的洞；
