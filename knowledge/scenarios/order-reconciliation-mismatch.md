@@ -50,16 +50,29 @@ is inert. Read that sentence precisely, because the two cases it covers fail in 
 ways and the difference decides what you look for during an incident. If `placeOrder()` is
 itself transactional, the ledger write silently *joins that outer transaction*: the write
 is still transactional, but everything `writeLedgerEntry()` declared for itself is ignored
-— a `REQUIRES_NEW` does not start a second transaction, a different isolation level or
-timeout is not applied, and a failure there rolls back the order too. If the caller is not
-transactional either, then no transaction is started at all — and this is the point to stop
-and not over-read the sentence: what then happens to the write itself is decided by the
-data access API and its configuration, not by the proxy rule quoted above. Depending on
-that API an unmanaged write may go through on its own, or be rejected outright, and this
-section deliberately cites no evidence for either outcome. What the quoted rule does
-establish is narrower and still enough to act on: no transaction boundary was created
-here, so nothing in this call path will roll the write back, and any reasoning that starts
-with 'the ledger row is safely committed' is unsupported. Both cases look identical in the
+— a `REQUIRES_NEW` does not start a second transaction, and a different isolation level or
+timeout is not applied. If the caller is not transactional either, then this call does not
+start one either — and that is where the quoted rule stops. It says something about **this
+call**, not about everything that happens afterwards, so three things it does *not* settle
+are worth naming, because each of them has been read into it at some point:
+
+- *Whether a transaction exists further down.* The rule limits interception to calls that
+  enter through a proxy — so the moment `writeLedgerEntry()` calls a **different** bean,
+  that call does go through that bean's proxy, and a transactional method there (a
+  repository method, say) establishes its own boundary. Programmatic transaction
+  management is available at that point too. Neither is excluded by anything quoted here.
+- *What happens to an unmanaged write.* If nothing downstream establishes a boundary
+  either, the outcome is decided by the data access API and its configuration, not by this
+  page: such a write may go through on its own or be rejected outright, and this section
+  deliberately cites no evidence for either.
+- *Whether anything will roll it back.* That follows from the previous two, not from the
+  annotation.
+
+What the rule does establish is narrow and still worth acting on: the boundary
+`writeLedgerEntry()` declares for itself is not created at this call, so any reasoning
+that starts with 'it is annotated, therefore this method runs in the transaction it asked
+for' is unsupported — and so is its mirror image, 'the annotation did not fire, therefore
+nothing here is transactional'. Both cases look identical in the
 source code, which is why 'the annotation is there, so the method is transactional' is the
 wrong question to ask — the right one is which method the call entered the object
 through. The same section adds a second timing trap: "the proxy

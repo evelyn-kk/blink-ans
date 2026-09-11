@@ -997,12 +997,13 @@ _R78_NEGATIVE_CONSTRAINT_CASES = {
 # 才真正可判别：**同一个把两者混为一谈的答案，必然在这两题里至少错一题**。
 # 因此除了常规的两侧判别性，下面另有一条专门的交叉用例。
 _R79_NEGATIVE_CONSTRAINT_CASES = {
+    # CR-091 改题后，这一条的两个样本都换成了新问法下的说法：反转是"代理会
+    # 拦截并为它开启新事务"，"不得误伤"的那句只说到注解本身。
     "Q41": (
-        "如果外层 placeOrder 自己没标",
-        "能保住。`writeLedger` 上标了 `@Transactional`，这次写库仍然在事务保护里，出错会回滚 [1]。",
-        "不能保住，外层方法无 @Transactional 时，内部方法的事务不会自动传播 [3]。"
-        "需在调用链中显式使用 `@Transactional(propagation = Propagation.REQUIRES_NEW)` [1]。",
-        "把「没有外层事务时根本没有事务」反转成「仍受事务保护、会回滚」",
+        "外层 placeOrder 没标",
+        "会建立。`writeLedger` 上标了 `@Transactional`，代理会拦截并为它开启一个新事务 [1]。",
+        "不会建立。代理只拦截经过代理进来的外部调用，同一个类里的自调用不生效 [1]。",
+        "把「自调用注解不建立它声明的边界」反转成「代理会拦截并开启新事务」",
     ),
 }
 
@@ -1030,14 +1031,59 @@ def test_cr089_conflating_no_inner_boundary_with_no_transaction_is_caught():
     assert _status_of(spec, _CR089_CONFLATED_ANSWER) != "passed"
 
 
-def test_cr089_the_same_sentence_is_correct_on_the_no_outer_transaction_question():
-    """同一段话在**外层没有事务**那道题上是正确答案，不得被标出——
-    两题合起来才把两种局面分开；只有一题的话，判据分不出对错。
+def test_cr091_the_conflated_sentence_is_not_a_free_pass_on_the_other_question_either():
+    """**这条是 R79 那条断言的反面，改动理由记在这里。**
+
+    R79 写的是"同一段话在外层没有事务那道题上是正确答案，不得被标出"，
+    并断言它 `passed`。CR-091 指出那个期望本身就是外推：Spring 的自调用规则
+    只说**被自调用的那个注解**不会建立它声明的边界，`writeLedger()` 随后调用
+    另一个 bean（例如 repository）时，那次调用经过的是**那个 bean 的代理**，
+    下游照样可以在那里建立事务边界，程序式事务（`TransactionTemplate`）同理。
+    所以"这次写操作完全没有事务"在**两道题上都**是没有依据的说法。
+
+    CR-089 要分开的那两种局面仍然分得开——靠的是正向关键点（Q40 要求说出
+    "仍在外层事务里"），不再靠"完全没有事务"这半句在某一题上被判对。
     """
-    spec = _spec("如果外层 placeOrder 自己没标")
-    hits = [p for p in spec.get("forbid_patterns", []) if re.search(p, _CR089_CONFLATED_ANSWER)]
-    assert not hits, f"这段话对这道题是对的，不该被负向约束命中：{hits}"
-    assert _status_of(spec, _CR089_CONFLATED_ANSWER) == "passed"
+    for prefix in ("外层 placeOrder 已经标了 @Transactional", "外层 placeOrder 没标"):
+        spec = _spec(prefix)
+        hits = [p for p in spec["forbid_patterns"] if re.search(p, _CR089_CONFLATED_ANSWER)]
+        assert hits, f"「完全没有事务」在「{prefix[:12]}…」这题上也必须被标出"
+        assert _status_of(spec, _CR089_CONFLATED_ANSWER) != "passed"
+
+
+# CR-091 点名要求必须**通过**的那种回答：既说明自调用注解不生效，又说明下游
+# 仍可能另建事务。它是这条收窄的反向判别性——判据收窄之后不能变成"只会变红"。
+_CR091_FAITHFUL_ANSWER = (
+    "不会。同一个类里的自调用不经过代理，`writeLedger` 上的 `@Transactional` 不会建立"
+    "它声明的事务边界 [1]。但这只说明这一次调用没有开启事务：如果 `writeLedger` 接着"
+    "去调用别的 bean（比如一个 repository），那次调用会经过那个 bean 的代理，下游仍然"
+    "可能在那里开自己的事务；用 `TransactionTemplate` 也可以 [1]。"
+)
+
+# 只说到注解本身、不往下游推的回答，同样必须通过。
+_CR091_MINIMAL_ANSWER = (
+    "不会建立。代理只拦截经过代理进来的外部调用，同一个类里的自调用不生效 [1]。"
+)
+
+
+@pytest.mark.parametrize("answer", [_CR091_FAITHFUL_ANSWER, _CR091_MINIMAL_ANSWER])
+def test_cr091_answers_that_stop_at_the_annotation_still_pass(answer):
+    spec = _spec("外层 placeOrder 没标")
+    hits = [p for p in spec["forbid_patterns"] if re.search(p, answer)]
+    assert not hits, f"停在证据边界上的回答被误伤：{hits}"
+    assert _status_of(spec, answer) == "passed"
+
+
+def test_cr091_extending_to_the_whole_call_chain_is_flagged():
+    """判别性：把"这个注解不建边界"推广成"整条调用链都没有事务、没人回滚"
+    必须被标出。**改题前这句话是 `passed`**——本轮用
+    `git show HEAD:knowledge/eval/scenario_questions.yaml` 取旧判据实跑确认。
+    """
+    answer = ("不会。自调用不经过代理，注解不生效 [1]，所以整条调用链都没有事务，"
+              "没有任何东西会回滚它 [1]。")
+    spec = _spec("外层 placeOrder 没标")
+    assert [p for p in spec["forbid_patterns"] if re.search(p, answer)]
+    assert _status_of(spec, answer) != "passed"
 
 
 # ---- R80（CR-090）：另一侧的过度外推——"没有事务" ≠ "写库必然已落盘" ----
@@ -1061,12 +1107,16 @@ _CR090_OVERREACHING_ANSWERS = {
 # 两句都按卡片改后的正文写，都必须**不被**任何负向约束命中。第二句是这次
 # 重新校准的直接动机：它里面的"没有任何东西会回滚它"曾被 R79 那条裸的
 # "(会|仍然|…)…回滚" 误伤——定长逆序断言挡不住出现在句子更早处的"没有"。
+# CR-091 之后这两句**都被换掉了**，原因值得记：R80 写的"忠实回答"是
+# "所以根本没有事务被开启""这条调用链里没有任何东西会回滚它"——按 CR-091，
+# 那两句同样是外推（下游的 repository 代理或 `TransactionTemplate` 都可能
+# 另建事务）。也就是说上一轮我用来证明"没有误伤"的样本，本身就是下一条
+# 意见要抓的东西。现在的样本只说到注解本身与代理机制。
 _CR090_FAITHFUL_ANSWERS = (
-    "保不住。`placeOrder` 自己没标 `@Transactional`，同一个类里的自调用不经过代理，"
-    "`writeLedger` 上的注解不生效 [1]，所以根本没有事务被开启 [1]。",
-    "保不住。`placeOrder` 自己没标 `@Transactional`，同一个类里的自调用不经过代理，"
-    "`writeLedger` 上的注解不生效 [1]，所以根本没有事务被开启，这条调用链里没有任何"
-    "东西会回滚它 [1]。",
+    "不会建立。`placeOrder` 自己没标 `@Transactional`，同一个类里的自调用不经过代理，"
+    "`writeLedger` 上的注解不生效 [1]。",
+    "不会。代理只拦截经过代理进来的外部调用，所以这个注解不会建立它声明的事务边界 [1]；"
+    "至于后面还会不会有事务，得看 `writeLedger` 接下来调用了什么 [1]。",
 )
 
 
@@ -1083,7 +1133,7 @@ def test_cr090_claiming_the_write_just_commits_is_flagged(key):
 
     现在两句都必须因为"断言了证据支撑不了的持久化结果"而被标出、不得判过。
     """
-    spec = _spec("如果外层 placeOrder 自己没标")
+    spec = _spec("外层 placeOrder 没标")
     answer = _CR090_OVERREACHING_ANSWERS[key]
     assert [p for p in spec["forbid_patterns"] if re.search(p, answer)], \
         f"「{key}」这种无证据的持久化断言必须进人工复核通道"
@@ -1095,7 +1145,7 @@ def test_cr090_constraint_spares_answers_that_stop_where_the_evidence_stops(answ
     """反向判别性：只说到证据支持的那一步（没有事务被开启、这条链路里没有
     任何东西回滚它）的答案不得被标出，否则这条约束就成了"只会变红"。
     """
-    spec = _spec("如果外层 placeOrder 自己没标")
+    spec = _spec("外层 placeOrder 没标")
     hits = [p for p in spec["forbid_patterns"] if re.search(p, answer)]
     assert not hits, f"忠实于证据的回答被负向约束误伤：{hits}"
     assert _status_of(spec, answer) == "passed"
