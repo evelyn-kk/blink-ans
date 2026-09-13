@@ -1,0 +1,108 @@
+# 检索验证集（held-out）—— **不用于调参**
+#
+# 由 CR-097 要求建立（codex R86 审查）：T-112 那次 RRF_K 调参"选参"与"宣称
+# 零退步"用的是同一批 13 条排序探针，属自证。这份集合的唯一用途是**验证
+# 一次排序改动能不能泛化到没参与调参的题上**。
+#
+# 独立性是怎么保证的（写清楚，免得日后被当成又一批调参靶子）：
+# 1. **题面不是本轮写的**——全部逐字取自 `basic_questions.yaml`（I2 时期
+#    建立的 50 题集），且排除掉任何已经出现在 `ranking_probe.yaml` 里的题。
+# 2. **gold 是人工打开读过的**，判定标准与排序探针同一条：不得用
+#    `text LIKE '%关键词%'` 圈定，不得靠"标题里有这个词"，必须确认正文
+#    真的回答了这个问题。每条下面的 `why` 记录我读到的那句依据。
+# 3. **这份文件不参与任何参数选择**。用法是：改动前后各跑一次，比较
+#    `rank_at_k60`（当前生产常量下的实测名次）与改动后的名次。
+#
+# 用法：
+#     .venv/bin/python packages/evaltools/probe_validation.py            # 按当前常量跑
+#     .venv/bin/python packages/evaltools/probe_validation.py --rrf-k 10 # 对照某个候选值
+#
+# 与排序探针的分工：探针是**门禁**（有 baseline、退步即失败），这份是
+# **对照尺**（只报名次，不判成败），因此它不会因为名次波动让 CI 变红——
+# 那样只会诱导把它也当成调参目标。
+
+version: 1
+top_k: 5            # 只用于统计"进前 5 的条数"，不作判据
+limit: 20           # 与排序探针一致，便于横向对照
+
+cases:
+  - q: Kafka 日志压缩 compaction 是怎么工作的
+    project: kafka
+    gold: "Design › Log Compaction"
+    rank_at_k60: 1
+    why: |
+      正文开篇即 "Log compaction ensures that Kafka will always retain at least
+      the last known value for each message key within the log of data for a
+      single topic partition."——正是"怎么工作"的定义句。
+
+  - q: Kubernetes 的资源 requests 和 limits 有什么区别
+    project: kubernetes
+    gold: "Resource Management for Pods and Containers › Requests and limits"
+    rank_at_k60: 7
+    why: |
+      正文用"request 只是调度依据、节点有余量时容器可以超用；limit 才是硬
+      上限"这组对照解释两者区别，并给了 256MiB / 8GiB 的具体例子。
+
+  - q: Pod 的 QoS 等级是怎么划分的
+    project: kubernetes
+    gold: "Pod Quality of Service Classes › Quality of Service classes"
+    rank_at_k60: 4
+    why: |
+      "Kubernetes classifies the Pods that you run and allocates each Pod into a
+      specific quality of service (QoS) class… based on the resource requests"
+      ——直接讲划分依据。
+
+  - q: PostgreSQL 的 autovacuum 是做什么的
+    project: postgresql
+    gold: "Maintenance › Routine Database Maintenance Tasks › Routine Vacuuming › The Autovacuum Daemon"
+    rank_at_k60: 1
+    why: |
+      "PostgreSQL has an optional but highly recommended feature called
+      autovacuum, whose purpose is to automate the execution of VACUUM and
+      ANALYZE commands."
+
+  - q: PostgreSQL 事务隔离级别有哪几种
+    project: postgresql
+    gold: "Mvcc › Concurrency Control › Transaction Isolation"
+    gold_exact: true
+    rank_at_k60: 2
+    why: |
+      "The SQL standard defines four levels of transaction isolation…"——本题
+      问的就是"有哪几种"。用 `gold_exact` 排除 `› Read Committed…` 这类子小节，
+      它们各讲一种级别，不回答"有哪几种"。
+
+  - q: PostgreSQL 怎么查看当前的锁等待
+    project: postgresql
+    gold: "Monitoring › Monitoring Database Activity › Viewing Locks"
+    rank_at_k60: 2
+    why: |
+      "Another useful tool for monitoring database activity is the pg_locks
+      system table. It allows the database administrator to view information
+      about the outstanding locks in the lock manager."
+
+  - q: Spring Boot 怎么做优雅停机
+    project: spring-boot
+    gold: "Graceful Shutdown"
+    gold_exact: true
+    rank_at_k60: 2
+    why: |
+      "Graceful shutdown is enabled by default with all three embedded web
+      servers… It occurs as part of closing the application context"——本题的
+      正面回答。`gold_exact` 把 `› Rejecting Requests…` 等子小节排除在外。
+
+  - q: Spring Boot 怎么暴露 Prometheus 指标
+    project: spring-boot
+    gold: "Metrics › Supported Monitoring Systems › Prometheus"
+    rank_at_k60: 1
+    why: |
+      "Spring Boot provides an actuator endpoint at `/actuator/prometheus` to
+      present a Prometheus scrape with the appropriate format."
+
+  - q: Spring Data Redis 怎么用 Lua 脚本
+    project: spring-data-redis
+    gold: "Scripting"
+    rank_at_k60: 1
+    why: |
+      "Redis versions 2.6 and higher provide support for running Lua scripts
+      through the eval and evalsha commands. Spring Data Redis provides a
+      high-level abstraction for running scripts…"

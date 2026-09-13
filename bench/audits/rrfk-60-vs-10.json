@@ -1,0 +1,1769 @@
+{
+ "note": "CR-097：RRF_K 60 vs 10 判定发生变化的题，逐题存档答案与 top10 证据",
+ "reports": {
+  "k60": "bench/reports/eval-scenarios-20260913T061808Z.json",
+  "k10": "bench/reports/eval-scenarios-20260913T064511Z.json"
+ },
+ "cases": [
+  {
+   "question": "为什么不能直接先写数据库、再单独调用消息队列发通知，而要引入 Outbox 表",
+   "k60": {
+    "status": "failed",
+    "keypoints_hit": [],
+    "keypoints_missed": [
+     "(?i)(dual.?writ|双写|两个独立|两次独立)",
+     "(?i)(不一致|不强一致|无强一致性|inconsist)"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "debezium",
+     "spring-framework"
+    ],
+    "answer": "引入 Outbox 表是为了实现事务一致性：确保数据库写入与消息发送的原子性 [1][2]。若直接先写库再发消息，可能因网络或系统故障导致消息丢失或重复 [1]。  \n若需改用直接写库+异步发消息，必须确保消息发送失败时能回滚数据库操作，否则违反最终一致性 [2]。  \n当前 Debezium Outbox SMT 仅支持特定数据库（如 MySQL、PostgreSQL）和 MongoDB，不兼容所有数据库类型 [5]。  \n\n> 风险：若无事务管理（如 `PlatformTransactionManager`）支持，无法保证写库与发消息的原子性 [4]。  \n> 回滚方式：需在消息发送失败时，通过事务回滚数据库写入，依赖 `@Transactional` 注解 [4]。",
+    "evidence_top10": [
+     {
+      "rowid": 15055,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Payload serialization format › Using JSON as the payload format › Expanding escaped JSON String as JSON",
+      "tokens": 98,
+      "kw": 6,
+      "vec": 16
+     },
+     {
+      "rowid": 14879,
+      "project": "debezium",
+      "title_path": "Applying Transformations Selectively › Defining SMT predicates",
+      "tokens": 79,
+      "kw": 1,
+      "vec": 28
+     },
+     {
+      "rowid": 15028,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router › Emitting messages with additional fields",
+      "tokens": 96,
+      "kw": 19,
+      "vec": 30
+     },
+     {
+      "rowid": 14628,
+      "project": "spring-framework",
+      "title_path": "Hibernate › Declarative Transaction Demarcation",
+      "tokens": 57,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 15041,
+      "project": "debezium",
+      "title_path": "Outbox Event Router",
+      "tokens": 287,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 3817,
+      "project": "postgresql",
+      "title_path": "Protocol › Frontend/Backend Protocol › Message Flow › Asynchronous Operations",
+      "tokens": 88,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 15045,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Example outbox message",
+      "tokens": 44,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 7987,
+      "project": "kubernetes",
+      "title_path": "Pod Overhead › Configuring Pod overhead",
+      "tokens": 21,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 15014,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router",
+      "tokens": 147,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 15026,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router › Using Avro as the payload format",
+      "tokens": 41,
+      "kw": null,
+      "vec": 4
+     }
+    ]
+   },
+   "k10": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)(不一致|不强一致|无强一致性|inconsist)"
+    ],
+    "keypoints_missed": [
+     "(?i)(dual.?writ|双写|两个独立|两次独立)"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "debezium",
+     "postgresql",
+     "spring-framework"
+    ],
+    "answer": "因为 Outbox 模式将消息与数据库事务解耦，确保消息仅在数据库写入成功后才被发送，避免“脏写”或“消息丢失” [1][2]。若直接先写 DB 再发消息，可能因网络或异常导致消息未发而数据库已更新，造成数据不一致。  \n需确保消息发送与数据库操作在同一个事务边界，或通过 `PlatformTransactionManager` 管理事务 [3]。  \n若使用 MongoDB，不可使用 Outbox Event Router，应改用 MongoDB 特有的 outbox SMT [4]。  \n\n风险：若消息发送失败，数据库已更新但消息未落库，将导致状态不一致，需在应用层实现幂等与补偿机制。",
+    "evidence_top10": [
+     {
+      "rowid": 14879,
+      "project": "debezium",
+      "title_path": "Applying Transformations Selectively › Defining SMT predicates",
+      "tokens": 79,
+      "kw": 1,
+      "vec": 28
+     },
+     {
+      "rowid": 15055,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Payload serialization format › Using JSON as the payload format › Expanding escaped JSON String as JSON",
+      "tokens": 98,
+      "kw": 6,
+      "vec": 16
+     },
+     {
+      "rowid": 14628,
+      "project": "spring-framework",
+      "title_path": "Hibernate › Declarative Transaction Demarcation",
+      "tokens": 57,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 15041,
+      "project": "debezium",
+      "title_path": "Outbox Event Router",
+      "tokens": 287,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 3817,
+      "project": "postgresql",
+      "title_path": "Protocol › Frontend/Backend Protocol › Message Flow › Asynchronous Operations",
+      "tokens": 88,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 15045,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Example outbox message",
+      "tokens": 44,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 7987,
+      "project": "kubernetes",
+      "title_path": "Pod Overhead › Configuring Pod overhead",
+      "tokens": 21,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 15014,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router",
+      "tokens": 147,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 15026,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router › Using Avro as the payload format",
+      "tokens": 41,
+      "kw": null,
+      "vec": 4
+     },
+     {
+      "rowid": 15017,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router › Example outbox message",
+      "tokens": 50,
+      "kw": 5,
+      "vec": null
+     }
+    ]
+   }
+  },
+  {
+   "question": "Outbox 模式怎么保证数据库写入和消息发布不会不一致",
+   "k60": {
+    "status": "failed",
+    "keypoints_hit": [],
+    "keypoints_missed": [
+     "(?i)(same transaction|同一个?事务|同一笔事务)",
+     "(?i)(outbox.{0,6}table|outbox\\s*表)"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "debezium"
+    ],
+    "answer": "Outbox 模式通过 SMT（Stream Transformation）在数据库变更后异步发布事件到 Kafka，但无法保证写入与消息发布的强一致性 [1][4]。若数据库写入失败或被回滚，消息仍可能被发布，导致数据不一致 [3]。需在应用层实现写入成功后触发消息发布，或使用数据库事务与消息确认机制（如幂等性 + 原子提交） [2]。  \n\n关键前提：Debezium 的 Outbox Event Router 本身不提供事务性保证，依赖应用逻辑或外部系统（如数据库事务日志）进行一致性控制。若使用 MongoDB 连接器，需明确使用 MongoDB outbox event router 配置 [5]。  \n\n风险：若数据库写入失败但消息已发布，将导致数据不一致，需配合重试机制或补偿流程。回滚方式应基于消息幂等性或状态机控制。",
+    "evidence_top10": [
+     {
+      "rowid": 14879,
+      "project": "debezium",
+      "title_path": "Applying Transformations Selectively › Defining SMT predicates",
+      "tokens": 79,
+      "kw": 1,
+      "vec": 15
+     },
+     {
+      "rowid": 15055,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Payload serialization format › Using JSON as the payload format › Expanding escaped JSON String as JSON",
+      "tokens": 98,
+      "kw": 6,
+      "vec": 30
+     },
+     {
+      "rowid": 15028,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router › Emitting messages with additional fields",
+      "tokens": 96,
+      "kw": 19,
+      "vec": 19
+     },
+     {
+      "rowid": 15053,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Payload serialization format › Using JSON as the payload format",
+      "tokens": 81,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 15041,
+      "project": "debezium",
+      "title_path": "Outbox Event Router",
+      "tokens": 287,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 14595,
+      "project": "spring-framework",
+      "title_path": "Simple › Simplifying JDBC Operations with the `SimpleJdbc` Classes › Calling a Stored Procedure with `SimpleJdbcCall`",
+      "tokens": 27,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 15045,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Example outbox message",
+      "tokens": 44,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 5773,
+      "project": "kafka",
+      "title_path": "Connector Development Guide › Developing a Simple Connector › Resuming from Previous Offsets",
+      "tokens": 63,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 15014,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router",
+      "tokens": 147,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 6272,
+      "project": "kafka",
+      "title_path": "Tiered Storage › Quick Start Example",
+      "tokens": 42,
+      "kw": null,
+      "vec": 4
+     }
+    ]
+   },
+   "k10": {
+    "status": "passed",
+    "keypoints_hit": [
+     "(?i)(same transaction|同一个?事务|同一笔事务)",
+     "(?i)(outbox.{0,6}table|outbox\\s*表)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "debezium",
+     "spring-framework"
+    ],
+    "answer": "Outbox 模式通过在数据库写入后触发消息发布，确保操作顺序一致性 [1][3]。若数据库写入失败，消息不会被发布，避免数据不一致 [1]。使用 `transforms.outbox.table.expand.json.payload=true` 可确保 JSON 字段正确展开，避免因转义字符导致消息解析错误 [3]。  \n\n关键前提：数据库写入与消息发布必须在同一个事务或幂等上下文中完成，否则需在应用层实现补偿机制（如重试、幂等键）[1]。  \n风险：若消息发布失败且无重试机制，可能导致数据丢失或重复 [3]。回滚方式应基于数据库事务状态，而非消息状态。",
+    "evidence_top10": [
+     {
+      "rowid": 14879,
+      "project": "debezium",
+      "title_path": "Applying Transformations Selectively › Defining SMT predicates",
+      "tokens": 79,
+      "kw": 1,
+      "vec": 15
+     },
+     {
+      "rowid": 15053,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Payload serialization format › Using JSON as the payload format",
+      "tokens": 81,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 15055,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Payload serialization format › Using JSON as the payload format › Expanding escaped JSON String as JSON",
+      "tokens": 98,
+      "kw": 6,
+      "vec": 30
+     },
+     {
+      "rowid": 15041,
+      "project": "debezium",
+      "title_path": "Outbox Event Router",
+      "tokens": 287,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 14595,
+      "project": "spring-framework",
+      "title_path": "Simple › Simplifying JDBC Operations with the `SimpleJdbc` Classes › Calling a Stored Procedure with `SimpleJdbcCall`",
+      "tokens": 27,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 15045,
+      "project": "debezium",
+      "title_path": "Outbox Event Router › Example outbox message",
+      "tokens": 44,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 5773,
+      "project": "kafka",
+      "title_path": "Connector Development Guide › Developing a Simple Connector › Resuming from Previous Offsets",
+      "tokens": 63,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 15014,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router",
+      "tokens": 147,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 6272,
+      "project": "kafka",
+      "title_path": "Tiered Storage › Quick Start Example",
+      "tokens": 42,
+      "kw": null,
+      "vec": 4
+     },
+     {
+      "rowid": 15028,
+      "project": "debezium",
+      "title_path": "Mongodb Outbox Event Router › Emitting messages with additional fields",
+      "tokens": 96,
+      "kw": 19,
+      "vec": 19
+     }
+    ]
+   }
+  },
+  {
+   "question": "批量消费的 Kafka Listener 能不能用 @RetryableTopic 实现死信队列",
+   "k60": {
+    "status": "passed",
+    "keypoints_hit": [
+     "(?i)(不支持|不能|not.{0,15}support|NOT supported)",
+     "(?i)(DefaultErrorHandler|DeadLetterPublishingRecoverer)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "spring-kafka"
+    ],
+    "answer": "不能。批量消费的 Kafka Listener 不支持 `@RetryableTopic` 实现死信队列 [1][2]。  \n需使用 `DefaultErrorHandler` 配合 `DeadLetterPublishingRecoverer` 实现 [2]。  \n风险：重试仍在原消费者线程和分区进行，会阻塞后续消息处理 [5]。",
+    "evidence_top10": [
+     {
+      "rowid": 13829,
+      "project": "spring-kafka",
+      "title_path": "Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics",
+      "tokens": 62,
+      "kw": 1,
+      "vec": 3
+     },
+     {
+      "rowid": 15159,
+      "project": "spring-kafka",
+      "title_path": "Kafka consumer retry and dead-letter topics in Spring Kafka › Not every listener can use non-blocking retry topics",
+      "tokens": 141,
+      "kw": 4,
+      "vec": 1
+     },
+     {
+      "rowid": 14302,
+      "project": "spring-kafka",
+      "title_path": "Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+      "tokens": 63,
+      "kw": 8,
+      "vec": 2
+     },
+     {
+      "rowid": 14360,
+      "project": "spring-kafka",
+      "title_path": "Streams › Apache Kafka Streams Support › Dead Letter Queue Topic Name Property",
+      "tokens": 132,
+      "kw": 2,
+      "vec": 11
+     },
+     {
+      "rowid": 15158,
+      "project": "spring-kafka",
+      "title_path": "Kafka consumer retry and dead-letter topics in Spring Kafka › Non-blocking retries move the wait off the partition's consumer thread",
+      "tokens": 242,
+      "kw": 6,
+      "vec": 10
+     },
+     {
+      "rowid": 13832,
+      "project": "spring-kafka",
+      "title_path": "Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics › Configuring Dead Letter Topics for Batch Listeners",
+      "tokens": 231,
+      "kw": 13,
+      "vec": 4
+     },
+     {
+      "rowid": 13835,
+      "project": "spring-kafka",
+      "title_path": "Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics › Skipping Retries for Specific Exceptions",
+      "tokens": 225,
+      "kw": 14,
+      "vec": 5
+     },
+     {
+      "rowid": 14321,
+      "project": "spring-kafka",
+      "title_path": "Retry Topic Lcf › Specifying a ListenerContainerFactory",
+      "tokens": 98,
+      "kw": 15,
+      "vec": 7
+     },
+     {
+      "rowid": 14303,
+      "project": "spring-kafka",
+      "title_path": "Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+      "tokens": 197,
+      "kw": 7,
+      "vec": 26
+     },
+     {
+      "rowid": 14035,
+      "project": "spring-kafka",
+      "title_path": "Async Returns › Asynchronous `@KafkaListener` Return Types",
+      "tokens": 239,
+      "kw": 16,
+      "vec": 20
+     }
+    ]
+   },
+   "k10": {
+    "status": "review_required",
+    "keypoints_hit": [
+     "(?i)(不支持|不能|not.{0,15}support|NOT supported)",
+     "(?i)(DefaultErrorHandler|DeadLetterPublishingRecoverer)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [
+     "(?i)((?<![不没])(可以|能|能够|支持)[^。；\\n不]{0,16}(批量|batch)[^。；\\n不]{0,14}(@?RetryableTopic|重试主题|死信)|(批量|batch)[^。；\\n不]{0,16}(?<![不没])(可以|能|能够|支持)[^。；\\n不]{0,12}(@?RetryableTopic|重试主题)|@?RetryableTopic[^。；\\n不]{0,10}(支持|适用于|可用于)[^。；\\n不]{0,12}(批量|batch))"
+    ],
+    "cited_projects": [
+     "spring-kafka"
+    ],
+    "answer": "不能。批量消费的 Kafka Listener 不支持 `@RetryableTopic` 实现死信队列 [1][2]。需使用 `DeadLetterPublishingRecoverer` 结合 `DefaultErrorHandler` 配置 [5]。  \n关键前提：`@RetryableTopic` 仅适用于单条记录监听器，批量监听器必须使用 `batchListener=true` 且配置 `DeadLetterPublishingRecoverer` [5]。  \n风险：重试在原消费者线程和分区执行，无隔离，可能造成资源竞争或重复处理 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 13829,
+      "project": "spring-kafka",
+      "title_path": "Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics",
+      "tokens": 62,
+      "kw": 1,
+      "vec": 3
+     },
+     {
+      "rowid": 15159,
+      "project": "spring-kafka",
+      "title_path": "Kafka consumer retry and dead-letter topics in Spring Kafka › Not every listener can use non-blocking retry topics",
+      "tokens": 141,
+      "kw": 4,
+      "vec": 1
+     },
+     {
+      "rowid": 14302,
+      "project": "spring-kafka",
+      "title_path": "Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+      "tokens": 63,
+      "kw": 8,
+      "vec": 2
+     },
+     {
+      "rowid": 14360,
+      "project": "spring-kafka",
+      "title_path": "Streams › Apache Kafka Streams Support › Dead Letter Queue Topic Name Property",
+      "tokens": 132,
+      "kw": 2,
+      "vec": 11
+     },
+     {
+      "rowid": 13832,
+      "project": "spring-kafka",
+      "title_path": "Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics › Configuring Dead Letter Topics for Batch Listeners",
+      "tokens": 231,
+      "kw": 13,
+      "vec": 4
+     },
+     {
+      "rowid": 15158,
+      "project": "spring-kafka",
+      "title_path": "Kafka consumer retry and dead-letter topics in Spring Kafka › Non-blocking retries move the wait off the partition's consumer thread",
+      "tokens": 242,
+      "kw": 6,
+      "vec": 10
+     },
+     {
+      "rowid": 13835,
+      "project": "spring-kafka",
+      "title_path": "Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics › Skipping Retries for Specific Exceptions",
+      "tokens": 225,
+      "kw": 14,
+      "vec": 5
+     },
+     {
+      "rowid": 14321,
+      "project": "spring-kafka",
+      "title_path": "Retry Topic Lcf › Specifying a ListenerContainerFactory",
+      "tokens": 98,
+      "kw": 15,
+      "vec": 7
+     },
+     {
+      "rowid": 14303,
+      "project": "spring-kafka",
+      "title_path": "Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+      "tokens": 197,
+      "kw": 7,
+      "vec": 26
+     },
+     {
+      "rowid": 14427,
+      "project": "spring-kafka",
+      "title_path": "Whats New › What's new? › What's New in 4.1 Since 4.0 › Kafka Streams Native DLQ Support",
+      "tokens": 292,
+      "kw": 3,
+      "vec": null
+     }
+    ]
+   }
+  },
+  {
+   "question": "想从 pg_stat_statements 里挑出最该优化的语句，按 total_exec_time 排和按 mean_exec_time 排有什么不同",
+   "k60": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)(total_exec_time[^。；\\n]{0,24}(累计|总(计|共|的)?[^。；\\n]{0,4}(时间|耗时))|(累计|总(计|共|的)?[^。；\\n]{0,4}(时间|耗时))[^。；\\n]{0,24}total_exec_time)",
+     "(?i)(mean_exec_time[^。；\\n]{0,24}(平均|单次|每次)|(平均|单次|每次)[^。；\\n]{0,24}mean_exec_time)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [
+     "(?i)(单次|每次|单条|极端|最(慢|坏|大))[^。；\\n]{0,20}total_exec_time"
+    ],
+    "cited_projects": [
+     "postgresql"
+    ],
+    "answer": "按 total_exec_time 排序会突出执行总耗时最长的语句，反映整体性能瓶颈；按 mean_exec_time 排序反映单次执行的平均耗时，更适用于识别频繁执行但每次耗时较高的语句 [1][2]。  \n若需优化高负载场景，应优先看 mean_exec_time，因其反映常态执行效率；若关注单次极端延迟，可看 total_exec_time [1][2]。  \n注意：total_exec_time 可能被长尾请求拉高，而 mean_exec_time 更稳定 [1][2]。",
+    "evidence_top10": [
+     {
+      "rowid": 3385,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements View",
+      "tokens": 263,
+      "kw": 1,
+      "vec": 1
+     },
+     {
+      "rowid": 3384,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements View",
+      "tokens": 266,
+      "kw": 6,
+      "vec": 4
+     },
+     {
+      "rowid": 3394,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements_info View",
+      "tokens": 155,
+      "kw": 9,
+      "vec": 2
+     },
+     {
+      "rowid": 3402,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › Sample Output",
+      "tokens": 205,
+      "kw": 2,
+      "vec": 14
+     },
+     {
+      "rowid": 3388,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements View",
+      "tokens": 293,
+      "kw": 7,
+      "vec": 12
+     },
+     {
+      "rowid": 3072,
+      "project": "postgresql",
+      "title_path": "Monitoring › Monitoring Database Activity › The Cumulative Statistics System › pg_stat_database",
+      "tokens": 196,
+      "kw": 25,
+      "vec": 28
+     },
+     {
+      "rowid": 15180,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › pg_stat_statements ranks statement shapes, not individual slow executions",
+      "tokens": 345,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 2130,
+      "project": "postgresql",
+      "title_path": "High Availability › High Availability, Load Balancing, and Replication › Log-Shipping Standby Servers › Standby Server Operation",
+      "tokens": 67,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 3401,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › Sample Output",
+      "tokens": 389,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 3400,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › Sample Output",
+      "tokens": 383,
+      "kw": 5,
+      "vec": null
+     }
+    ]
+   },
+   "k10": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)(mean_exec_time[^。；\\n]{0,24}(平均|单次|每次)|(平均|单次|每次)[^。；\\n]{0,24}mean_exec_time)"
+    ],
+    "keypoints_missed": [
+     "(?i)(total_exec_time[^。；\\n]{0,24}(累计|总(计|共|的)?[^。；\\n]{0,4}(时间|耗时))|(累计|总(计|共|的)?[^。；\\n]{0,4}(时间|耗时))[^。；\\n]{0,24}total_exec_time)"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "postgresql"
+    ],
+    "answer": "按 total_exec_time 排序反映整体执行耗时，包含所有调用的累积开销，适合识别长期高负载语句 [1]；  \n按 mean_exec_time 排序反映单次执行平均耗时，更贴近实际业务请求的平均响应，能识别频繁但每次耗时高的问题语句 [1][3]。  \n若需优化高频低效操作，应优先看 mean_exec_time；若需优化长期累积性能瓶颈，看 total_exec_time [1]。",
+    "evidence_top10": [
+     {
+      "rowid": 3385,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements View",
+      "tokens": 263,
+      "kw": 1,
+      "vec": 1
+     },
+     {
+      "rowid": 3394,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements_info View",
+      "tokens": 155,
+      "kw": 9,
+      "vec": 2
+     },
+     {
+      "rowid": 3384,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements View",
+      "tokens": 266,
+      "kw": 6,
+      "vec": 4
+     },
+     {
+      "rowid": 3402,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › Sample Output",
+      "tokens": 205,
+      "kw": 2,
+      "vec": 14
+     },
+     {
+      "rowid": 3388,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › The pg_stat_statements View",
+      "tokens": 293,
+      "kw": 7,
+      "vec": 12
+     },
+     {
+      "rowid": 15180,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › pg_stat_statements ranks statement shapes, not individual slow executions",
+      "tokens": 345,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 2130,
+      "project": "postgresql",
+      "title_path": "High Availability › High Availability, Load Balancing, and Replication › Log-Shipping Standby Servers › Standby Server Operation",
+      "tokens": 67,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 3401,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › Sample Output",
+      "tokens": 389,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 3400,
+      "project": "postgresql",
+      "title_path": "Pgstatstatements › pg_stat_statements &mdash; track statistics of SQL planning and execution › Sample Output",
+      "tokens": 383,
+      "kw": 5,
+      "vec": null
+     },
+     {
+      "rowid": 3095,
+      "project": "postgresql",
+      "title_path": "Monitoring › Monitoring Database Activity › The Cumulative Statistics System › Statistics Functions",
+      "tokens": 43,
+      "kw": null,
+      "vec": 5
+     }
+    ]
+   }
+  },
+  {
+   "question": "线上偶发的慢查询抓不到执行计划，打开 auto_explain 的 log_analyze 有什么代价",
+   "k60": {
+    "status": "passed",
+    "keypoints_hit": [
+     "(?i)((所有|全部|每(一)?(条|个))[^。；\\n]{0,12}(语句|查询|statement)[^。；\\n]{0,20}(计时|定时|测量|timing|采样)|(不(只|仅)是?|whether or not)[^。；\\n]{0,20}(被?记录|logged|够慢|慢(查询|语句)))",
+     "(?i)(性能|开销|overhead|impact|影响|变慢|代价)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "postgresql"
+    ],
+    "answer": "开启 auto_explain.log_analyze 会导致所有语句（无论快慢）触发执行计划的定时采样，带来显著性能损耗 [2]。  \n该代价体现在：快查询也会被执行时钟测量，造成额外开销，且无缓冲统计信息 [1][2]。  \n应仅在必要时启用，并配合设置 `auto_explain.log_analyze = off` 以避免性能退化 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 90,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 260,
+      "kw": 1,
+      "vec": 3
+     },
+     {
+      "rowid": 15181,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › auto_explain captures the plan of the actual slow execution, but log_analyze times every statement, not only the logged ones",
+      "tokens": 307,
+      "kw": 4,
+      "vec": 2
+     },
+     {
+      "rowid": 88,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries",
+      "tokens": 173,
+      "kw": 6,
+      "vec": 1
+     },
+     {
+      "rowid": 91,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 254,
+      "kw": 3,
+      "vec": 17
+     },
+     {
+      "rowid": 89,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 278,
+      "kw": 7,
+      "vec": 24
+     },
+     {
+      "rowid": 3252,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN",
+      "tokens": 293,
+      "kw": 8,
+      "vec": 25
+     },
+     {
+      "rowid": 94,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 149,
+      "kw": 9,
+      "vec": 26
+     },
+     {
+      "rowid": 95,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Example",
+      "tokens": 192,
+      "kw": 10,
+      "vec": 28
+     },
+     {
+      "rowid": 3282,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › Caveats",
+      "tokens": 313,
+      "kw": 16,
+      "vec": 22
+     },
+     {
+      "rowid": 3245,
+      "project": "postgresql",
+      "title_path": "Parallel › Parallel Query › Parallel Plans › Parallel Plan Tips",
+      "tokens": 206,
+      "kw": 29,
+      "vec": 19
+     }
+    ]
+   },
+   "k10": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)(性能|开销|overhead|impact|影响|变慢|代价)"
+    ],
+    "keypoints_missed": [
+     "(?i)((所有|全部|每(一)?(条|个))[^。；\\n]{0,12}(语句|查询|statement)[^。；\\n]{0,20}(计时|定时|测量|timing|采样)|(不(只|仅)是?|whether or not)[^。；\\n]{0,20}(被?记录|logged|够慢|慢(查询|语句)))"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "postgresql"
+    ],
+    "answer": "开启 auto_explain.log_analyze 会导致每个执行计划均触发 EXPLAIN ANALYZE，产生全量节点时序统计，显著增加查询延迟 [1][3]。  \n该操作会带来严重性能损耗，尤其在高并发场景下，可能使慢查询完全不可观测 [1]。  \n若需启用，必须关闭 auto_explain.log_timing 以降低开销 [3]。",
+    "evidence_top10": [
+     {
+      "rowid": 90,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 260,
+      "kw": 1,
+      "vec": 3
+     },
+     {
+      "rowid": 15181,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › auto_explain captures the plan of the actual slow execution, but log_analyze times every statement, not only the logged ones",
+      "tokens": 307,
+      "kw": 4,
+      "vec": 2
+     },
+     {
+      "rowid": 88,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries",
+      "tokens": 173,
+      "kw": 6,
+      "vec": 1
+     },
+     {
+      "rowid": 91,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 254,
+      "kw": 3,
+      "vec": 17
+     },
+     {
+      "rowid": 89,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 278,
+      "kw": 7,
+      "vec": 24
+     },
+     {
+      "rowid": 3252,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN",
+      "tokens": 293,
+      "kw": 8,
+      "vec": 25
+     },
+     {
+      "rowid": 92,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 278,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 94,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Configuration Parameters",
+      "tokens": 149,
+      "kw": 9,
+      "vec": 26
+     },
+     {
+      "rowid": 95,
+      "project": "postgresql",
+      "title_path": "Auto Explain › auto_explain &mdash; log execution plans of slow queries › Example",
+      "tokens": 192,
+      "kw": 10,
+      "vec": 28
+     },
+     {
+      "rowid": 4935,
+      "project": "postgresql",
+      "title_path": "System Views › pg_locks",
+      "tokens": 81,
+      "kw": null,
+      "vec": 4
+     }
+    ]
+   }
+  },
+  {
+   "question": "EXPLAIN ANALYZE 输出里 cost 和 actual time 数值对不上，是不是就说明计划有问题；应该先看哪个数",
+   "k60": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)((估计|预估|估算|estimated).{0,12}(行数|rows)|行数.{0,12}(估计|预估|估算|接近|偏差|差距)|rows.{0,12}(estimate|actual))"
+    ],
+    "keypoints_missed": [
+     "(?i)(任意单位|arbitrary|单位不同|不同的?单位|不(可|能)(直接)?比较|不(一定|会).{0,8}(对应|匹配)|unlikely to match)"
+    ],
+    "forbidden_hit": [
+     "(?i)(对不上|不(一致|匹配|对齐|符)|有差(距|异))[^。；\\n]{0,16}(就|即|则)?[^。；\\n]{0,6}(说明|意味|代表|表示|证明)[^。；\\n]{0,12}(计划)?[^。；\\n]{0,6}有问题"
+    ],
+    "cited_projects": [
+     "postgresql"
+    ],
+    "answer": "cost 与 actual time 不对不上不说明计划有问题 [1]；应优先看 actual time 和 row counts 判断实际执行开销 [3]。若实际行数与估算行数偏差大，说明统计信息不足，需补充 n-distinct 统计 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 3273,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 294,
+      "kw": 10,
+      "vec": 1
+     },
+     {
+      "rowid": 3283,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › Caveats",
+      "tokens": 303,
+      "kw": 9,
+      "vec": 4
+     },
+     {
+      "rowid": 15182,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › In EXPLAIN ANALYZE output, compare estimated against actual rows — cost and actual time are not the same unit",
+      "tokens": 313,
+      "kw": 8,
+      "vec": 7
+     },
+     {
+      "rowid": 3272,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 305,
+      "kw": 1,
+      "vec": 16
+     },
+     {
+      "rowid": 3278,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 285,
+      "kw": 2,
+      "vec": 17
+     },
+     {
+      "rowid": 2548,
+      "project": "postgresql",
+      "title_path": "Jit › Just-in-Time Compilation ( JIT ) › When to JIT ?",
+      "tokens": 202,
+      "kw": 11,
+      "vec": 14
+     },
+     {
+      "rowid": 15181,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › auto_explain captures the plan of the actual slow execution, but log_analyze times every statement, not only the logged ones",
+      "tokens": 307,
+      "kw": 7,
+      "vec": 24
+     },
+     {
+      "rowid": 3456,
+      "project": "postgresql",
+      "title_path": "Planstats › How the Planner Uses Statistics › Multivariate Statistics Examples › Multivariate N-Distinct Counts",
+      "tokens": 147,
+      "kw": 13,
+      "vec": 26
+     },
+     {
+      "rowid": 3281,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 290,
+      "kw": 26,
+      "vec": 18
+     },
+     {
+      "rowid": 2304,
+      "project": "postgresql",
+      "title_path": "Indices › Indexes › Examining Index Usage",
+      "tokens": 255,
+      "kw": 30,
+      "vec": 20
+     }
+    ]
+   },
+   "k10": {
+    "status": "passed",
+    "keypoints_hit": [
+     "(?i)(任意单位|arbitrary|单位不同|不同的?单位|不(可|能)(直接)?比较|不(一定|会).{0,8}(对应|匹配)|unlikely to match)",
+     "(?i)((估计|预估|估算|estimated).{0,12}(行数|rows)|行数.{0,12}(估计|预估|估算|接近|偏差|差距)|rows.{0,12}(estimate|actual))"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "postgresql"
+    ],
+    "answer": "cost 与 actual time 对不上是正常现象，因单位不同（cost 为任意单位，actual time 为毫秒）[1][2]。应优先对比实际行数（actual rows）与估算行数（estimated rows），判断是否扫描过多数据[2]。若实际行数远高于估算，说明存在无效过滤或索引失效[2]。",
+    "evidence_top10": [
+     {
+      "rowid": 3273,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 294,
+      "kw": 10,
+      "vec": 1
+     },
+     {
+      "rowid": 3272,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 305,
+      "kw": 1,
+      "vec": 16
+     },
+     {
+      "rowid": 3283,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › Caveats",
+      "tokens": 303,
+      "kw": 9,
+      "vec": 4
+     },
+     {
+      "rowid": 3278,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 285,
+      "kw": 2,
+      "vec": 17
+     },
+     {
+      "rowid": 15182,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › In EXPLAIN ANALYZE output, compare estimated against actual rows — cost and actual time are not the same unit",
+      "tokens": 313,
+      "kw": 8,
+      "vec": 7
+     },
+     {
+      "rowid": 2548,
+      "project": "postgresql",
+      "title_path": "Jit › Just-in-Time Compilation ( JIT ) › When to JIT ?",
+      "tokens": 202,
+      "kw": 11,
+      "vec": 14
+     },
+     {
+      "rowid": 15181,
+      "project": "postgresql",
+      "title_path": "Diagnosing a slow SQL query on a production PostgreSQL server › auto_explain captures the plan of the actual slow execution, but log_analyze times every statement, not only the logged ones",
+      "tokens": 307,
+      "kw": 7,
+      "vec": 24
+     },
+     {
+      "rowid": 3285,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › Caveats",
+      "tokens": 132,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 3274,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+      "tokens": 299,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 3282,
+      "project": "postgresql",
+      "title_path": "Perform › Performance Tips › Using EXPLAIN › Caveats",
+      "tokens": 313,
+      "kw": null,
+      "vec": 3
+     }
+    ]
+   }
+  },
+  {
+   "question": "Pod 状态是 CrashLoopBackOff，这个状态本身能说明失败原因吗",
+   "k60": {
+    "status": "passed",
+    "keypoints_hit": [
+     "(?i)((退避|backoff|重启(延迟|间隔))[^。；\\n]{0,20}(状态|机制|生效)|(不是|并非|不代表|说明不了)[^。；\\n]{0,12}(具体)?(原因|根因|错误本身)|(仅|只)[^。；\\n]{0,8}(表明|说明|表示|代表|意味)[^。；\\n]{0,24}(重启|启动失败)|不能[^。；\\n]{0,10}(说明|判断|确定|得出)[^。；\\n]{0,10}(原因|根因))",
+     "(?i)(kubectl\\s+logs|kubectl\\s+describe\\s+pod|看日志|查日志|事件|events)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "kubernetes"
+    ],
+    "answer": "不能，CrashLoopBackOff 仅表明 Pod 启动失败且持续重启，具体原因需结合日志和容器退出码判断 [1]。  \n若 Pod 持续处于该状态，应检查容器日志（如 `kubectl logs <pod> --previous`）和资源限制（如内存溢出）[4]。  \n若使用 Pod Disruption Budget（PDB），需确认是否启用 `AlwaysAllow` 策略导致误驱逐 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 9370,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › Pod phase",
+      "tokens": 274,
+      "kw": 5,
+      "vec": 8
+     },
+     {
+      "rowid": 11525,
+      "project": "kubernetes",
+      "title_path": "Specifying a Disruption Budget for your Application › Unhealthy Pod Eviction Policy",
+      "tokens": 163,
+      "kw": 8,
+      "vec": 23
+     },
+     {
+      "rowid": 10799,
+      "project": "kubernetes",
+      "title_path": "Debug Init Containers › Understanding Pod status",
+      "tokens": 145,
+      "kw": 7,
+      "vec": 28
+     },
+     {
+      "rowid": 9394,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers › Configurable container restart delay",
+      "tokens": 142,
+      "kw": 1,
+      "vec": null
+     },
+     {
+      "rowid": 7606,
+      "project": "kubernetes",
+      "title_path": "Device Plugins › Device plugin implementation › Device plugin and unhealthy devices",
+      "tokens": 68,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 9377,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers",
+      "tokens": 225,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 9108,
+      "project": "kubernetes",
+      "title_path": "Jobs › Handling Pod and container failures › Backoff limit per index",
+      "tokens": 62,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 9376,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers",
+      "tokens": 306,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 11299,
+      "project": "kubernetes",
+      "title_path": "Handling retriable and non-retriable pod failures with Pod failure policy › Alternatives",
+      "tokens": 103,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 9393,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers › Configurable container restart delay",
+      "tokens": 260,
+      "kw": 4,
+      "vec": null
+     }
+    ]
+   },
+   "k10": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)((退避|backoff|重启(延迟|间隔))[^。；\\n]{0,20}(状态|机制|生效)|(不是|并非|不代表|说明不了)[^。；\\n]{0,12}(具体)?(原因|根因|错误本身)|(仅|只)[^。；\\n]{0,8}(表明|说明|表示|代表|意味)[^。；\\n]{0,24}(重启|启动失败)|不能[^。；\\n]{0,10}(说明|判断|确定|得出)[^。；\\n]{0,10}(原因|根因))"
+    ],
+    "keypoints_missed": [
+     "(?i)(kubectl\\s+logs|kubectl\\s+describe\\s+pod|看日志|查日志|事件|events)"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "kubernetes"
+    ],
+    "answer": "不能。CrashLoopBackOff 仅表示 Pod 因容器崩溃而反复重启，不明确失败原因 [1]。需结合 `crashLoopBackOff.maxContainerRestartPeriod`（默认 2s）和 `backoffLimit` 配置判断是否为资源不足或容器自身缺陷 [2][4]。若怀疑设备故障，检查 `allocatedResourcesStatus` 字段 [3]。",
+    "evidence_top10": [
+     {
+      "rowid": 9370,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › Pod phase",
+      "tokens": 274,
+      "kw": 5,
+      "vec": 8
+     },
+     {
+      "rowid": 9394,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers › Configurable container restart delay",
+      "tokens": 142,
+      "kw": 1,
+      "vec": null
+     },
+     {
+      "rowid": 7606,
+      "project": "kubernetes",
+      "title_path": "Device Plugins › Device plugin implementation › Device plugin and unhealthy devices",
+      "tokens": 68,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 11525,
+      "project": "kubernetes",
+      "title_path": "Specifying a Disruption Budget for your Application › Unhealthy Pod Eviction Policy",
+      "tokens": 163,
+      "kw": 8,
+      "vec": 23
+     },
+     {
+      "rowid": 10799,
+      "project": "kubernetes",
+      "title_path": "Debug Init Containers › Understanding Pod status",
+      "tokens": 145,
+      "kw": 7,
+      "vec": 28
+     },
+     {
+      "rowid": 9377,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers",
+      "tokens": 225,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 9108,
+      "project": "kubernetes",
+      "title_path": "Jobs › Handling Pod and container failures › Backoff limit per index",
+      "tokens": 62,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 9376,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers",
+      "tokens": 306,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 11299,
+      "project": "kubernetes",
+      "title_path": "Handling retriable and non-retriable pod failures with Pod failure policy › Alternatives",
+      "tokens": 103,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 9393,
+      "project": "kubernetes",
+      "title_path": "Pod Lifecycle › How Pods handle problems with containers › Configurable container restart delay",
+      "tokens": 260,
+      "kw": 4,
+      "vec": null
+     }
+    ]
+   }
+  },
+  {
+   "question": "外层 placeOrder 没标 @Transactional 时，本类自调用的 writeLedger 上那个 @Transactional 还会不会建立它声明的事务边界",
+   "k60": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)((不(会)?[^。；\\n]{0,6}(建立|创建|开启|产生|生成)[^。；\\n]{0,8}(事务)?[^。；\\n]{0,4}(边界|事务))|((注解|@Transactional|REQUIRES_NEW)[^。；\\n不未没无]{0,16}(不生效|无法生效|不能生效|未生效|没有生效|无效|失效|不起作用|没起作用|没有起作用|被忽略|不作数))|((自调用|内部调用|同一个?类[^。；\\n]{0,10}(内部)?调用|this\\.)[^。；\\n]{0,26}(不(会)?(生效|经过|走|被拦截)|无效|失效)))"
+    ],
+    "keypoints_missed": [
+     "(?i)((代理|proxy)[^。；\\n]{0,26}(外部调用|external|拦截|intercept)|(外部调用|external\\s*method)[^。；\\n]{0,20}(代理|proxy|拦截)|(自调用|内部调用|同一个?类[^。；\\n]{0,10}(内部)?调用|this\\.)[^。；\\n]{0,14}(不经过|没经过|没有经过|不走|绕过|不通过)[^。；\\n]{0,6}(代理|proxy))"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "kafka",
+     "spring-framework"
+    ],
+    "answer": "不会，若外层 `placeOrder` 未标注 `@Transactional`，且无 `@EnableTransactionManagement` 或 `<tx:annotation-driven/>` 配置，则 `writeLedger` 方法的 `@Transactional` 无法生效 [5]。  \n需确保在当前应用上下文（如 `WebApplicationContext`）中配置了 `@EnableTransactionManagement` 或 `<tx:annotation-driven/>` 才能激活事务边界 [3]。  \n若 `writeLedger` 在 `placeOrder` 所属类中被调用，且该类未启用事务管理，事务将不被创建 [5]。",
+    "evidence_top10": [
+     {
+      "rowid": 15169,
+      "project": "spring-framework",
+      "title_path": "An order service whose books do not balance at reconciliation time › A `@Transactional` method called from inside the same object never gets the transaction it declares — it runs in whatever the caller already had",
+      "tokens": 1039,
+      "kw": 1,
+      "vec": 15
+     },
+     {
+      "rowid": 14778,
+      "project": "spring-framework",
+      "title_path": "Diff Tx › Configuring Different Transactional Semantics for Different Beans",
+      "tokens": 153,
+      "kw": 26,
+      "vec": 21
+     },
+     {
+      "rowid": 14760,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional` › Multiple Transaction Managers with `@Transactional`",
+      "tokens": 159,
+      "kw": 30,
+      "vec": 20
+     },
+     {
+      "rowid": 14628,
+      "project": "spring-framework",
+      "title_path": "Hibernate › Declarative Transaction Demarcation",
+      "tokens": 57,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 14803,
+      "project": "spring-framework",
+      "title_path": "Tx Decl Explained › Understanding the Spring Framework's Declarative Transaction Implementation",
+      "tokens": 367,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 5784,
+      "project": "kafka",
+      "title_path": "Connector Development Guide › Developing a Simple Connector › Exactly-once source connectors › Validation APIs",
+      "tokens": 61,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 14752,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional`",
+      "tokens": 304,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 14753,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional`",
+      "tokens": 210,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 14750,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional`",
+      "tokens": 331,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 14766,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional` › Custom Composed Annotations",
+      "tokens": 89,
+      "kw": null,
+      "vec": 4
+     }
+    ]
+   },
+   "k10": {
+    "status": "failed",
+    "keypoints_hit": [],
+    "keypoints_missed": [
+     "(?i)((不(会)?[^。；\\n]{0,6}(建立|创建|开启|产生|生成)[^。；\\n]{0,8}(事务)?[^。；\\n]{0,4}(边界|事务))|((注解|@Transactional|REQUIRES_NEW)[^。；\\n不未没无]{0,16}(不生效|无法生效|不能生效|未生效|没有生效|无效|失效|不起作用|没起作用|没有起作用|被忽略|不作数))|((自调用|内部调用|同一个?类[^。；\\n]{0,10}(内部)?调用|this\\.)[^。；\\n]{0,26}(不(会)?(生效|经过|走|被拦截)|无效|失效)))",
+     "(?i)((代理|proxy)[^。；\\n]{0,26}(外部调用|external|拦截|intercept)|(外部调用|external\\s*method)[^。；\\n]{0,20}(代理|proxy|拦截)|(自调用|内部调用|同一个?类[^。；\\n]{0,10}(内部)?调用|this\\.)[^。；\\n]{0,14}(不经过|没经过|没有经过|不走|绕过|不通过)[^。；\\n]{0,6}(代理|proxy))"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "kafka",
+     "spring-framework"
+    ],
+    "answer": "会建立事务边界，但仅当 `writeLedger` 方法被调用且其 `@Transactional` 注解在相同应用上下文内可见时 [4][2]。  \n若外层 `placeOrder` 无 `@Transactional`，且 `writeLedger` 位于同一类中，其事务边界仍会被检测到，前提是 `@EnableTransactionManagement` 和 `@Transactional` 在该类或其父类中被正确配置 [4]。  \n若 `writeLedger` 位于 `placeOrder` 所属的 bean 容器中，且 `@Transactional` 被 AOP 代理捕获，则事务将生效 [2]。  \n\n风险：若 `writeLedger` 位于不同上下文（如非 Spring 管理的组件），或 `@EnableTransactionManagement` 未生效，则事务不会传播 [4]。  \n回滚方式：若 `writeLedger` 事务失败，将触发回滚，但需确保 `TransactionInterceptor` 能捕获异常并回滚 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 15169,
+      "project": "spring-framework",
+      "title_path": "An order service whose books do not balance at reconciliation time › A `@Transactional` method called from inside the same object never gets the transaction it declares — it runs in whatever the caller already had",
+      "tokens": 1039,
+      "kw": 1,
+      "vec": 15
+     },
+     {
+      "rowid": 14628,
+      "project": "spring-framework",
+      "title_path": "Hibernate › Declarative Transaction Demarcation",
+      "tokens": 57,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 14803,
+      "project": "spring-framework",
+      "title_path": "Tx Decl Explained › Understanding the Spring Framework's Declarative Transaction Implementation",
+      "tokens": 367,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 5784,
+      "project": "kafka",
+      "title_path": "Connector Development Guide › Developing a Simple Connector › Exactly-once source connectors › Validation APIs",
+      "tokens": 61,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 14752,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional`",
+      "tokens": 304,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 14753,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional`",
+      "tokens": 210,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 14750,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional`",
+      "tokens": 331,
+      "kw": 4,
+      "vec": null
+     },
+     {
+      "rowid": 14766,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional` › Custom Composed Annotations",
+      "tokens": 89,
+      "kw": null,
+      "vec": 4
+     },
+     {
+      "rowid": 12555,
+      "project": "spring-boot",
+      "title_path": "Aop › Aspect-Oriented Programming",
+      "tokens": 154,
+      "kw": 5,
+      "vec": null
+     },
+     {
+      "rowid": 14763,
+      "project": "spring-framework",
+      "title_path": "Annotations › Using `@Transactional` › Custom Composed Annotations",
+      "tokens": 82,
+      "kw": null,
+      "vec": 5
+     }
+    ]
+   }
+  },
+  {
+   "question": "对账方法上标了 readOnly 和隔离级别，被上层事务调用进来时这些设置还生不生效",
+   "k60": {
+    "status": "passed",
+    "keypoints_hit": [
+     "(?i)((忽略|不生效|失效|无效|被覆盖|沿用外层|继承外层)[^。；\\n]{0,26}(隔离级别|isolation|只读|read.?only|超时|timeout)|(隔离级别|只读|read.?only|超时)[^。；\\n]{0,26}(被)?(忽略|不生效|失效|无效|沿用|继承))",
+     "(?i)((参与|加入|沿用|复用|继承)[^。；\\n]{0,16}(外层|已有|既有|现有|outer)[^。；\\n]{0,10}事务|同一个?(物理)?事务|REQUIRED)"
+    ],
+    "keypoints_missed": [],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "postgresql",
+     "spring-data-redis",
+     "spring-framework"
+    ],
+    "answer": "readOnly和隔离级别设置在被上层事务调用时**不生效**：  \n- Spring事务配置中`read-only`和`isolation`仅对`REQUIRED`或`REQUIRES_NEW`传播生效，且仅作用于当前事务边界 [2]；  \n- 若上层事务（如Spring Cloud Stream或分布式事务）已管理事务上下文，底层方法的`@Transactional(readOnly = true, isolation = ...)`将被覆盖或忽略 [2][4]；  \n- Postgres在hot standby模式下不支持Serializable隔离级别，且session-level设置（如transaction_isolation）在远程查询时可能被postgres_fdw禁用 [3][5]。  \n\n**关键前提**：若上层事务使用`REQUIRED`或`REQUIRES_NEW`传播，且未显式配置`readOnly`或`isolation`，则方法级设置无效。  \n**风险**：若依赖`readOnly`进行读优化，可能因事务上下文被覆盖导致读写行为异常，需在调用前显式设置事务属性。  \n\n> 仅当方法被`@Transactional`注解且上层事务未覆盖时，才可能生效，否则失效 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 744,
+      "project": "postgresql",
+      "title_path": "Config › Server Configuration › Client Connection Defaults › Statement Behavior",
+      "tokens": 272,
+      "kw": 4,
+      "vec": 13
+     },
+     {
+      "rowid": 14812,
+      "project": "spring-framework",
+      "title_path": "Txadvice Settings › <tx:advice/> Settings",
+      "tokens": 193,
+      "kw": 9,
+      "vec": 20
+     },
+     {
+      "rowid": 2185,
+      "project": "postgresql",
+      "title_path": "High Availability › High Availability, Load Balancing, and Replication › Hot Standby › Caveats",
+      "tokens": 201,
+      "kw": 18,
+      "vec": 16
+     },
+     {
+      "rowid": 3150,
+      "project": "postgresql",
+      "title_path": "Mvcc › Concurrency Control › Transaction Isolation › Repeatable Read Isolation Level",
+      "tokens": 303,
+      "kw": 1,
+      "vec": null
+     },
+     {
+      "rowid": 13610,
+      "project": "spring-data-redis",
+      "title_path": "Transactions › Redis Transactions › `@Transactional` Support",
+      "tokens": 83,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 3144,
+      "project": "postgresql",
+      "title_path": "Mvcc › Concurrency Control › Transaction Isolation › Read Committed Isolation Level",
+      "tokens": 215,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 8155,
+      "project": "kubernetes",
+      "title_path": "Application Security Checklist › Base security hardening › Container-level `securityContext` recommendations",
+      "tokens": 91,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 3154,
+      "project": "postgresql",
+      "title_path": "Mvcc › Concurrency Control › Transaction Isolation › Serializable Isolation Level",
+      "tokens": 265,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 3755,
+      "project": "postgresql",
+      "title_path": "Postgres Fdw › postgres_fdw &mdash;\n access data stored in external PostgreSQL \n servers › Remote Query Execution Environment",
+      "tokens": 42,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 570,
+      "project": "postgresql",
+      "title_path": "Config › Server Configuration › Connections and Authentication › SSL",
+      "tokens": 66,
+      "kw": null,
+      "vec": 4
+     }
+    ]
+   },
+   "k10": {
+    "status": "failed",
+    "keypoints_hit": [
+     "(?i)((忽略|不生效|失效|无效|被覆盖|沿用外层|继承外层)[^。；\\n]{0,26}(隔离级别|isolation|只读|read.?only|超时|timeout)|(隔离级别|只读|read.?only|超时)[^。；\\n]{0,26}(被)?(忽略|不生效|失效|无效|沿用|继承))"
+    ],
+    "keypoints_missed": [
+     "(?i)((参与|加入|沿用|复用|继承)[^。；\\n]{0,16}(外层|已有|既有|现有|outer)[^。；\\n]{0,10}事务|同一个?(物理)?事务|REQUIRED)"
+    ],
+    "forbidden_hit": [],
+    "cited_projects": [
+     "kubernetes",
+     "postgresql",
+     "spring-data-redis"
+    ],
+    "answer": "readOnly和隔离级别设置在事务边界内有效，但被上层事务调用时可能被覆盖或失效 [3][2]。  \n若使用Spring Data Redis的`@Transactional`，内部读操作（如`get`）不可见事务内写入的数据，且读操作必须在非事务连接上执行 [3]。  \n若上层事务开启，会覆盖当前会话的`transaction_read_only`和`transaction_isolation`设置，需在事务外显式设置或通过`session_replication_role`控制 [1][5]。  \n\n风险：若上层事务未显式管理隔离级别，可能导致读取脏数据或重复读问题，尤其在分布式环境下 [2]。  \n回滚方式：若事务异常，PostgreSQL会回滚到事务开始时的快照，但若上层事务未正确管理，可能丢失一致性 [2]。",
+    "evidence_top10": [
+     {
+      "rowid": 744,
+      "project": "postgresql",
+      "title_path": "Config › Server Configuration › Client Connection Defaults › Statement Behavior",
+      "tokens": 272,
+      "kw": 4,
+      "vec": 13
+     },
+     {
+      "rowid": 3150,
+      "project": "postgresql",
+      "title_path": "Mvcc › Concurrency Control › Transaction Isolation › Repeatable Read Isolation Level",
+      "tokens": 303,
+      "kw": 1,
+      "vec": null
+     },
+     {
+      "rowid": 13610,
+      "project": "spring-data-redis",
+      "title_path": "Transactions › Redis Transactions › `@Transactional` Support",
+      "tokens": 83,
+      "kw": null,
+      "vec": 1
+     },
+     {
+      "rowid": 14812,
+      "project": "spring-framework",
+      "title_path": "Txadvice Settings › <tx:advice/> Settings",
+      "tokens": 193,
+      "kw": 9,
+      "vec": 20
+     },
+     {
+      "rowid": 3144,
+      "project": "postgresql",
+      "title_path": "Mvcc › Concurrency Control › Transaction Isolation › Read Committed Isolation Level",
+      "tokens": 215,
+      "kw": 2,
+      "vec": null
+     },
+     {
+      "rowid": 8155,
+      "project": "kubernetes",
+      "title_path": "Application Security Checklist › Base security hardening › Container-level `securityContext` recommendations",
+      "tokens": 91,
+      "kw": null,
+      "vec": 2
+     },
+     {
+      "rowid": 3154,
+      "project": "postgresql",
+      "title_path": "Mvcc › Concurrency Control › Transaction Isolation › Serializable Isolation Level",
+      "tokens": 265,
+      "kw": 3,
+      "vec": null
+     },
+     {
+      "rowid": 3755,
+      "project": "postgresql",
+      "title_path": "Postgres Fdw › postgres_fdw &mdash;\n access data stored in external PostgreSQL \n servers › Remote Query Execution Environment",
+      "tokens": 42,
+      "kw": null,
+      "vec": 3
+     },
+     {
+      "rowid": 2185,
+      "project": "postgresql",
+      "title_path": "High Availability › High Availability, Load Balancing, and Replication › Hot Standby › Caveats",
+      "tokens": 201,
+      "kw": 18,
+      "vec": 16
+     },
+     {
+      "rowid": 570,
+      "project": "postgresql",
+      "title_path": "Config › Server Configuration › Connections and Authentication › SSL",
+      "tokens": 66,
+      "kw": null,
+      "vec": 4
+     }
+    ]
+   }
+  }
+ ]
+}
