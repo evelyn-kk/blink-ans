@@ -1050,11 +1050,19 @@ def test_cr091_the_conflated_sentence_is_not_a_free_pass_on_the_other_question_e
     CR-089 要分开的那两种局面仍然分得开——靠的是正向关键点（Q40 要求说出
     "仍在外层事务里"），不再靠"完全没有事务"这半句在某一题上被判对。
     """
-    for prefix in ("外层 placeOrder 已经标了 @Transactional", "外层 placeOrder 没标"):
-        spec = _spec(prefix)
-        hits = [p for p in spec["forbid_patterns"] if re.search(p, _CR089_CONFLATED_ANSWER)]
-        assert hits, f"「完全没有事务」在「{prefix[:12]}…」这题上也必须被标出"
-        assert _status_of(spec, _CR089_CONFLATED_ANSWER) != "passed"
+    spec = _spec("外层 placeOrder 已经标了 @Transactional")
+    hits = [p for p in spec["forbid_patterns"] if re.search(p, _CR089_CONFLATED_ANSWER)]
+    assert hits, "「完全没有事务」在「外层已有事务」这题上必须被标出"
+    assert _status_of(spec, _CR089_CONFLATED_ANSWER) != "passed"
+
+    # **CR-095（R84）之后这条只断言 Q40**。R81 写的时候两题都断言，靠的是
+    # Q41 那条已被裁定移除的负向约束；现在这段话在 Q41 上不再被标出。
+    # CR-089 要分开的两种局面仍然分得开——靠的是 Q40 的正向关键点（要求说出
+    # "仍在外层事务里"），这段话在 Q40 上命中不了它，因此照样不会 `passed`。
+    assert _status_of(_spec("外层 placeOrder 没标"), _CR089_CONFLATED_ANSWER) == "passed", (
+        "如实记录代价：这段话在 Q41 上现在会被判通过——按 CR-091 它仍是外推，"
+        "只是不再由机械判据拦下，改由卡片正文与人工审查承担"
+    )
 
 
 # CR-091 点名要求必须**通过**的那种回答：既说明自调用注解不生效，又说明下游
@@ -1122,17 +1130,22 @@ def test_cr092_local_conclusions_about_the_annotation_are_not_flagged(answer):
     assert _status_of(spec, answer) == "passed"
 
 
-def test_cr091_extending_to_the_whole_call_chain_is_flagged():
-    """判别性：把"这个注解不建边界"推广成"整条调用链都没有事务、没人回滚"
-    必须被标出。**改题前这句话是 `passed`**——在 `999b340` 那一版上实跑确认
-    （`git show 999b340:knowledge/eval/scenario_questions.yaml`，关键点 2/2、
-    负向 0 命中）。更正见 `_CR089_CONFLATED_ANSWER` 上方关于 CR-093 的说明。
-    """
-    answer = ("不会。自调用不经过代理，注解不生效 [1]，所以整条调用链都没有事务，"
-              "没有任何东西会回滚它 [1]。")
-    spec = _spec("外层 placeOrder 没标")
-    assert [p for p in spec["forbid_patterns"] if re.search(p, answer)]
-    assert _status_of(spec, answer) != "passed"
+# ---- R84（CR-095）：这里原来有一条 `test_cr091_extending_to_the_whole_call_chain_is_flagged`，
+# 已随它所测的那条负向约束一并删除 ----
+#
+# 审查方裁定：Q41 第三条"整条调用链/回滚"负向约束应当**移除**，而不是继续
+# 调正则。理由是它三轮没有任何真实生成命中（样例全部手写或复现），却连续
+# 造成两次正确回答误伤（CR-092、CR-094），且 R83 的收紧有意放过了跨分句的
+# 真外推——真实信号不足以抵消人工复核噪声与维护成本。
+#
+# **删除一条判据也要留下判别性记录**，否则下次没人知道它当初到底测到过什么：
+# 那句"整条调用链都没有事务，没有任何东西会回滚它"在 `999b340` 上是
+# `passed`、在 `6782050`（R83 收尾）上被标出、在本轮又回到 `passed`。也就是
+# 说本轮**确实放回了一类此前会被拦下的说法**，这不是无声的收窄。
+#
+# 重建条件写在 `scenario_questions.yaml` 里 Q41 的注释中：要有**保存下来的
+# 真实输出**证明这种外推确实发生且逃过了正向关键点，才以真实样本重新提出
+# 判据。在那之前这一类错误由正向关键点 + 卡片正文的事实审查承担。
 
 
 # ---- R80（CR-090）：另一侧的过度外推——"没有事务" ≠ "写库必然已落盘" ----
