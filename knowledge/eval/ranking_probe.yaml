@@ -263,6 +263,35 @@ probes:
       删掉了（详见上一条探针的同日记录）。卡片恢复后如实回到 **14**，
       baseline 未动。
 
+  # ---- T-113：中文技术词的英译映射（2026-09-13 新增） ----
+  #
+  # 为什么值得一条探针：这道题是 R60 写第四张卡片时实测发现的缺口——纯中文
+  # 问法下 `hybrid_search` 前 10 名里**没有任何一条**与 index-only scan /
+  # visibility map 相关（第 1 名是 Custom WAL Resource Managers，第 2/5 名是
+  # kafka 的限速文档），而换成英文或中英夹杂立刻命中。缺口精确落在
+  # `term_map.yaml` 缺 `覆盖索引`/`回表`/`可见性映射` 这一组，与排序权重、
+  # 候选池深度都无关（两者当时都验证过）。
+  #
+  # gold 是人工打开读过的官方小节：它正文第一句就在解释"PostgreSQL 的索引都是
+  # secondary index，索引里没有可见性信息，所以通常还要回堆"。
+  # 判别性：补映射之前这条为 `rank=None`（top10 里一条相关的都没有），
+  # 补映射并重建索引后为第 3 名——这不是"新函数不存在"那种弱判别性，
+  # 是同一份索引、同一个查询下的真实名次变化。
+  - q: 已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快
+    project: postgresql
+    gold: "Indices › Indexes › Index-Only Scans and Covering Indexes"
+    baseline: 3
+    note: |
+      2026-09-13（T-113）：`term_map.yaml` 补 `覆盖索引`/`回表`/`可见性映射`/
+      `索引只扫描`/`仅索引扫描` 五条映射，英文取词按语料实际用语核对
+      （postgresql 语料里 index-only scan 15 块 / visibility map 21 /
+      all-visible 13 / covering index 4）。按 CR-013 的纪律只登记具体技术词：
+      **不加"堆"**（"消息堆积"会误触发）、**不加"扫描"**（过于通用）；
+      改完用 9 道无关提问核对过新映射一条都不触发。
+      当前第 3 名，第 1 名是慢 SQL 卡片里讲同一件事的小节（`postgres-slow-query-diagnosis.md`），
+      第 2 名仍是 `Custom Rmgr › Custom WAL Resource Managers` 这条噪声——
+      噪声没有被消除，只是不再独占前排，这一点如实记着。
+
   # ---- CR-085：T-114 新增的 spring-framework 必须有声明式事务语义的金标准 ----
   # 三条 gold 都是先人工打开 `data/corpus/spring-framework/.../data-access/
   # transaction/declarative/*.adoc` 读过正文、确认它确实回答该问题，才写进来的。
@@ -286,7 +315,16 @@ probes:
     project: spring-framework
     gold: "Annotations › Using `@Transactional`"
     gold_exact: true
-    gold_contains: "only external method calls coming in through the proxy are intercepted"
+    # 2026-09-13（T-115 开工诊断）**更正**：这一版 `gold_contains` 用的是
+    # "only external method calls coming in through the proxy are intercepted"，
+    # 它在语料里**同时出现在两块**，而逐字匹配（含换行）只命中其中一块——
+    # 偏偏是讲**方法可见性**的那块（1538 字符，开头在讲 reactive `Publisher`
+    # 的取消信号），不是讲自调用的那块。也就是说 CR-085 那次"定位到块级"的
+    # 修法做对了形式、选错了块：探针一直在量一个邻居的名次。
+    # 改用 `self-invocation` 这个只出现在正确块里的词。实测两块的名次都差
+    # （本题下正确块 kw=80/vec=82/hybrid 未进候选），因此**基线不变**，
+    # 但这条记录从此指的是真正要修的那一块。
+    gold_contains: "self-invocation"
     baseline: not_in_candidates
     known_open: true
     note: |

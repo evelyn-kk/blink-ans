@@ -26,6 +26,22 @@ terms:
   索引失效: [index usage, examining index usage, forcing index usage,
            sequential scan, enable_seqscan, planner, cost estimate, EXPLAIN ANALYZE]
   统计信息: [statistics, ANALYZE, pg_statistic]
+  # 2026-09-13（T-113）：R60 写第四张卡片时实测发现的缺口——纯中文问
+  # "已经建了覆盖索引，为什么还要回表"时，`hybrid_search` 前 10 名里没有
+  # 任何一条与 index-only scan / visibility map 相关（第 1 名是 Custom WAL
+  # Resource Managers，第 2/5 名甚至是 kafka 的限速文档）；把同一个问题改成
+  # 英文或中英夹杂，官方 `Index-Only Scans and Covering Indexes` 立刻到第 1 名。
+  # 即缺口在**中文技术词到英文语料词的映射**，不是排序权重或候选池深度。
+  #
+  # 英文取词按语料实际用语核对过（postgresql 语料命中块数）：
+  # index-only scan 15 / visibility map 21 / all-visible 13 / covering index 4。
+  # 按 CR-013 的纪律只登记**具体技术词**：不加"堆"（"消息堆积"会误触发）、
+  # 不加"扫描"（过于通用）。
+  覆盖索引: [covering index, index-only scan, INCLUDE, secondary index]
+  回表: [heap fetch, heap fetches, visibility map, index-only scan, table's heap]
+  可见性映射: [visibility map, all-visible, VACUUM]
+  索引只扫描: [index-only scan, index only scan]
+  仅索引扫描: [index-only scan, index only scan]
   连接池: [connection pool, pooling, max_connections]
   事务隔离级别: [transaction isolation level, isolation level]
   脏读: [dirty read]
