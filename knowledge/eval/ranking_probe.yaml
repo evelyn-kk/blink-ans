@@ -127,9 +127,10 @@ probes:
   - q: Debezium Outbox 表要包含哪些字段才能保证事件和业务数据一致
     project: debezium
     gold: "Outbox Event Router › Basic outbox table"
-    # 2026-09-13（T-112，RRF_K 60 → 10）：9 → **7**，按 CR-086 就地固化。
-    # 仍未进 top5，`known_open` 不变。
-    baseline: 7
+    # 2026-09-13（T-112）：RRF_K 改 10 时这条实测第 7 名，曾按 CR-086 固化为 7；
+    # **codex R86 裁定回退**（CR-097：端到端净退步未审计前不接受那次全局改动），
+    # 常量与本条基线一并还原为 9。扫描记录保留在 `search.py` 的 RRF_K 注释里。
+    baseline: 9
     known_open: true
     note: |
       2026-09-06（CR-039）：人工打开 `outbox-event-router.adoc` 源文件确认
@@ -148,13 +149,12 @@ probes:
   - q: Spring Kafka 消费失败怎么配置重试和死信队列
     project: spring-kafka
     gold: "Retry Config › Configuration › Using the `@RetryableTopic` annotation"
-    # 2026-09-13（T-112，RRF_K 60 → 10）：**6 → 3，进了 top5**，按 CR-086 固化。
-    # 这正是 CR-048 诊断出的那个机制被修掉的证据：gold 在向量路排第 1、
-    # 关键词路缺席，k=60 时打不过"两路都中等"的块；k=10 让"某一路很靠前"
-    # 这个信号重新有分量。`known_open` 依然留着——它现在进了 top5，但这条
-    # 缺口的根因（短配置块在 BM25 上竞争不过长块）没有被解决，只是不再
-    # 决定名次；下次若再跌出去，是退步而不是"已知缺口"。
-    baseline: 3
+    # 2026-09-13（T-112）：RRF_K 改 10 时这条实测第 3 名（进 top5），曾按 CR-086
+    # 固化为 3；**codex R86 裁定回退**（CR-097），常量与本条基线一并还原为 6。
+    # 那次实测的意义仍然成立、也已记在 `search.py` 的 RRF_K 注释里：gold 在
+    # 向量路第 1、关键词路缺席，k=60 时打不过"两路都中等"的块。**但它要重提，
+    # 得先满足 CR-097 的两个条件**（逐题审计降级答案 + 独立验证集）。
+    baseline: 6
     known_open: true
     note: |
       2026-09-06（CR-039）：人工打开 `retrytopic/retry-config.adoc` 源文件
@@ -309,8 +309,9 @@ probes:
   - q: Spring 事务里抛了受检异常为什么没有回滚
     project: spring-framework
     gold: "Rolling Back › Rolling Back a Declarative Transaction"
-    # 2026-09-13（T-112，RRF_K 60 → 10）：2 → **1**，按 CR-086 固化。
-    baseline: 1
+    # 2026-09-13（T-112）：RRF_K 改 10 时这条实测第 1 名，曾按 CR-086 固化为 1；
+    # **codex R86 裁定回退**（CR-097），基线还原为 2。
+    baseline: 2
     note: |
       官方原文就在这一节：`In its default configuration, the Spring
       Framework's transaction infrastructure code marks a transaction for
