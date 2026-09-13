@@ -35,12 +35,37 @@ def _split_trace(text: str) -> tuple[str, str]:
     return text[:begin] + text[end:], text[begin:end]
 
 
-def test_active_comment_states_the_correct_denominators():
-    outside, _ = _split_trace(_source())
-    assert "1/(60+1)" in outside, "活跃注释应写出一路第 1 的算式"
-    assert "2/(60+60)" in outside and "2/120" in outside, (
-        "活跃注释应写出两路都第 60 的算式：2/(60+60) = 2/120"
-    )
+# 完整等式，按"折叠空白后整体匹配"来判（CR-103）。
+#
+# 第一版是分别查 `"2/(60+60)" in text` 与 `"2/120" in text`，审查方当场复现了
+# 它的洞：把等式改写成"2/(60+60) **与** 2/120"——等号没了、两个片段都还在，
+# 测试照样全绿。**分别断言片段，证明不了它们之间的关系**，而这次事故的
+# 全部内容恰恰就是关系写错了（`==` 该是 `<`，分母该是 60+60）。
+_ACTIVE_EQUATIONS = (
+    (r"1/\(60\+1\)\s*=\s*1/61\s*=\s*0\.016393", "一路第 1：1/(60+1) = 1/61 = 0.016393…"),
+    (r"2/\(60\+60\)\s*=\s*2/120\s*=\s*0\.016666", "两路都第 60：2/(60+60) = 2/120 = 0.016666…"),
+)
+
+
+def _collapsed(text: str) -> str:
+    """折叠空白，好让断言不依赖注释里的对齐方式。"""
+    return re.sub(r"[ \t]+", " ", text)
+
+
+def test_active_comment_states_the_complete_equations():
+    outside = _collapsed(_split_trace(_source())[0])
+    for pattern, human in _ACTIVE_EQUATIONS:
+        assert re.search(pattern, outside), f"活跃注释里没有完整写出：{human}"
+
+
+def test_the_higher_score_is_marked_on_the_two_path_line():
+    """哪一边更高必须标在**同一行**上——分开写就又变成"两个片段"了。"""
+    for line in _collapsed(_split_trace(_source())[0]).splitlines():
+        if re.search(r"2/\(60\+60\)", line):
+            assert "← 更高" in line, f"这一行应标出它更高: {line.strip()}"
+            break
+    else:
+        raise AssertionError("活跃注释里找不到两路都第 60 的那一行")
 
 
 def test_wrong_forms_appear_only_inside_the_marked_trace_block():
