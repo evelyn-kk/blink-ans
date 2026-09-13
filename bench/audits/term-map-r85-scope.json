@@ -1,0 +1,61 @@
+{
+ "since": "2cbe470",
+ "changed": {
+  "仅索引扫描": [
+   "index-only scan",
+   "index only scan"
+  ],
+  "可见性映射": [
+   "visibility map",
+   "all-visible",
+   "VACUUM"
+  ],
+  "回表": [
+   "heap fetch",
+   "heap fetches",
+   "visibility map",
+   "index-only scan",
+   "table's heap"
+  ],
+  "索引只扫描": [
+   "index-only scan",
+   "index only scan"
+  ],
+  "覆盖索引": [
+   "covering index",
+   "index-only scan",
+   "INCLUDE",
+   "secondary index"
+  ]
+ },
+ "expected_hits": [
+  {
+   "set": "scenario",
+   "q": "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快",
+   "fired": [
+    "回表",
+    "覆盖索引"
+   ]
+  },
+  {
+   "set": "probe",
+   "q": "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快",
+   "fired": [
+    "回表",
+    "覆盖索引"
+   ]
+  }
+ ],
+ "negatives": [
+  "Kafka 消息堆积了怎么办",
+  "消费者组重平衡时消息会堆积吗",
+  "事务回滚之后表里的数据还在吗",
+  "怎么回滚一张表的误更新",
+  "索引扫描和顺序扫描怎么选",
+  "全表扫描为什么比索引快",
+  "Kubernetes 怎么扫描镜像漏洞",
+  "JVM 堆内存怎么调",
+  "可见性修饰符 protected 和 package-private 的区别"
+ ],
+ "leaked": []
+}
