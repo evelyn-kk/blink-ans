@@ -78,6 +78,9 @@ def main() -> int:
     ap.add_argument("--json", help="把结果写到文件，便于贴进 wait-for-review.md")
     ap.add_argument("--negatives", nargs="*", default=[],
                     help="碰撞负例：包含该键组成字但语义无关的提问，必须不触发")
+    ap.add_argument("--expect", nargs="*", default=None,
+                    help="**事先声明**的预期命中（题面前缀，可多条）。给了就逐条比对："
+                         "漏命中或多命中都判失败。不给只报实测，并提示这一步没做")
     args = ap.parse_args()
 
     from services.retrieval import tokenize as tk
@@ -106,6 +109,29 @@ def main() -> int:
     if not hits:
         print("   （无）——注意：这本身不是'范围有限'的证据，只说明评测集没覆盖到")
 
+    # 先声明预期、再跑、再比差异（否则"预期命中"退化成"事后解释实测结果"）
+    expect_problems: list[str] = []
+    if args.expect is None:
+        print("\n   ⚠ 没有用 --expect 事先声明预期命中：这一步没做，"
+              "本次只是把实测结果列出来，不构成'预期与实测一致'的证据")
+    else:
+        actual = {h["q"] for h in hits}
+        matched = set()
+        for want in args.expect:
+            got = [q for q in actual if q.startswith(want)]
+            if not got:
+                expect_problems.append(f"声明了预期但没命中: {want[:40]}")
+            matched.update(got)
+        for q in sorted(actual - matched):
+            expect_problems.append(f"命中了但没在预期里: {q[:40]}")
+        if expect_problems:
+            print("\n   ✗ 预期与实测不一致：")
+            for m in expect_problems:
+                print("     -", m)
+        else:
+            print(f"\n   ✓ 预期与实测一致（声明 {len(args.expect)} 条前缀，"
+                  f"覆盖 {len(actual)} 道题）")
+
     print(f"\n③ 碰撞负例（{len(args.negatives)} 条，必须都不触发）：")
     leaked = []
     for q in args.negatives:
@@ -119,11 +145,20 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"since": args.since, "changed": {k: v[1] for k, v in changed.items()},
-             "expected_hits": hits, "negatives": args.negatives, "leaked": leaked},
+             "expected_hits": hits, "declared_expect": args.expect,
+             "expect_problems": expect_problems,
+             "negatives": args.negatives, "leaked": leaked},
             ensure_ascii=False, indent=1), encoding="utf-8")
 
+    if expect_problems:
+        print("\n预期命中与实测对不上：要么范围判断错了，要么预期写得不准，"
+              "两种都按 §6 改跑检索验证集。")
+        return 1
     if leaked:
         print("\n有碰撞负例被触发：范围不是你以为的那个，按 §6 应当改跑检索验证集。")
+        return 1
+    if args.expect is None:
+        print("\n没有事先声明预期命中（--expect）：举证不完整。")
         return 1
     if missing_neg:
         print("\n没有给碰撞负例：举证不完整（『没触发的样本』不等于『范围有限』），"

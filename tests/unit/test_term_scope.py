@@ -35,9 +35,40 @@ def test_all_eval_questions_covers_every_registered_set():
     )
 
 
+def test_missing_declared_expectation_is_not_a_pass(capsys, monkeypatch):
+    """不事先声明预期命中 → 退出码 1。
+
+    没有这一条，"预期命中"就退化成"事后解释实测结果"——跑出什么就说预期是
+    什么，等于没有预期。这是本轮自陈里登记的缺口，写完当场补掉（§5.1）。
+    """
+    monkeypatch.setattr(sys, "argv", [
+        "term_scope.py", "--since", "2cbe470", "--negatives", "JVM 堆内存怎么调",
+    ])
+    assert TS.main() == 1
+    assert "没有事先声明预期命中" in capsys.readouterr().out
+
+
+def test_declared_expectation_must_match_reality(capsys, monkeypatch):
+    """声明的预期与实测对不上 → 退出码 1，两个方向都判。"""
+    base = ["term_scope.py", "--since", "2cbe470", "--negatives", "JVM 堆内存怎么调"]
+
+    # 方向一：声明了一条根本不会命中的
+    monkeypatch.setattr(sys, "argv", base + ["--expect", "根本不存在的题面"])
+    assert TS.main() == 1
+    assert "声明了预期但没命中" in capsys.readouterr().out
+
+    # 方向二：真实命中了却没写进预期
+    monkeypatch.setattr(sys, "argv", base + ["--expect"])
+    assert TS.main() == 1
+    assert "命中了但没在预期里" in capsys.readouterr().out
+
+
 def test_missing_negatives_is_not_a_pass(capsys, monkeypatch):
     """不给碰撞负例 → 退出码 1（举证不完整）。"""
-    monkeypatch.setattr(sys, "argv", ["term_scope.py", "--since", "2cbe470"])
+    monkeypatch.setattr(sys, "argv", [
+        "term_scope.py", "--since", "2cbe470",
+        "--expect", "已经建了包含查询所有列的覆盖索引",
+    ])
     assert TS.main() == 1
     assert "举证不完整" in capsys.readouterr().out
 
@@ -48,6 +79,7 @@ def test_a_triggered_negative_fails(capsys, monkeypatch):
     """
     monkeypatch.setattr(sys, "argv", [
         "term_scope.py", "--since", "2cbe470",
+        "--expect", "已经建了包含查询所有列的覆盖索引",
         "--negatives", "覆盖索引为什么还要回表",
     ])
     assert TS.main() == 1
@@ -58,6 +90,7 @@ def test_clean_negatives_pass(capsys, monkeypatch):
     """三件产出齐全且负例都不触发 → 退出码 0。"""
     monkeypatch.setattr(sys, "argv", [
         "term_scope.py", "--since", "2cbe470",
+        "--expect", "已经建了包含查询所有列的覆盖索引",
         "--negatives", "Kafka 消息堆积了怎么办", "JVM 堆内存怎么调",
         "索引扫描和顺序扫描怎么选", "事务回滚之后表里的数据还在吗",
     ])
