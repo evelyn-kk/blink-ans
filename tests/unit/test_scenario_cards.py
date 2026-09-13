@@ -345,6 +345,59 @@ def test_current_index_fallback_excludes_authored_blocks_from_self_endorsing(tmp
     )
 
 
+def test_card_url_lookup_works_after_a_dictionary_change(tmp_path, monkeypatch):
+    """改了 `term_map.yaml` 之后，卡片同步仍要能读当前索引做引用校验（T-113）。
+
+    背景：词典改了就必须重建索引，而重建的可行路径是 `--mode merge`——
+    `carry_over()` 会按**新词典**重算全部搬运块的 FTS，结果是一致的。但卡片
+    同步会顺带打开 `current.db` 查"这个 URL 在语料里真的存在吗"，而那次打开
+    原来带词典校验，于是直接抛
+    `分词词典已变更…请重建索引`：**重建被"必须重建"本身挡住了**。
+
+    这两处查询只读 `source_url`/`version_or_commit`，不做任何分词，因此不该
+    受词典门禁约束。门禁要守的是"查询侧与索引侧词典不一致"，不是元数据读取。
+
+    判别性：修复前这条会以 `IndexError_` 失败（不是断言失败），修复后通过。
+    """
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    monkeypatch.setattr(store_mod, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(cards, "CURRENT", index_dir / "current.db")
+
+    legit = Chunk(
+        source_url="https://example.com/docs/lifecycle.html#draining",
+        source_project="widgetdocs", version_or_commit="v1-real",
+        license="Apache-2.0", retrieved_at=utc_now(),
+        title_path=["Real Docs", "Draining"], technology="widgets",
+        content_type="prose", locale="en", text="widgetdocs 官方文档的真实正文。",
+        source_path="docs/lifecycle.md",
+    )
+    legit.validate()
+    b = IndexBuilder("current")
+    b.add([legit], [_vec(0)])
+    b.finalize({"widgetdocs": "v1-real"}, "synthetic")
+    b.activate()
+
+    # 把索引里记的词典版本改成一个旧值，模拟 term_map.yaml 刚被改过
+    import sqlite3
+    con = sqlite3.connect(index_dir / "current.db")
+    con.execute("UPDATE meta SET value = 'stale-dict-version' WHERE key = 'dictionary_version'")
+    con.commit(); con.close()
+
+    text = CARD_OK.replace(
+        "source: widgetdocs https://example.com/docs/lifecycle.html#hooks",
+        "source: widgetdocs https://example.com/docs/lifecycle.html#draining",
+    )
+    _write_card(tmp_path, "widget.md", text)
+
+    chunks, res = cards.collect_chunks(
+        _authored_src(tmp_path), lambda *_: None, versions={}, known_urls={}
+    )
+    assert not res.error, f"词典版本不一致不该让卡片同步失败: {res.error}"
+    assert chunks, "引用校验应当仍能在旧词典版本的索引上完成"
+    assert all(c.version_or_commit == "v1-real" for c in chunks)
+
+
 # ---------- 卡片格式本身的拒绝（整份文件级别） ----------
 
 @pytest.mark.parametrize("bad_text", [

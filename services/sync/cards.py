@@ -123,7 +123,12 @@ def _lookup_current_version(project: str, authored_prefixes: tuple[str, ...]) ->
     """从当前已激活索引里找该来源既有的**非 authored** 块的版本号，作为兜底。"""
     if not CURRENT.exists():
         return None
-    store = ChunkStore(CURRENT)
+    # 只读 version/url 两个元数据列，不做任何分词，因此**不校验词典版本**。
+    # T-113 踩到的实际后果：改了 `term_map.yaml` 之后想用 `--mode merge`
+    # 重建索引（carry_over 会按新词典重算全部搬运块的 FTS，结果是一致的），
+    # 却在这里因为"索引词典版本与当前不一致"直接报错——而这正是要修的那件事
+    # 本身。词典门禁该守的是**查询侧与索引侧不一致**，不是这条元数据读取。
+    store = ChunkStore(CURRENT, check_dictionary=False)
     try:
         rows = store.execute(
             "SELECT version_or_commit, source_path FROM chunks WHERE source_project = ?", (project,)
@@ -146,7 +151,7 @@ def _lookup_current_urls(project: str, authored_prefixes: tuple[str, ...]) -> se
     排除 authored 来源自己产生的块，见 `_authored_path_prefixes()`。"""
     if not CURRENT.exists():
         return set()
-    store = ChunkStore(CURRENT)
+    store = ChunkStore(CURRENT, check_dictionary=False)   # 同上：只读 URL，不分词
     try:
         rows = store.execute(
             "SELECT source_url, source_path FROM chunks WHERE source_project = ?", (project,)
