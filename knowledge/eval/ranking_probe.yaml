@@ -127,7 +127,9 @@ probes:
   - q: Debezium Outbox 表要包含哪些字段才能保证事件和业务数据一致
     project: debezium
     gold: "Outbox Event Router › Basic outbox table"
-    baseline: 9
+    # 2026-09-13（T-112，RRF_K 60 → 10）：9 → **7**，按 CR-086 就地固化。
+    # 仍未进 top5，`known_open` 不变。
+    baseline: 7
     known_open: true
     note: |
       2026-09-06（CR-039）：人工打开 `outbox-event-router.adoc` 源文件确认
@@ -146,7 +148,13 @@ probes:
   - q: Spring Kafka 消费失败怎么配置重试和死信队列
     project: spring-kafka
     gold: "Retry Config › Configuration › Using the `@RetryableTopic` annotation"
-    baseline: 6
+    # 2026-09-13（T-112，RRF_K 60 → 10）：**6 → 3，进了 top5**，按 CR-086 固化。
+    # 这正是 CR-048 诊断出的那个机制被修掉的证据：gold 在向量路排第 1、
+    # 关键词路缺席，k=60 时打不过"两路都中等"的块；k=10 让"某一路很靠前"
+    # 这个信号重新有分量。`known_open` 依然留着——它现在进了 top5，但这条
+    # 缺口的根因（短配置块在 BM25 上竞争不过长块）没有被解决，只是不再
+    # 决定名次；下次若再跌出去，是退步而不是"已知缺口"。
+    baseline: 3
     known_open: true
     note: |
       2026-09-06（CR-039）：人工打开 `retrytopic/retry-config.adoc` 源文件
@@ -301,7 +309,8 @@ probes:
   - q: Spring 事务里抛了受检异常为什么没有回滚
     project: spring-framework
     gold: "Rolling Back › Rolling Back a Declarative Transaction"
-    baseline: 2
+    # 2026-09-13（T-112，RRF_K 60 → 10）：2 → **1**，按 CR-086 固化。
+    baseline: 1
     note: |
       官方原文就在这一节：`In its default configuration, the Spring
       Framework's transaction infrastructure code marks a transaction for
