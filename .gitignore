@@ -33,6 +33,7 @@ bench/reports/*.md
 *.pcm
 *.m4a
 resource/*.txt
+resource/asr_t024_r112_private.yaml
 
 .env
 .env.*

@@ -1,0 +1,36 @@
+{
+  "model": "mlx-community/whisper-large-v3-turbo",
+  "runtime": "mlx-whisper",
+  "language": "en",
+  "input_kind": "real_recording",
+  "initial_prompt_tokens": 153,
+  "results": [
+    {
+      "clip": "en-test3",
+      "language": "en",
+      "input_kind": "real_recording",
+      "audio_seconds": 92.93,
+      "reference_sha256": "0e6e19fa972a8dec75ebffffdda840598c989e12315b650c8c430404316dd1da",
+      "initial_prompt_tokens": 153,
+      "glossary_biased": true,
+      "runs": 1,
+      "cold": {
+        "transcribe_s": 7.1147,
+        "rtf": 13.06,
+        "word_error_rate": 0.0854
+      },
+      "median": {
+        "transcribe_s": 7.1147,
+        "rtf": 13.06,
+        "word_error_rate": 0.0854
+      },
+      "samples": [
+        {
+          "transcribe_s": 7.1147,
+          "rtf": 13.06,
+          "word_error_rate": 0.0854
+        }
+      ]
+    }
+  ]
+}

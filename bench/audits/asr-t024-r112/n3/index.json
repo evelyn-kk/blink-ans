@@ -1,0 +1,182 @@
+{
+  "manifest": "asr_t024_r112_private.yaml",
+  "runs_requested": 3,
+  "cases": [
+    {
+      "clip": "en-test1",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 180,
+      "status": "completed",
+      "elapsed_s": 4.1621,
+      "summary": "en-test1--no_prompt.json",
+      "audio_seconds": 5.95,
+      "reference_sha256": "01823c40d548db2e1ebc3bbdc4343452820003fb928ff51d10d8f6cd6f1a93d8"
+    },
+    {
+      "clip": "en-test1",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 180,
+      "status": "completed",
+      "elapsed_s": 3.8269,
+      "summary": "en-test1--glossary.json",
+      "audio_seconds": 5.95,
+      "reference_sha256": "01823c40d548db2e1ebc3bbdc4343452820003fb928ff51d10d8f6cd6f1a93d8"
+    },
+    {
+      "clip": "en-test2",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 188,
+      "status": "completed",
+      "elapsed_s": 7.7567,
+      "summary": "en-test2--no_prompt.json",
+      "audio_seconds": 44.8,
+      "reference_sha256": "252dd73c2e8015f8ce5d67a599a182f52df4946e6836f484b46166c5215af507"
+    },
+    {
+      "clip": "en-test2",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 188,
+      "status": "completed",
+      "elapsed_s": 7.8619,
+      "summary": "en-test2--glossary.json",
+      "audio_seconds": 44.8,
+      "reference_sha256": "252dd73c2e8015f8ce5d67a599a182f52df4946e6836f484b46166c5215af507"
+    },
+    {
+      "clip": "en-test3",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 260,
+      "status": "completed",
+      "elapsed_s": 14.4506,
+      "summary": "en-test3--no_prompt.json",
+      "audio_seconds": 92.93,
+      "reference_sha256": "0e6e19fa972a8dec75ebffffdda840598c989e12315b650c8c430404316dd1da"
+    },
+    {
+      "clip": "en-test3",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 260,
+      "status": "completed",
+      "elapsed_s": 31.4101,
+      "summary": "en-test3--glossary.json",
+      "audio_seconds": 92.93,
+      "reference_sha256": "0e6e19fa972a8dec75ebffffdda840598c989e12315b650c8c430404316dd1da"
+    },
+    {
+      "clip": "en-ser1",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 1108,
+      "status": "completed",
+      "elapsed_s": 122.7155,
+      "summary": "en-ser1--no_prompt.json",
+      "audio_seconds": 658.02,
+      "reference_sha256": "c1292e6be7b8d1424a77b24e4bb02a145ac55b17c0c535bdc427cb49f47d61c2"
+    },
+    {
+      "clip": "en-ser1",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 1108,
+      "status": "completed",
+      "elapsed_s": 160.3727,
+      "summary": "en-ser1--glossary.json",
+      "audio_seconds": 658.02,
+      "reference_sha256": "c1292e6be7b8d1424a77b24e4bb02a145ac55b17c0c535bdc427cb49f47d61c2"
+    },
+    {
+      "clip": "en-ser2",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 1261,
+      "status": "completed",
+      "elapsed_s": 197.7759,
+      "summary": "en-ser2--no_prompt.json",
+      "audio_seconds": 760.29,
+      "reference_sha256": "b087daa134cec0b650b68c6bdcfa9497887084e83edaf0320dbe6f0a5fc6f894"
+    },
+    {
+      "clip": "en-ser2",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 1261,
+      "status": "completed",
+      "elapsed_s": 158.1739,
+      "summary": "en-ser2--glossary.json",
+      "audio_seconds": 760.29,
+      "reference_sha256": "b087daa134cec0b650b68c6bdcfa9497887084e83edaf0320dbe6f0a5fc6f894"
+    },
+    {
+      "clip": "en-ser3",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 1191,
+      "status": "completed",
+      "elapsed_s": 141.0997,
+      "summary": "en-ser3--no_prompt.json",
+      "audio_seconds": 713.75,
+      "reference_sha256": "cad04703066e9c5e58fef114837ba4814bf0a913914d3e199be9b2f5ec2f0850"
+    },
+    {
+      "clip": "en-ser3",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 1191,
+      "status": "completed",
+      "elapsed_s": 169.2394,
+      "summary": "en-ser3--glossary.json",
+      "audio_seconds": 713.75,
+      "reference_sha256": "cad04703066e9c5e58fef114837ba4814bf0a913914d3e199be9b2f5ec2f0850"
+    },
+    {
+      "clip": "en-ser4",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 1309,
+      "status": "completed",
+      "elapsed_s": 140.8763,
+      "summary": "en-ser4--no_prompt.json",
+      "audio_seconds": 792.02,
+      "reference_sha256": "ca6a3bdac0e69439d0e01a8ff80d4dd89eb3d3c81868b5e4141a7c7a68249cef"
+    },
+    {
+      "clip": "en-ser4",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 1309,
+      "status": "completed",
+      "elapsed_s": 160.6392,
+      "summary": "en-ser4--glossary.json",
+      "audio_seconds": 792.02,
+      "reference_sha256": "ca6a3bdac0e69439d0e01a8ff80d4dd89eb3d3c81868b5e4141a7c7a68249cef"
+    },
+    {
+      "clip": "en-ser5",
+      "arm": "no_prompt",
+      "runs_requested": 3,
+      "timeout_s": 1032,
+      "status": "completed",
+      "elapsed_s": 109.206,
+      "summary": "en-ser5--no_prompt.json",
+      "audio_seconds": 607.69,
+      "reference_sha256": "8741cee6441fb2568bac4327ecabd7481520320a7afdbeb073c7fe9447e3a22c"
+    },
+    {
+      "clip": "en-ser5",
+      "arm": "glossary",
+      "runs_requested": 3,
+      "timeout_s": 1032,
+      "status": "completed",
+      "elapsed_s": 151.6353,
+      "summary": "en-ser5--glossary.json",
+      "audio_seconds": 607.69,
+      "reference_sha256": "8741cee6441fb2568bac4327ecabd7481520320a7afdbeb073c7fe9447e3a22c"
+    }
+  ]
+}

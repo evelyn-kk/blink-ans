@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,71 @@ def test_word_error_rate_records_word_level_substitution_deletion_and_insertion(
         "reference_words": 3, "hypothesis_words": 4,
         "substitutions": 1, "deletions": 0, "insertions": 1, "word_error_rate": 0.6667,
     }
+
+
+def test_public_report_summary_keeps_reproducible_metrics_but_removes_private_text():
+    summary = bench_asr.public_report_summary({
+        "model": "local-model", "runtime": "mlx-whisper", "language": "en",
+        "input_kind": "real_recording", "initial_prompt": "private glossary",
+        "initial_prompt_tokens": 153,
+        "results": [{
+            "clip": "private-clip", "language": "en", "input_kind": "real_recording",
+            "audio_seconds": 7.0, "reference_sha256": "reference-hash", "initial_prompt_tokens": 153,
+            "glossary_biased": True, "runs": 3,
+            "cold": {"transcribe_s": 2.0, "rtf": 3.5, "word_error_rate": 0.1},
+            "median": {"transcribe_s": 1.0, "rtf": 7.0, "word_error_rate": 0.1},
+            "samples": [{"transcribe_s": 2.0, "rtf": 3.5, "word_error_rate": 0.1}],
+            "reference_text": "the user's private transcript",
+            "transcribed_text": "the user's private ASR output",
+            "transcription_samples": [{"transcribed_text": "private ASR output"}],
+        }],
+    })
+
+    encoded = yaml.safe_dump(summary)
+    assert "private transcript" not in encoded
+    assert "private ASR output" not in encoded
+    assert "private glossary" not in encoded
+    assert summary["initial_prompt_tokens"] == 153
+    assert summary["results"][0]["reference_sha256"] == "reference-hash"
+    assert summary["results"][0]["samples"] == [
+        {"transcribe_s": 2.0, "rtf": 3.5, "word_error_rate": 0.1},
+    ]
+
+
+def test_existing_private_report_can_only_be_summarized_with_an_explicit_output(monkeypatch, tmp_path):
+    report = tmp_path / "private.json"
+    report.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["bench_asr.py", "--summarize-report", str(report)])
+
+    with pytest.raises(SystemExit, match="必须同时提供 --public-summary"):
+        bench_asr.main()
+
+
+def test_main_writes_a_text_free_public_summary_without_loading_metal(monkeypatch, tmp_path):
+    private = tmp_path / "private.json"
+    public = tmp_path / "public.json"
+    private.write_text(json.dumps({
+        "model": "local-model", "runtime": "mlx-whisper", "language": "en",
+        "input_kind": "real_recording", "initial_prompt": "private glossary",
+        "initial_prompt_tokens": 153,
+        "results": [{
+            "clip": "clip-1", "language": "en", "input_kind": "real_recording",
+            "audio_seconds": 3.0, "reference_sha256": "sha", "initial_prompt_tokens": 153,
+            "glossary_biased": True, "runs": 1,
+            "cold": {"transcribe_s": 1.0, "rtf": 3.0, "word_error_rate": 0.0},
+            "median": {"transcribe_s": 1.0, "rtf": 3.0, "word_error_rate": 0.0},
+            "samples": [{"transcribe_s": 1.0, "rtf": 3.0, "word_error_rate": 0.0}],
+            "reference_text": "private transcript", "transcribed_text": "private output",
+        }],
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "bench_asr.py", "--summarize-report", str(private), "--public-summary", str(public),
+    ])
+
+    bench_asr.main()
+
+    encoded = public.read_text(encoding="utf-8")
+    assert "private transcript" not in encoded
+    assert "private output" not in encoded
+    assert "private glossary" not in encoded
+    assert yaml.safe_load(encoded)["results"][0]["reference_sha256"] == "sha"

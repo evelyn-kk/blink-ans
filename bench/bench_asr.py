@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import time
@@ -182,6 +183,38 @@ def initial_prompt_token_count(prompt: str | None, language: str) -> int:
     return len(tokenizer.encode(prompt))
 
 
+def public_report_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """生成可提交的 ASR 结果摘要，绝不携带用户原稿、转写或 prompt 文本。"""
+    public_results = []
+    for result in payload["results"]:
+        samples = [{
+            "transcribe_s": sample["transcribe_s"],
+            "rtf": sample["rtf"],
+            "word_error_rate": sample["word_error_rate"],
+        } for sample in result["samples"]]
+        public_results.append({
+            "clip": result["clip"],
+            "language": result["language"],
+            "input_kind": result["input_kind"],
+            "audio_seconds": result["audio_seconds"],
+            "reference_sha256": result["reference_sha256"],
+            "initial_prompt_tokens": result["initial_prompt_tokens"],
+            "glossary_biased": result["glossary_biased"],
+            "runs": result["runs"],
+            "cold": result["cold"],
+            "median": result["median"],
+            "samples": samples,
+        })
+    return {
+        "model": payload["model"],
+        "runtime": payload["runtime"],
+        "language": payload["language"],
+        "input_kind": payload["input_kind"],
+        "initial_prompt_tokens": payload["initial_prompt_tokens"],
+        "results": public_results,
+    }
+
+
 def synth(name: str, text: str) -> Path:
     """用 macOS say 合成中文语音并转成 16kHz 单声道 wav。"""
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -231,12 +264,29 @@ def main() -> None:
                     help="真人录音清单（格式见 bench/asr_real_manifest.example.yaml）")
     ap.add_argument("--clip", action="append", default=[], metavar="ID",
                     help="只跑 manifest 中指定 clip（可重复，用于可恢复地复跑长录音）")
+    ap.add_argument("--public-summary", type=Path,
+                    help="写入不含原稿、转写或 prompt 文本的可提交摘要 JSON")
+    ap.add_argument("--summarize-report", type=Path,
+                    help="从已有私有报告生成 --public-summary，不加载模型或音频")
     ap.add_argument(
         "--compare-glossary",
         action="store_true",
         help="对比开启/关闭技术术语词表偏置的转写差异",
     )
     args = ap.parse_args()
+
+    if args.summarize_report:
+        if not args.public_summary:
+            raise SystemExit("--summarize-report 必须同时提供 --public-summary")
+        try:
+            private_payload = json.loads(args.summarize_report.read_text(encoding="utf-8"))
+            summary = public_report_summary(private_payload)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise SystemExit(f"私有 ASR 报告无效: {exc}") from exc
+        args.public_summary.parent.mkdir(parents=True, exist_ok=True)
+        args.public_summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"公开摘要已写入 {args.public_summary}")
+        return
 
     if args.manifest:
         try:
@@ -313,13 +363,20 @@ def main() -> None:
         print(f"    转写 {m['transcribe_s']}s | 实时率 {m['rtf']}x | 冷启动 {stats['cold']['transcribe_s']}s")
         print(f"    识别: {entry['transcribed_text'][:60]}")
 
-    path = write_report(
-        "asr",
-        {"model": args.model, "runtime": "mlx-whisper", "language": args.language,
-         "input_kind": input_kind, "initial_prompt": options["initial_prompt"],
-         "initial_prompt_tokens": prompt_tokens, "results": results},
-    )
+    report_payload = {
+        "model": args.model, "runtime": "mlx-whisper", "language": args.language,
+        "input_kind": input_kind, "initial_prompt": options["initial_prompt"],
+        "initial_prompt_tokens": prompt_tokens, "results": results,
+    }
+    path = write_report("asr", report_payload)
     print(f"\n报告已写入 {path}")
+    if args.public_summary:
+        args.public_summary.parent.mkdir(parents=True, exist_ok=True)
+        args.public_summary.write_text(
+            json.dumps(public_report_summary(report_payload), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"公开摘要已写入 {args.public_summary}")
 
     warm = [r["median"]["rtf"] for r in results]
     print(f"结论: 热态实时率 {min(warm)}x ~ {max(warm)}x")
