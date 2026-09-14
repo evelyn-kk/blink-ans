@@ -118,9 +118,13 @@ def all_eval_questions() -> list[tuple[str, str]]:
         if not path.exists():
             continue
         for item in (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get(key, []):
-            q = item.get("q")
-            if q:
-                out.append((label, q))
+            # T-023 的基础集显式登记中英文题面；两者都是词典改动的观测对象。
+            # 其他评测文件仍用 q，保持原有集合语义。
+            questions = ([item.get("q_zh"), item.get("q_en")]
+                         if label == "basic" else [item.get("q")])
+            for q in questions:
+                if q:
+                    out.append((label, q))
     return out
 
 

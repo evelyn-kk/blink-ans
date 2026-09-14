@@ -1,76 +1,317 @@
-# I2 基础题回归集
-#
-# 完成定义（plan.md I2）：50 道基础题可得到可访问的来源链接；
-# 无来源的技术结论不会伪装为确定答案。
-#
-# 因此题目分两类：
-#   expect: answered     —— 语料应当覆盖，须返回来源且答案带引用标注
-#   expect: refused      —— 语料不覆盖，须判为证据不足，不得给出确定的技术结论
-#
-# 这不是 I3 的场景评测集：这里只验证管线可用与引用可追溯，
-# 不评判答案的技术正确性。I3 的 100 道场景题才做正确性评分。
-
-version: 1
+# I2 / T-023 基础回归集。中文题面保留自 version 1；英文题面是人工撰写，
+# 运行器只读取 q_zh/q_en，绝不在运行时翻译。每条应作答题用同一组中英
+# 正则断言一个具体事实，并要求引用指定的官方项目来源。
+version: 2
 
 questions:
   # ---- Kafka ----
-  - {q: "Kafka 消费者重复消费怎么排查", expect: answered, project: kafka}
-  - {q: "Kafka 的 offset 是怎么提交的", expect: answered, project: kafka}
-  - {q: "Kafka 消费者组重平衡会发生什么", expect: answered, project: kafka}
-  - {q: "Kafka 事务型生产者怎么保证精确一次", expect: answered, project: kafka}
-  - {q: "Kafka 的幂等生产者是怎么实现的", expect: answered, project: kafka}
-  - {q: "Kafka 分区副本的同步机制是什么", expect: answered, project: kafka}
-  - {q: "Kafka 的消息投递语义有哪几种", expect: answered, project: kafka}
-  - {q: "Kafka 日志压缩 compaction 是怎么工作的", expect: answered, project: kafka}
-  - {q: "Kafka 生产者的 acks 参数怎么设置", expect: answered, project: kafka}
-  - {q: "Kafka 消费者的心跳和会话超时怎么配置", expect: answered, project: kafka}
+  - id: kafka-duplicate-consumption
+    q_zh: "Kafka 消费者重复消费怎么排查"
+    q_en: "How should I investigate duplicate consumption by a Kafka consumer?"
+    expect: answered
+    expect_keypoints: ["(?i)(auto.?commit|手动提交|manual commit)"]
+    expect_sources: [kafka]
+  - id: kafka-offset-commit
+    q_zh: "Kafka 的 offset 是怎么提交的"
+    q_en: "How are Kafka consumer offsets committed?"
+    expect: answered
+    expect_keypoints: ["(?i)(commit|提交).{0,30}(offset|位移)|(offset|位移).{0,30}(commit|提交)"]
+    expect_sources: [kafka]
+  - id: kafka-rebalance
+    q_zh: "Kafka 消费者组重平衡会发生什么"
+    q_en: "What happens when a Kafka consumer group rebalances?"
+    expect: answered
+    expect_keypoints: ["(?i)(rebalanc|重平衡).{0,40}(partition|分区)|(partition|分区).{0,40}(rebalanc|重平衡)"]
+    expect_sources: [kafka]
+  - id: kafka-transactional-producer
+    q_zh: "Kafka 事务型生产者怎么保证精确一次"
+    q_en: "How does a Kafka transactional producer provide exactly-once semantics?"
+    expect: answered
+    expect_keypoints: ["(?i)(transaction|事务).{0,40}(exactly.?once|精确一次|恰好一次)|(exactly.?once|精确一次|恰好一次).{0,40}(transaction|事务)"]
+    expect_sources: [kafka]
+  - id: kafka-idempotent-producer
+    q_zh: "Kafka 的幂等生产者是怎么实现的"
+    q_en: "How is an idempotent Kafka producer implemented?"
+    expect: answered
+    expect_keypoints: ["(?i)(sequence|序列).{0,40}(producer|生产者)|(producer|生产者).{0,40}(sequence|序列)"]
+    expect_sources: [kafka]
+  - id: kafka-replica-sync
+    q_zh: "Kafka 分区副本的同步机制是什么"
+    q_en: "How does replica synchronization work for Kafka partitions?"
+    expect: answered
+    expect_keypoints: ["(?i)(ISR|in.?sync|同步副本)"]
+    expect_sources: [kafka]
+  - id: kafka-delivery-semantics
+    q_zh: "Kafka 的消息投递语义有哪几种"
+    q_en: "What delivery semantics does Kafka offer?"
+    expect: answered
+    expect_keypoints: ["(?i)(at.?least.?once|至少一次|at.?most.?once|至多一次|exactly.?once|精确一次)"]
+    expect_sources: [kafka]
+  - id: kafka-log-compaction
+    q_zh: "Kafka 日志压缩 compaction 是怎么工作的"
+    q_en: "How does Kafka log compaction work?"
+    expect: answered
+    expect_keypoints: ["(?i)(latest|最后|最新).{0,40}(key|键|keyed)|(key|键|keyed).{0,40}(latest|最后|最新)"]
+    expect_sources: [kafka]
+  - id: kafka-acks
+    q_zh: "Kafka 生产者的 acks 参数怎么设置"
+    q_en: "How should I configure the Kafka producer acks setting?"
+    expect: answered
+    expect_keypoints: ["(?i)acks.{0,40}(all|0|1)|确认.{0,40}(all|全部|0|1)"]
+    expect_sources: [kafka]
+  - id: kafka-heartbeat-session-timeout
+    q_zh: "Kafka 消费者的心跳和会话超时怎么配置"
+    q_en: "How should Kafka consumer heartbeats and session timeouts be configured?"
+    expect: answered
+    expect_keypoints: ["(?i)(heartbeat|心跳).{0,40}(session|会话)|(session|会话).{0,40}(heartbeat|心跳)"]
+    expect_sources: [kafka]
 
   # ---- Kubernetes ----
-  - {q: "Kubernetes liveness probe 配置参数有哪些", expect: answered, project: kubernetes}
-  - {q: "readiness probe 和 liveness probe 的区别", expect: answered, project: kubernetes}
-  - {q: "Pod 因为内存超限被 OOMKilled 怎么办", expect: answered, project: kubernetes}
-  - {q: "Kubernetes 的资源 requests 和 limits 有什么区别", expect: answered, project: kubernetes}
-  - {q: "Pod 的 QoS 等级是怎么划分的", expect: answered, project: kubernetes}
-  - {q: "Deployment 滚动更新的策略参数怎么配", expect: answered, project: kubernetes}
-  - {q: "Kubernetes 中 ConfigMap 怎么挂载到容器", expect: answered, project: kubernetes}
-  - {q: "Pod 被驱逐 eviction 的触发条件是什么", expect: answered, project: kubernetes}
-  - {q: "Kubernetes 的 HPA 水平扩缩是怎么算的", expect: answered, project: kubernetes}
-  - {q: "Pod 的生命周期有哪些阶段", expect: answered, project: kubernetes}
+  - id: k8s-liveness-probe
+    q_zh: "Kubernetes liveness probe 配置参数有哪些"
+    q_en: "Which settings are available for a Kubernetes liveness probe?"
+    expect: answered
+    expect_keypoints: ["(?i)(initialDelaySeconds|初始延迟|periodSeconds|周期)"]
+    expect_sources: [kubernetes]
+  - id: k8s-readiness-vs-liveness
+    q_zh: "readiness probe 和 liveness probe 的区别"
+    q_en: "What is the difference between readiness and liveness probes?"
+    expect: answered
+    expect_keypoints: ["(?i)(ready|就绪).{0,40}(traffic|流量|service|服务)|(traffic|流量|service|服务).{0,40}(ready|就绪)"]
+    expect_sources: [kubernetes]
+  - id: k8s-oomkilled
+    q_zh: "Pod 因为内存超限被 OOMKilled 怎么办"
+    q_en: "What should I do when a Pod is OOMKilled after exceeding memory?"
+    expect: answered
+    expect_keypoints: ["(?i)(memory|内存).{0,40}(limit|限制)|(limit|限制).{0,40}(memory|内存)"]
+    expect_sources: [kubernetes]
+  - id: k8s-requests-limits
+    q_zh: "Kubernetes 的资源 requests 和 limits 有什么区别"
+    q_en: "What is the difference between Kubernetes resource requests and limits?"
+    expect: answered
+    expect_keypoints: ["(?i)(request|请求).{0,40}(schedul|调度)|(schedul|调度).{0,40}(request|请求)"]
+    expect_sources: [kubernetes]
+  - id: k8s-qos
+    q_zh: "Pod 的 QoS 等级是怎么划分的"
+    q_en: "How are Pod QoS classes determined?"
+    expect: answered
+    expect_keypoints: ["(?i)(Guaranteed|保证|Burstable|可突发|BestEffort|尽力)"]
+    expect_sources: [kubernetes]
+  - id: k8s-rolling-update
+    q_zh: "Deployment 滚动更新的策略参数怎么配"
+    q_en: "How should Deployment rolling-update strategy settings be configured?"
+    expect: answered
+    expect_keypoints: ["(?i)(maxSurge|maxUnavailable|最大激增|最大不可用)"]
+    expect_sources: [kubernetes]
+  - id: k8s-configmap-mount
+    q_zh: "Kubernetes 中 ConfigMap 怎么挂载到容器"
+    q_en: "How can a ConfigMap be mounted into a Kubernetes container?"
+    expect: answered
+    expect_keypoints: ["(?i)(volume|卷).{0,40}(ConfigMap|configmap)|(ConfigMap|configmap).{0,40}(volume|卷)"]
+    expect_sources: [kubernetes]
+  - id: k8s-eviction
+    q_zh: "Pod 被驱逐 eviction 的触发条件是什么"
+    q_en: "What conditions trigger Kubernetes Pod eviction?"
+    expect: answered
+    expect_keypoints: ["(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)"]
+    expect_sources: [kubernetes]
+  - id: k8s-hpa
+    q_zh: "Kubernetes 的 HPA 水平扩缩是怎么算的"
+    q_en: "How does Kubernetes HPA calculate horizontal scaling?"
+    expect: answered
+    expect_keypoints: ["(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)"]
+    expect_sources: [kubernetes]
+  - id: k8s-pod-lifecycle
+    q_zh: "Pod 的生命周期有哪些阶段"
+    q_en: "What phases are in a Pod lifecycle?"
+    expect: answered
+    expect_keypoints: ["(?i)(Pending|等待|Running|运行|Succeeded|成功|Failed|失败)"]
+    expect_sources: [kubernetes]
 
   # ---- PostgreSQL ----
-  - {q: "PostgreSQL 执行计划里出现 Seq Scan 怎么优化", expect: answered, project: postgresql}
-  - {q: "EXPLAIN ANALYZE 的输出怎么读", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 的 autovacuum 是做什么的", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 事务隔离级别有哪几种", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 怎么查看当前的锁等待", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 的连接数上限怎么配置", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 表膨胀 bloat 怎么处理", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 的 B-tree 索引什么时候会失效", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 分区表怎么创建和使用", expect: answered, project: postgresql}
-  - {q: "PostgreSQL 的统计信息怎么更新", expect: answered, project: postgresql}
+  - id: postgres-seq-scan
+    q_zh: "PostgreSQL 执行计划里出现 Seq Scan 怎么优化"
+    q_en: "How should I optimize a PostgreSQL plan that uses a Seq Scan?"
+    expect: answered
+    expect_keypoints: ["(?i)(index|索引).{0,40}(selectiv|选择性|statistic|统计)|(selectiv|选择性|statistic|统计).{0,40}(index|索引)"]
+    expect_sources: [postgresql]
+  - id: postgres-explain-analyze
+    q_zh: "EXPLAIN ANALYZE 的输出怎么读"
+    q_en: "How do I read PostgreSQL EXPLAIN ANALYZE output?"
+    expect: answered
+    expect_keypoints: ["(?i)(actual|实际).{0,40}(time|时间|row|行)|(time|时间|row|行).{0,40}(actual|实际)"]
+    expect_sources: [postgresql]
+  - id: postgres-autovacuum
+    q_zh: "PostgreSQL 的 autovacuum 是做什么的"
+    q_en: "What does PostgreSQL autovacuum do?"
+    expect: answered
+    expect_keypoints: ["(?i)(VACUUM|真空).{0,40}(ANALYZE|分析)|(ANALYZE|分析).{0,40}(VACUUM|真空)"]
+    expect_sources: [postgresql]
+  - id: postgres-isolation
+    q_zh: "PostgreSQL 事务隔离级别有哪几种"
+    q_en: "What transaction isolation levels does PostgreSQL support?"
+    expect: answered
+    expect_keypoints: ["(?i)(Read Committed|读已提交|Repeatable Read|可重复读|Serializable|可串行化)"]
+    expect_sources: [postgresql]
+  - id: postgres-lock-wait
+    q_zh: "PostgreSQL 怎么查看当前的锁等待"
+    q_en: "How can I inspect current lock waits in PostgreSQL?"
+    expect: answered
+    expect_keypoints: ["(?i)(pg_locks|锁表)"]
+    expect_sources: [postgresql]
+  - id: postgres-connections
+    q_zh: "PostgreSQL 的连接数上限怎么配置"
+    q_en: "How do I configure PostgreSQL's connection limit?"
+    expect: answered
+    expect_keypoints: ["(?i)(max_connections|最大连接)"]
+    expect_sources: [postgresql]
+  - id: postgres-bloat
+    q_zh: "PostgreSQL 表膨胀 bloat 怎么处理"
+    q_en: "How should I handle PostgreSQL table bloat?"
+    expect: answered
+    expect_keypoints: ["(?i)(VACUUM|真空|REINDEX|重建索引)"]
+    expect_sources: [postgresql]
+  - id: postgres-btree-index
+    q_zh: "PostgreSQL 的 B-tree 索引什么时候会失效"
+    q_en: "When can a PostgreSQL B-tree index stop being used effectively?"
+    expect: answered
+    expect_keypoints: ["(?i)(selectiv|选择性|function|函数|cast|类型转换)"]
+    expect_sources: [postgresql]
+  - id: postgres-partitioning
+    q_zh: "PostgreSQL 分区表怎么创建和使用"
+    q_en: "How do I create and use partitioned tables in PostgreSQL?"
+    expect: answered
+    expect_keypoints: ["(?i)(PARTITION BY|分区键|分区表)"]
+    expect_sources: [postgresql]
+  - id: postgres-statistics
+    q_zh: "PostgreSQL 的统计信息怎么更新"
+    q_en: "How are PostgreSQL planner statistics updated?"
+    expect: answered
+    expect_keypoints: ["(?i)(ANALYZE|分析).{0,40}(statistic|统计)|(statistic|统计).{0,40}(ANALYZE|分析)"]
+    expect_sources: [postgresql]
 
   # ---- Spring Boot ----
-  - {q: "Spring Boot 怎么暴露 Prometheus 指标", expect: answered, project: spring-boot}
-  - {q: "Spring Boot actuator 的健康检查端点怎么配置", expect: answered, project: spring-boot}
-  - {q: "Spring Boot 的自动配置是怎么生效的", expect: answered, project: spring-boot}
-  - {q: "Spring Boot 怎么配置日志级别", expect: answered, project: spring-boot}
-  - {q: "Spring Boot 的配置文件优先级是怎样的", expect: answered, project: spring-boot}
-  - {q: "Spring Boot 怎么做优雅停机", expect: answered, project: spring-boot}
-  - {q: "Spring Boot 的分布式追踪怎么接入", expect: answered, project: spring-boot}
-  - {q: "Spring Boot 打包成可执行 jar 的结构是什么", expect: answered, project: spring-boot}
+  - id: spring-prometheus
+    q_zh: "Spring Boot 怎么暴露 Prometheus 指标"
+    q_en: "How does Spring Boot expose Prometheus metrics?"
+    expect: answered
+    expect_keypoints: ["(?i)(/actuator/prometheus|actuator.{0,20}prometheus)"]
+    expect_sources: [spring-boot]
+  - id: spring-health
+    q_zh: "Spring Boot actuator 的健康检查端点怎么配置"
+    q_en: "How do I configure Spring Boot Actuator health endpoints?"
+    expect: answered
+    expect_keypoints: ["(?i)(health|健康).{0,40}(endpoint|端点)|(endpoint|端点).{0,40}(health|健康)"]
+    expect_sources: [spring-boot]
+  - id: spring-auto-configuration
+    q_zh: "Spring Boot 的自动配置是怎么生效的"
+    q_en: "How does Spring Boot auto-configuration take effect?"
+    expect: answered
+    expect_keypoints: ["(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)"]
+    expect_sources: [spring-boot]
+  - id: spring-logging
+    q_zh: "Spring Boot 怎么配置日志级别"
+    q_en: "How do I configure log levels in Spring Boot?"
+    expect: answered
+    expect_keypoints: ["(?i)(logging\\.level|日志级别)"]
+    expect_sources: [spring-boot]
+  - id: spring-config-precedence
+    q_zh: "Spring Boot 的配置文件优先级是怎样的"
+    q_en: "What is the precedence order for Spring Boot configuration files?"
+    expect: answered
+    expect_keypoints: ["(?i)(property source|属性源|优先级|precedence)"]
+    expect_sources: [spring-boot]
+  - id: spring-graceful-shutdown
+    q_zh: "Spring Boot 怎么做优雅停机"
+    q_en: "How does Spring Boot perform graceful shutdown?"
+    expect: answered
+    expect_keypoints: ["(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)"]
+    expect_sources: [spring-boot]
+  - id: spring-tracing
+    q_zh: "Spring Boot 的分布式追踪怎么接入"
+    q_en: "How do I integrate distributed tracing with Spring Boot?"
+    expect: answered
+    expect_keypoints: ["(?i)(Micrometer|micrometer|tracing|追踪)"]
+    expect_sources: [spring-boot]
+  - id: spring-executable-jar
+    q_zh: "Spring Boot 打包成可执行 jar 的结构是什么"
+    q_en: "What is inside a Spring Boot executable JAR?"
+    expect: answered
+    expect_keypoints: ["(?i)(BOOT-INF|boot-inf)"]
+    expect_sources: [spring-boot]
 
   # ---- Spring Data Redis ----
-  - {q: "RedisTemplate 的序列化怎么配置", expect: answered, project: spring-data-redis}
-  - {q: "Spring Data Redis 怎么连接 Redis Cluster", expect: answered, project: spring-data-redis}
-  - {q: "Spring Data Redis 的缓存注解怎么用", expect: answered, project: spring-data-redis}
-  - {q: "RedisTemplate 和 StringRedisTemplate 有什么区别", expect: answered, project: spring-data-redis}
-  - {q: "Spring Data Redis 怎么用 Lua 脚本", expect: answered, project: spring-data-redis}
-  - {q: "Spring Data Redis 的连接池怎么配置", expect: answered, project: spring-data-redis}
+  - id: redis-serialization
+    q_zh: "RedisTemplate 的序列化怎么配置"
+    q_en: "How should RedisTemplate serialization be configured?"
+    expect: answered
+    expect_keypoints: ["(?i)(serializer|序列化).{0,40}(key|键|value|值)|(key|键|value|值).{0,40}(serializer|序列化)"]
+    expect_sources: [spring-data-redis]
+  - id: redis-cluster
+    q_zh: "Spring Data Redis 怎么连接 Redis Cluster"
+    q_en: "How does Spring Data Redis connect to a Redis Cluster?"
+    expect: answered
+    expect_keypoints: ["(?i)(RedisClusterConfiguration|cluster|集群)"]
+    expect_sources: [spring-data-redis]
+  - id: redis-cache-annotations
+    q_zh: "Spring Data Redis 的缓存注解怎么用"
+    q_en: "How are caching annotations used with Spring Data Redis?"
+    expect: answered
+    expect_keypoints: ["(?i)(@Cacheable|缓存注解)"]
+    expect_sources: [spring-data-redis]
+  - id: redis-template-difference
+    q_zh: "RedisTemplate 和 StringRedisTemplate 有什么区别"
+    q_en: "What is the difference between RedisTemplate and StringRedisTemplate?"
+    expect: answered
+    expect_keypoints: ["(?i)(StringRedisTemplate|字符串).{0,40}(String|字符串)|(String|字符串).{0,40}(StringRedisTemplate|字符串)"]
+    expect_sources: [spring-data-redis]
+  - id: redis-lua
+    q_zh: "Spring Data Redis 怎么用 Lua 脚本"
+    q_en: "How does Spring Data Redis run Lua scripts?"
+    expect: answered
+    expect_keypoints: ["(?i)(RedisScript|evalsha|Lua|lua)"]
+    expect_sources: [spring-data-redis]
+  - id: redis-pool
+    q_zh: "Spring Data Redis 的连接池怎么配置"
+    q_en: "How is a Spring Data Redis connection pool configured?"
+    expect: answered
+    expect_keypoints: ["(?i)(pool|连接池).{0,40}(Lettuce|Jedis|client)|(Lettuce|Jedis|client).{0,40}(pool|连接池)"]
+    expect_sources: [spring-data-redis]
 
   # ---- 应当拒答：超出语料范围 ----
-  - {q: "今天北京的天气怎么样", expect: refused}
-  - {q: "推荐几部值得看的科幻电影", expect: refused}
-  - {q: "iOS SwiftUI 的状态管理最佳实践是什么", expect: refused}
-  - {q: "怎么用 Rust 写一个词法分析器", expect: refused}
-  - {q: "公司的年终奖一般怎么计算", expect: refused}
-  - {q: "React 的 useEffect 依赖数组怎么写", expect: refused}
+  - id: refuse-beijing-weather
+    q_zh: "今天北京的天气怎么样"
+    q_en: "What is the weather in Beijing today?"
+    expect: refused
+    expect_keypoints: []
+    expect_sources: []
+  - id: refuse-scifi-films
+    q_zh: "推荐几部值得看的科幻电影"
+    q_en: "Recommend some worthwhile science-fiction films."
+    expect: refused
+    expect_keypoints: []
+    expect_sources: []
+  - id: refuse-swiftui-state
+    q_zh: "iOS SwiftUI 的状态管理最佳实践是什么"
+    q_en: "What are best practices for state management in iOS SwiftUI?"
+    expect: refused
+    expect_keypoints: []
+    expect_sources: []
+  - id: refuse-rust-lexer
+    q_zh: "怎么用 Rust 写一个词法分析器"
+    q_en: "How do I write a lexer in Rust?"
+    expect: refused
+    expect_keypoints: []
+    expect_sources: []
+  - id: refuse-bonus
+    q_zh: "公司的年终奖一般怎么计算"
+    q_en: "How are year-end bonuses usually calculated at a company?"
+    expect: refused
+    expect_keypoints: []
+    expect_sources: []
+  - id: refuse-react-useeffect
+    q_zh: "React 的 useEffect 依赖数组怎么写"
+    q_en: "How should a React useEffect dependency array be written?"
+    expect: refused
+    expect_keypoints: []
+    expect_sources: []

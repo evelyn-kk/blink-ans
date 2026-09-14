@@ -38,7 +38,10 @@ def test_validation_questions_come_from_the_pre_existing_question_set():
     """独立性的第二条：题面逐字取自 I2 时期就存在的 50 题集，不是本轮为了
     验证某个参数而现编的——现编题面等于换一批靶子，一样是自证。
     """
-    basic_qs = {q["q"] for q in BASIC["questions"]}
+    # T-023 keeps the I2 Chinese wording under q_zh. The held-out collection is
+    # deliberately a Chinese pre-existing subset, so q_en must not be folded
+    # into this independence check.
+    basic_qs = {q["q_zh"] for q in BASIC["questions"]}
     invented = [c["q"] for c in VALIDATION["cases"] if c["q"] not in basic_qs]
     assert not invented, f"这些题不在 basic_questions.yaml 里: {invented}"
 

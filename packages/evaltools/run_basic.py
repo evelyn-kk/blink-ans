@@ -4,26 +4,21 @@
 1. 应作答的题目返回**可访问的**来源链接，且答案带引用标注。
 2. 语料未覆盖的题目被判为证据不足，不给出伪装成确定结论的技术建议。
 
-注意断言方式：只检查结构性属性（有无来源、引用是否落在有效编号内、
-充分性判定是否正确），**不比对答案文本**——I0 已确认答案不可逐字复现。
-答案的技术正确性由 I3 的场景评测负责。
-
-T-022（双语提示词）：`--language en` 用同一份 50 题问题集要求**英文**作答。
-问题文本本身仍是中文——检索是跨语言的（development-notes.md 2026-09-02
-「场景卡片改用英文正文」实测：向量路跨语言损失仅 0.035–0.05），换语言只影响
-生成阶段用哪份提示词、模型该用哪种语言回答。这不是 T-023 要建的完整双语评测集
-（那一套需要 `q_zh`/`q_en` 对照与独立的关键点标注），只是本轮验证"英文提示词路径
-在真实检索证据下也能正确生成带引用的回答、且拒答标记正常工作"的务实最小验证——
-足以覆盖本轮验收要求的"中英各跑 50 题回归均通过"，但不是语言对照质量评测。
+T-023 将每道题显式写成 `q_zh` / `q_en`，而不是在运行时翻译中文题。两种题面共用
+同一条 `expect_keypoints`（中英文都可命中的事实正则）和 `expect_sources`，所以报告能
+按语言比较事实、来源与拒答结果。关键点是确定性文字判据，不是 LLM 判分；在真正跑
+本地/云端模型校准前，它只如实报告命中，不能被写成“英文更快或更准”的结论。
 
 用法:
-    python packages/evaltools/run_basic.py [--limit N] [--check-links] [--language zh|en]
+    python packages/evaltools/run_basic.py [--limit N] [--check-links] \\
+        [--language zh] [--language en]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 import time
@@ -57,9 +52,13 @@ REPORTS = ROOT / "bench" / "reports"
 
 @dataclass
 class Case:
+    id: str
+    language: str
     question: str
     expect: str
-    project: str | None = None
+    expect_keypoints: list[str] = field(default_factory=list)
+    expect_sources: list[str] = field(default_factory=list)
+    answer_text: str = ""           # 事实判据命中/漏失必须可人工回读，不只留计数
     sufficiency: str = ""
     sources: int = 0
     cited: int = 0
@@ -75,6 +74,9 @@ class Case:
     cost_usd: float = 0.0          # --offline 模式下应恒为 0，见 main() 里的隐含正确性检查
     urls: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
+    keypoints_hit: list[str] = field(default_factory=list)
+    keypoints_missed: list[str] = field(default_factory=list)
+    sources_missed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     evidence_count: int = 0       # 送进 prompt 的证据条数
     declined: bool = False        # 模型明说证据未涵盖
@@ -99,8 +101,28 @@ def check_url(url: str, timeout: float = 10.0) -> bool:
         return False
 
 
+def _question_for(spec: dict, language: str) -> str:
+    """取人工登记的该语言题面；绝不在评测时翻译或回退到另一种语言。"""
+    question = spec.get(f"q_{language}")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError(f"{spec.get('id', '<unknown>')}: 缺 q_{language}，不能拿另一语言题面代替")
+    return question
+
+
+def _score_keypoints(answer: str, patterns: list[str]) -> tuple[list[str], list[str]]:
+    """事实断言：每个登记正则都必须在非拒答回答中出现。"""
+    hit = [pattern for pattern in patterns if re.search(pattern, answer)]
+    missed = [pattern for pattern in patterns if pattern not in hit]
+    return hit, missed
+
+
 def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
-    c = Case(question=spec["q"], expect=spec["expect"], project=spec.get("project"))
+    c = Case(
+        id=spec["id"], language=language, question=_question_for(spec, language),
+        expect=spec["expect"],
+        expect_keypoints=list(spec.get("expect_keypoints", [])),
+        expect_sources=list(spec.get("expect_sources", [])),
+    )
     answer = ""
     for ev in orch.answer(
         AnswerRequest(question=c.question, max_tokens=400, language=language)
@@ -129,14 +151,12 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
 
     # T-022：判据与生产路径同一个函数（`answering.declined()`），不是本脚本
     # 另起一套散文正则——散文判据换语言就失效，且两套判据分叉迟早互相打脸。
+    c.answer_text = answer
     c.declined = declined(answer)
 
     if c.expect == "answered":
         if c.sources == 0 and not c.declined:
             c.failures.append("未返回任何来源")
-        if c.project and c.projects and c.project not in c.projects:
-            got = ", ".join(sorted(set(c.projects))) or "无"
-            c.failures.append(f"来源均不属于预期项目 {c.project}（实际 {got}）")
 
         if c.declined:
             # 模型明说"证据未涵盖"是**正确行为**：它拒绝基于手上的证据编造。
@@ -156,6 +176,18 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
             # 给出了技术内容却不标注任何来源——这才是真正危险的情况：
             # 结论无法追溯，用户无从判断可信度。
             c.failures.append("给出技术内容但未标注任何证据编号，结论无法追溯")
+        else:
+            c.keypoints_hit, c.keypoints_missed = _score_keypoints(
+                answer, c.expect_keypoints,
+            )
+            for pattern in c.keypoints_missed:
+                c.failures.append(f"未命中关键事实: {pattern!r}")
+            got_projects = sorted(set(c.projects))
+            for project in c.expect_sources:
+                if project not in got_projects:
+                    c.sources_missed.append(project)
+                    got = ", ".join(got_projects) or "无"
+                    c.failures.append(f"引用中缺少期望来源 {project!r}（实际 {got}）")
     else:
         # 判据是**行为**而非标签：不给出技术结论、不展示来源即为通过。
         # 充分性标签判为 limited 但模型自行拒绝编造，属于第二道防线生效，
@@ -179,6 +211,49 @@ def _project_of(citation: str) -> str:
     return citation.split(" ", 1)[0] if citation else ""
 
 
+def validate_specs(specs: list[dict]) -> None:
+    """T-023 题库契约在加载时失败关闭，避免默默退回中文题或空断言。"""
+    seen: set[str] = set()
+    for spec in specs:
+        case_id = spec.get("id")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError("每道基础题必须有唯一的非空 id")
+        if case_id in seen:
+            raise ValueError(f"基础题 id 重复: {case_id}")
+        seen.add(case_id)
+        for language in SUPPORTED_LANGUAGES:
+            _question_for(spec, language)
+        if spec.get("expect") not in {"answered", "refused"}:
+            raise ValueError(f"{case_id}: expect 必须是 answered 或 refused")
+        for field in ("expect_keypoints", "expect_sources"):
+            if not isinstance(spec.get(field), list):
+                raise ValueError(f"{case_id}: {field} 必须是列表")
+        if spec["expect"] == "answered" and not spec["expect_keypoints"]:
+            raise ValueError(f"{case_id}: 应作答题必须登记至少一个事实断言")
+        if spec["expect"] == "answered" and not spec["expect_sources"]:
+            raise ValueError(f"{case_id}: 应作答题必须登记至少一个来源断言")
+
+
+def summarize_by_language(cases: list[Case]) -> dict[str, dict]:
+    """按题目的实际 language 汇总，不能把中英文混成一条“总通过率”。"""
+    grouped: dict[str, list[Case]] = {}
+    for case in cases:
+        grouped.setdefault(case.language, []).append(case)
+    return {
+        language: {
+            "passed": sum(1 for c in group if c.ok),
+            "total": len(group),
+            "retrieval_misses": sum(1 for c in group if c.retrieval_miss),
+            "declined_with_evidence": sum(1 for c in group if c.declined_with_evidence),
+            "keypoints_hit": sum(len(c.keypoints_hit) for c in group),
+            "keypoints_total": sum(len(c.expect_keypoints) for c in group),
+            "sources_missed": sum(len(c.sources_missed) for c in group),
+            "cases": [vars(c) for c in group],
+        }
+        for language, group in sorted(grouped.items())
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
@@ -187,12 +262,16 @@ def main() -> int:
                      help="强制走本地兜底，不尝试云端 Claude（省钱/可复现；"
                           "不传时按生产路由跑：有 ANTHROPIC_API_KEY 就走云端）")
     ap.add_argument("--language", choices=SUPPORTED_LANGUAGES, default="zh",
-                     help="回答语言（T-022）。问题文本本身仍是中文，只切生成阶段的"
-                          "提示词与本地常驻前缀预热语言——检索是跨语言的，不受影响。")
+                     help="评测题面与回答语言；分别运行 zh/en 会生成各自 language 分组。")
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
 
     specs = yaml.safe_load(QUESTIONS.read_text(encoding="utf-8"))["questions"]
+    try:
+        validate_specs(specs)
+    except ValueError as exc:
+        print(f"题库格式错误: {exc}", file=sys.stderr)
+        return 2
     if args.limit:
         specs = specs[: args.limit]
 
@@ -298,9 +377,12 @@ def main() -> int:
     REPORTS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = REPORTS / f"eval-basic-{stamp}.json"
+    by_language = summarize_by_language(cases)
     path.write_text(json.dumps({
+        "schema_version": 2,
         "template_version": template_version(),
         "language": args.language,
+        "by_language": by_language,
         "model": DEFAULT_MODEL,
         "index_chunks": store.count(),
         "dictionary_version": store.meta.get("dictionary_version"),
