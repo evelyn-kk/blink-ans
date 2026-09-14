@@ -19,6 +19,8 @@ from services.retrieval import store as store_mod  # noqa: E402
 from services.retrieval.embed import DIM  # noqa: E402
 from services.retrieval.store import ChunkStore, IndexBuilder, IndexError_  # noqa: E402
 from services.sync.pipeline import _resolve_sources, run_regression  # noqa: E402
+from services.sync import version as transform_version_mod  # noqa: E402
+from services.sync.version import content_transform_version  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -327,10 +329,16 @@ def test_merge_refuses_to_carry_blocks_from_a_stale_content_transform(base_index
     """
     db = store_mod._connect(base_index)
     try:
-        db.execute(
+        recorded = db.execute(
+            "SELECT value FROM meta WHERE key = 'content_transform_version'"
+        ).fetchone()
+        assert recorded is not None
+        assert recorded["value"] == content_transform_version()
+        changed = db.execute(
             "UPDATE meta SET value = 'stale-parser-and-chunker' "
             "WHERE key = 'content_transform_version'"
         )
+        assert changed.rowcount == 1
         db.commit()
     finally:
         db.close()
@@ -343,6 +351,55 @@ def test_merge_refuses_to_carry_blocks_from_a_stale_content_transform(base_index
         "拒绝必须发生在搬运之前；否则异常后留下的半份索引仍可能被错误使用"
     )
     b.discard()
+
+
+def test_finalize_records_the_current_content_transform_version(base_index):
+    """CR-120：新建索引必须实际写入转换版本，不能只靠 merge 的缺失分支。"""
+    db = store_mod._connect(base_index)
+    try:
+        recorded = db.execute(
+            "SELECT value FROM meta WHERE key = 'content_transform_version'"
+        ).fetchone()
+    finally:
+        db.close()
+    assert recorded is not None
+    assert recorded["value"] == content_transform_version()
+
+
+def test_schema_chunk_change_invalidates_carry_over_before_any_block_moves(tmp_path, monkeypatch):
+    """CR-119：`estimate_tokens()` 变更须使官方/项目材料的旧块不能被搬运。
+
+    在临时根目录复制全部版本输入，先建底座，再只改
+    `packages/schemas/chunk.py` 的字节。若该文件从清单漏掉，两个版本相同、
+    旧实现会搬运块；当前实现必须在 0 块时拒绝。
+    """
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path)
+    for relative in transform_version_mod._TRANSFORM_FILES:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / relative).read_bytes())
+    schema = tmp_path / "packages/schemas/chunk.py"
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    schema.write_bytes((REPO_ROOT / "packages/schemas/chunk.py").read_bytes())
+    monkeypatch.setattr(transform_version_mod, "_ROOT", tmp_path)
+
+    before = content_transform_version()
+    base = IndexBuilder("schema-version-base")
+    chunk = _chunk("postgresql", "postgresql", 1, "token budget depends on this chunk.")
+    chunk.validate()
+    base.add([chunk], [_vec(0)])
+    base.finalize({"postgresql": "v1"}, "synthetic")
+    base.activate()
+
+    schema.write_bytes(schema.read_bytes() + b"\n# simulated estimate_tokens algorithm revision\n")
+    after = content_transform_version()
+    assert after != before, "packages/schemas/chunk.py 必须是转换版本输入"
+
+    merged = IndexBuilder("schema-version-merged")
+    with pytest.raises(IndexError_, match="解析/切块版本与当前实现不一致"):
+        merged.carry_over(tmp_path / "schema-version-base.db", set(), "synthetic")
+    assert merged.db.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"] == 0
+    merged.discard()
 
 
 def test_merge_fails_closed_when_legacy_index_never_recorded_transform_version(base_index):

@@ -13,6 +13,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 _TRANSFORM_FILES = (
+    "packages/schemas/chunk.py",
     "services/sync/parse.py",
     "services/sync/chunk.py",
     "services/sync/cards.py",
