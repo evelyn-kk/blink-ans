@@ -173,6 +173,8 @@ class FusionExperiment:
     name: str
     imputed_keyword_rank: int | None = None
     imputed_vector_rank: int | None = None
+    keyword_candidate_depth: int | None = None
+    keyword_score_depth: int | None = None
     keyword_rescue_depth: int | None = None
     vector_rescue_max_rank: int | None = None
 
@@ -346,14 +348,16 @@ def hybrid_search(
 
     if experiment and bool(experiment.keyword_rescue_depth) != bool(experiment.vector_rescue_max_rank):
         raise ValueError("关键词尾部救援必须同时给出深度与向量名次上限")
+    if experiment and experiment.keyword_score_depth and not experiment.keyword_candidate_depth:
+        raise ValueError("关键词计分深度必须同时给出关键词候选深度")
 
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
     for tech, tech_weight in techs:
-        keyword_limit = max(
-            candidates,
-            experiment.keyword_rescue_depth if experiment and experiment.keyword_rescue_depth else candidates,
-        )
+        keyword_limit = max(candidates, experiment.keyword_candidate_depth) if experiment and experiment.keyword_candidate_depth else candidates
+        keyword_score_depth = experiment.keyword_score_depth if experiment and experiment.keyword_score_depth else candidates
+        if keyword_score_depth > keyword_limit:
+            raise ValueError("关键词计分深度不能超过关键词候选深度")
         kw = keyword_search(
             store, query, keyword_limit, tech, project,
             project_id=project_id, module=module, symbol=symbol, version=version,
@@ -365,12 +369,12 @@ def hybrid_search(
         distances.update(vec)
         # 生产路径仍只累加 `candidates` 条。尾部关键词仅可由显式调研候选、
         # 且满足向量强相关条件时带着它自己的真实 rank 加入。
-        _rrf_accumulate(scores, kw[:candidates], KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
+        _rrf_accumulate(scores, kw[:keyword_score_depth], KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
         _rrf_accumulate(scores, vec, VECTOR_WEIGHT * tech_weight, RRF_K, 2)
         if not experiment:
             continue
 
-        keyword_ids = {rid for rid, _ in kw[:candidates]}
+        keyword_ids = {rid for rid, _ in kw[:keyword_score_depth]}
         vector_ids = {rid for rid, _ in vec}
         if experiment.imputed_keyword_rank:
             for rid in vector_ids - keyword_ids:
@@ -386,7 +390,7 @@ def hybrid_search(
                 )
         if experiment.keyword_rescue_depth:
             vector_ranks = {rid: rank for rank, (rid, _) in enumerate(vec, 1)}
-            for rank, (rid, _) in enumerate(kw[candidates:], candidates + 1):
+            for rank, (rid, _) in enumerate(kw[keyword_score_depth:], keyword_score_depth + 1):
                 if rank > experiment.keyword_rescue_depth:
                     break
                 if vector_ranks.get(rid, candidates + 1) <= experiment.vector_rescue_max_rank:

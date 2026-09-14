@@ -79,13 +79,14 @@ CANDIDATES = (
     ),
     Candidate(
         "keyword-tail",
-        candidates=150,
-        rationale="两路候选深度均从 30 扩至 150；不补虚构名次",
+        experiment=FusionExperiment("keyword-tail", keyword_candidate_depth=150, keyword_score_depth=150),
+        rationale="仅关键词候选与计分深度从 30 扩至 150；向量仍为 30，不补虚构名次",
     ),
     Candidate(
         "vector-keyword-rescue",
         experiment=FusionExperiment(
-            "vector-keyword-rescue", keyword_rescue_depth=150, vector_rescue_max_rank=15,
+            "vector-keyword-rescue", keyword_candidate_depth=150, keyword_score_depth=30,
+            keyword_rescue_depth=150, vector_rescue_max_rank=15,
         ),
         rationale="向量前 15 的块若关键词真实排在 31..150，加入该真实关键词 RRF 分",
     ),
