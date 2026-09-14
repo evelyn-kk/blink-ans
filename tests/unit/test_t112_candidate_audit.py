@@ -59,7 +59,9 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
     assert (tail.keyword_candidate_depth, tail.keyword_score_depth) == (150, 150)
     rescue = by_name["vector-keyword-rescue"].experiment
     assert (rescue.keyword_candidate_depth, rescue.keyword_score_depth) == (150, 30)
+    assert (rescue.vector_candidate_depth, rescue.vector_score_depth) == (150, 30)
     assert (rescue.keyword_rescue_depth, rescue.vector_rescue_max_rank) == (150, 15)
+    assert rescue.rescue_credit_rank == "vector_zero"
 
 
 def test_audit_embeds_provenance_candidate_and_computed_comparison():

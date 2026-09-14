@@ -166,7 +166,9 @@ class FusionExperiment:
     默认 `None` 时走与历史生产路径逐字相同的 RRF。
 
     `imputed_*_rank` 是为另一条已命中的路补一个假定名次；
-    `keyword_rescue_*` 则只把关键词的**真实**尾部名次加回给向量强相关的块。
+    `keyword_rescue_*` 以关键词的**真实**尾部名次作为入选条件，再按
+    `rescue_credit_rank` 指定的名次记分；`vector_zero` 仅用于忠实复现 R105
+    临时补丁中 `enumerate()` 漏写 `start=1` 的零基名次，不是可采纳的策略。
     两者都不是生产策略，是否有资格变成策略须由 evaltools 的独立验证决定。
     """
 
@@ -175,8 +177,11 @@ class FusionExperiment:
     imputed_vector_rank: int | None = None
     keyword_candidate_depth: int | None = None
     keyword_score_depth: int | None = None
+    vector_candidate_depth: int | None = None
+    vector_score_depth: int | None = None
     keyword_rescue_depth: int | None = None
     vector_rescue_max_rank: int | None = None
+    rescue_credit_rank: str | None = None
 
 
 def _pack(vec: Sequence[float]) -> bytes:
@@ -348,34 +353,42 @@ def hybrid_search(
 
     if experiment and bool(experiment.keyword_rescue_depth) != bool(experiment.vector_rescue_max_rank):
         raise ValueError("关键词尾部救援必须同时给出深度与向量名次上限")
+    if experiment and experiment.rescue_credit_rank not in (None, "keyword", "vector", "vector_zero"):
+        raise ValueError("尾部救援计分名次只能是 keyword、vector 或 vector_zero")
     if experiment and experiment.keyword_score_depth and not experiment.keyword_candidate_depth:
         raise ValueError("关键词计分深度必须同时给出关键词候选深度")
+    if experiment and experiment.vector_score_depth and not experiment.vector_candidate_depth:
+        raise ValueError("向量计分深度必须同时给出向量候选深度")
 
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
     for tech, tech_weight in techs:
         keyword_limit = max(candidates, experiment.keyword_candidate_depth) if experiment and experiment.keyword_candidate_depth else candidates
         keyword_score_depth = experiment.keyword_score_depth if experiment and experiment.keyword_score_depth else candidates
+        vector_limit = max(candidates, experiment.vector_candidate_depth) if experiment and experiment.vector_candidate_depth else candidates
+        vector_score_depth = experiment.vector_score_depth if experiment and experiment.vector_score_depth else candidates
         if keyword_score_depth > keyword_limit:
             raise ValueError("关键词计分深度不能超过关键词候选深度")
+        if vector_score_depth > vector_limit:
+            raise ValueError("向量计分深度不能超过向量候选深度")
         kw = keyword_search(
             store, query, keyword_limit, tech, project,
             project_id=project_id, module=module, symbol=symbol, version=version,
         )
         vec = vector_search(
-            store, query_vector, candidates, tech, project,
+            store, query_vector, vector_limit, tech, project,
             project_id=project_id, module=module, symbol=symbol, version=version,
         ) if query_vector else []
         distances.update(vec)
         # 生产路径仍只累加 `candidates` 条。尾部关键词仅可由显式调研候选、
         # 且满足向量强相关条件时带着它自己的真实 rank 加入。
         _rrf_accumulate(scores, kw[:keyword_score_depth], KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
-        _rrf_accumulate(scores, vec, VECTOR_WEIGHT * tech_weight, RRF_K, 2)
+        _rrf_accumulate(scores, vec[:vector_score_depth], VECTOR_WEIGHT * tech_weight, RRF_K, 2)
         if not experiment:
             continue
 
         keyword_ids = {rid for rid, _ in kw[:keyword_score_depth]}
-        vector_ids = {rid for rid, _ in vec}
+        vector_ids = {rid for rid, _ in vec[:vector_score_depth]}
         if experiment.imputed_keyword_rank:
             for rid in vector_ids - keyword_ids:
                 _rrf_add_at_rank(
@@ -393,10 +406,13 @@ def hybrid_search(
             for rank, (rid, _) in enumerate(kw[keyword_score_depth:], keyword_score_depth + 1):
                 if rank > experiment.keyword_rescue_depth:
                     break
-                if vector_ranks.get(rid, candidates + 1) <= experiment.vector_rescue_max_rank:
-                    _rrf_add_at_rank(
-                        scores, rid, rank, KEYWORD_WEIGHT * tech_weight, RRF_K, 1,
+                vector_rank = vector_ranks.get(rid)
+                if vector_rank is not None and vector_rank <= experiment.vector_rescue_max_rank:
+                    credit_rank = (
+                        max(0, vector_rank - 1) if experiment.rescue_credit_rank == "vector_zero"
+                        else vector_rank if experiment.rescue_credit_rank == "vector" else rank
                     )
+                    _rrf_add_at_rank(scores, rid, credit_rank, KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
 
     fused = {rid: tuple(v) for rid, v in scores.items()}
     if not fused:

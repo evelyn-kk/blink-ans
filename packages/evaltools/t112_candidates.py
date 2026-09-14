@@ -86,9 +86,10 @@ CANDIDATES = (
         "vector-keyword-rescue",
         experiment=FusionExperiment(
             "vector-keyword-rescue", keyword_candidate_depth=150, keyword_score_depth=30,
-            keyword_rescue_depth=150, vector_rescue_max_rank=15,
+            vector_candidate_depth=150, vector_score_depth=30,
+            keyword_rescue_depth=150, vector_rescue_max_rank=15, rescue_credit_rank="vector_zero",
         ),
-        rationale="向量前 15 的块若关键词真实排在 31..150，加入该真实关键词 RRF 分",
+        rationale="两路各取 150 以保留过滤后的真实名次，但只计各自前 30；关键词真实排在 31..150 且向量前 15 时，再按该向量名次补一条关键词权重 RRF 分（R105 临时实现的实际规则）",
     ),
 )
 
