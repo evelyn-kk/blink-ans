@@ -162,6 +162,35 @@ def test_complete_evidence_passes(monkeypatch, capsys):
     assert "三件产出齐了" in out and "本工具不下这个结论" in out
 
 
+# ---------- `_expansions_under()` 换词典之后必须原样还原 ----------
+
+def test_swapping_dictionaries_restores_the_tokenizer_state():
+    """差分实现要把两版词典轮流装进 `tokenize` 模块，跑完必须还原。
+
+    不还原的后果很隐蔽：同一个进程里后续任何一次 `expand_terms()` 都会用着
+    临时词典——而 `term_scope` 常常和别的评测脚本跑在同一个会话里。
+    这条是自陈薄弱处里登记后当场补掉的（§5.1）。
+    """
+    from services.retrieval import tokenize as tk
+
+    # 先热一次，确保分词器已加载——否则快照到的是"还没加载"那个瞬间的状态，
+    # 断言就变成了和一个陈旧快照比（写这条时先踩了这个坑）。
+    before_expand = sorted(tk.expand_terms(R85_Q))
+    before_path = tk.TERM_MAP_PATH
+    before_ready = tk._ready
+    before_map = dict(tk._term_map)
+    assert before_ready is True, "热身之后分词器应当已加载"
+
+    TS.expansion_diff({"覆盖索引": ["covering index"]}, {}, [R85_Q])
+
+    assert tk.TERM_MAP_PATH == before_path, "词典路径没还原"
+    assert tk._ready == before_ready
+    assert dict(tk._term_map) == before_map, "词典内容没还原"
+    assert sorted(tk.expand_terms(R85_Q)) == before_expand, (
+        "跑完差分之后，真实词典下的展开结果必须与跑之前一致"
+    )
+
+
 def test_all_eval_questions_covers_every_registered_set():
     labels = {label for label, _ in TS.all_eval_questions()}
     assert labels == {"basic", "scenario", "probe", "validation"}
