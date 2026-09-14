@@ -23,6 +23,7 @@ from typing import Iterable, Sequence
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.schemas.chunk import Chunk  # noqa: E402
+from services.sync.version import content_transform_version  # noqa: E402
 
 from .embed import DIM  # noqa: E402
 from .tokenize import dictionary_version, to_fts_document  # noqa: E402
@@ -190,6 +191,22 @@ class IndexBuilder:
                     f"向量语义不同不能混用，请改用全量重建"
                 )
 
+            # 块是 parse.py/chunk.py（以及 authored / 项目材料转换器）的派生物。
+            # merge 若继续搬运不同版本的块，会让本轮 --only 未点名的来源永久停在
+            # 旧解析结果；T-116 已实测发生过这种陈旧解析。缺少该元数据的旧索引
+            # 同样不可信，必须失败关闭，而非把“还没记录版本”当成兼容。
+            built_transform = src.execute(
+                "SELECT value FROM meta WHERE key = 'content_transform_version'"
+            ).fetchone()
+            built_transform = built_transform["value"] if built_transform else None
+            current_transform = content_transform_version()
+            if built_transform != current_transform:
+                raise IndexError_(
+                    "底座索引的解析/切块版本与当前实现不一致"
+                    f"（底座 {built_transform or '未记录'}，当前 {current_transform}）；"
+                    "不能搬运可能陈旧的块，请执行不带 --only 的全量 kb sync"
+                )
+
             moved = 0
             rows = src.execute(
                 """SELECT c.*, v.embedding AS embedding FROM chunks c
@@ -256,6 +273,7 @@ class IndexBuilder:
         total = self.db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
         meta = {
             "dictionary_version": dictionary_version(),
+            "content_transform_version": content_transform_version(),
             "embedding_model": embedding_model,
             "embedding_dim": str(DIM),
             "chunk_count": str(total),

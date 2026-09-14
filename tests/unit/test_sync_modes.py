@@ -317,6 +317,49 @@ def test_merge_refuses_when_embedding_model_differs(base_index):
         b.carry_over(base_index, {"kafka"}, "another-embedding-model")
 
 
+def test_merge_refuses_to_carry_blocks_from_a_stale_content_transform(base_index):
+    """T-116：merge 不能把旧解析/切块实现产出的块搬进新索引。
+
+    这是行为判别性回归：旧实现完全不读取这份版本元数据，下面这次 carry_over
+    会成功搬运 postgresql 那一块；修复后必须在写入任何块前拒绝。这里特意把
+    已有底座的元数据改旧，而非只断言新 key 存在，避免退化成“字段不存在”的
+    弱测试。
+    """
+    db = store_mod._connect(base_index)
+    try:
+        db.execute(
+            "UPDATE meta SET value = 'stale-parser-and-chunker' "
+            "WHERE key = 'content_transform_version'"
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    b = IndexBuilder("stale-transform")
+    with pytest.raises(IndexError_, match="解析/切块版本与当前实现不一致"):
+        b.carry_over(base_index, {"kafka"}, "synthetic")
+
+    assert b.db.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"] == 0, (
+        "拒绝必须发生在搬运之前；否则异常后留下的半份索引仍可能被错误使用"
+    )
+    b.discard()
+
+
+def test_merge_fails_closed_when_legacy_index_never_recorded_transform_version(base_index):
+    """T-116：不能把“缺少版本”误当成可以兼容的旧索引。"""
+    db = store_mod._connect(base_index)
+    try:
+        db.execute("DELETE FROM meta WHERE key = 'content_transform_version'")
+        db.commit()
+    finally:
+        db.close()
+
+    b = IndexBuilder("legacy-transform")
+    with pytest.raises(IndexError_, match="底座 未记录"):
+        b.carry_over(base_index, {"kafka"}, "synthetic")
+    b.discard()
+
+
 def test_merge_requires_existing_base(tmp_path, monkeypatch):
     # 本轮（T-114）顺带修掉：这条用例原来不取 base_index fixture，于是
     # store_mod.INDEX_DIR 没被改写，IndexBuilder 直接在**生产索引目录**
