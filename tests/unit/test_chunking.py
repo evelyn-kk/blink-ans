@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.sync.chunk import (  # noqa: E402
-    MAX_TOKENS, _dedupe_path, _merge_small, _split_body, build_url, estimate_tokens,
-    sections_to_chunks,
+    MAX_TOKENS, MIN_TOKENS, _dedupe_path, _merge_small, _split_body, _split_body_typed,
+    build_url, estimate_tokens, evidence_tokens, sections_to_chunks,
 )
 from services.sync.parse import Section, parse_asciidoc, parse_markdown  # noqa: E402
 from services.sync.registry import Source  # noqa: E402
@@ -413,6 +413,11 @@ def test_navigation_files_are_skipped():
         p.unlink()
 
 
+def _chunked(body: str) -> list[str]:
+    """走和 `sections_to_chunks()` 一样的两步：切块 + 合并短片。"""
+    return [t for t, _ in _merge_small(_split_body_typed(body))]
+
+
 # ---------- AsciiDoc 表格（T-119） ----------
 
 def _adoc_table(rows: int = 4, cell_words: int = 25) -> str:
@@ -525,7 +530,7 @@ def test_oversized_table_cell_is_not_shredded_into_bare_text():
     没有表名、没有表头、没有行键，检索到中段碎片判断不出它在讲哪个字段。
     这正是 T-119 要消灭的形态，只是触发条件从"多行表"换成"单个长单元"。
     """
-    pieces = _merge_small(_split_body(_long_cell_table()))
+    pieces = _chunked(_long_cell_table())
     carrying = [p for p in pieces if "word500" in p]
     assert len(carrying) == 1, f"长单元格被切成了 {len(carrying)} 块"
     piece = carrying[0]
@@ -545,7 +550,7 @@ def test_oversized_table_cell_exceeds_the_hard_cap_on_purpose():
     像证据的错误证据**。哪天决定改成"按单元格语义边界拆 + 每片重复
     表头行键"，这条测试会红，那时候连同 docstring 一起改。
     """
-    pieces = _merge_small(_split_body(_long_cell_table()))
+    pieces = _chunked(_long_cell_table())
     assert len(pieces) == 1
     assert estimate_tokens(pieces[0]) > MAX_TOKENS
 
@@ -561,3 +566,76 @@ def test_oversized_prose_is_still_split_even_if_it_follows_a_table():
     prose_pieces = [p for p in pieces if "变更说明" in p]
     assert len(prose_pieces) > 1, "表后的长散文没有被切"
     assert all(estimate_tokens(p) <= MAX_TOKENS for p in prose_pieces)
+
+
+# ---------- 短片合并与表格边界（CR-117） ----------
+
+def test_tiny_table_merges_into_prose_and_that_exception_is_bounded():
+    """CR-117：不足 `MIN_TOKENS` 的完整小表确实会并回相邻散文——**这是有意的**。
+
+    它只有两条路：并进邻居，或者被 `sections_to_chunks()` 当作不够格的证据
+    丢掉。**并优于丢**，所以 T-119 那句"表格与散文不混块"在这里有一个例外。
+    这条测试把例外**钉成有界的**：被吸收的那一侧最多 `MIN_TOKENS - 1` 个
+    token，而 T-119 量到的稀释来自 111 token 的半张表拼进 220 token 的正文。
+    哪天决定改成"宁可丢也不混"，这条会红，那时连同 docstring 一起改。
+
+    **这是规格测试，不是回归**（§5.2）：R100 实现上实测同样是 1 块、同样通过。
+    它改变的不是行为，而是"这个决定由谁做"——原来由 `MIN_TOKENS` 这个通用
+    阈值悄悄决定，现在写成一条带边界、有反向判据（见下一条）的明文规则。
+    """
+    prose = "Leading prose with sufficient content. " * 8
+    table = "|===\n| Name\n| Default\n|==="
+    assert evidence_tokens(table) < MIN_TOKENS, "这张表本该短到不能独立成块"
+    for body in (f"{prose}\n\n{table}", f"{table}\n\n{prose}"):
+        pieces = _chunked(body)
+        assert len(pieces) == 1, "小表既没被并进来、也没被丢掉"
+        assert "|===" in pieces[0] and "Leading prose" in pieces[0]
+        # 例外的边界：混进来的那一侧不超过 MIN_TOKENS
+        assert evidence_tokens(table) < MIN_TOKENS
+
+
+def test_table_above_min_tokens_is_never_absorbed_into_prose():
+    """例外只对"短到不能独立成块"的片开口。够格的表必须自己成块。
+
+    这是上一条的**反向**判据：没有它，"并优于丢"这句话会被读成
+    "表格随时可以并回散文"。**同样是规格测试**：R100 实现上实测也是 2 块。
+    """
+    prose = "Leading prose with sufficient content. " * 8
+    table = _adoc_table(rows=2, cell_words=8)
+    assert evidence_tokens(table) >= MIN_TOKENS
+    for body in (f"{prose}\n\n{table}", f"{table}\n\n{prose}"):
+        pieces = _chunked(body)
+        assert len(pieces) == 2, f"够格的表被并掉了: {len(pieces)} 块"
+        holding = [p for p in pieces if "|===" in p]
+        assert len(holding) == 1
+        assert "Leading prose" not in holding[0]
+
+
+def test_block_title_attaches_to_the_table_it_titles_not_the_previous_one():
+    """表名行要跟着**它标题的那张表**走（CR-117 实测中发现）。
+
+    判别性（R100 实现上实测）：`.第二张表` 被接到**第一张表**的末尾，
+    第二张表自己反而没有表名。实测命中 3 个来源共 5 处，
+    例如 spring-kafka `kafka/container-props.adoc` 里
+    `.`AbstractMessageListenerContainer` Properties` 被接到上一张表尾。
+    这和 `_merge_small()` 开头那条"不跨小节合并"是同一类错误——**归属搞错**，
+    只是尺度更小。
+    """
+    first = _adoc_table(rows=2, cell_words=8)
+    second = _adoc_table(rows=2, cell_words=8).replace("attr", "second")
+    body = f"{first}\n\n.Second Table Title\n\n{second}"
+    pieces = _chunked(body)
+    titled = [p for p in pieces if "Second Table Title" in p]
+    assert len(titled) == 1
+    assert "second0" in titled[0], "表名没有跟着它标题的那张表"
+    assert "attr0" not in titled[0], "表名被接到了上一张表的末尾"
+
+
+def test_block_title_at_the_very_end_is_not_dropped():
+    """末尾没有可依附的块时原样退回，不能因为"要往后并"就把它弄丢。
+
+    **反向护栏**：两版实现都绿。它防的是新规则把 carry 静默吃掉。
+    """
+    prose = "Some prose with enough content to stand on its own. " * 6
+    pieces = _chunked(f"{prose}\n\n.Dangling Title")
+    assert any("Dangling Title" in p for p in pieces), "结尾的块首修饰被弄丢了"

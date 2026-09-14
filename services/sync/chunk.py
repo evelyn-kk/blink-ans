@@ -46,6 +46,9 @@ _ADOC_ANCHOR = re.compile(r"^\[\[([\w.-]+)\]\]\s*$", re.M)
 # 而且那句话本来就该跟着表走）和统计判据自身的偏差（块从表中间开始时，
 # 找到的第一条 `|===` 是收尾那条）。原始数据见 `bench/audits/`。
 _ADOC_TABLE = re.compile(r"^\|===\s*$", re.M)
+# AsciiDoc 的「块首修饰」：块标题 `.表名`（点后紧跟非空白，区别于有序列表的
+# `. 条目`）与属性行 `[cols=...]`、`[NOTE]`。它们在语法上描述**紧随其后**的块。
+_ADOC_BLOCK_HEADER = re.compile(r"^(?:\.\S.*|\[.*\])$")
 # Antora 的 include 指令行（CR-084）。围栏**之外**的这类行由
 # `parse.py` 直接删掉；但围栏**之内**的删不得——删了会留下一个空代码块，
 # 等于把"这里本来有段代码"换成"这里什么都没有"，比留着更误导。
@@ -198,7 +201,17 @@ def _force_split(block: str) -> list[str]:
 
 
 def _split_body(body: str) -> list[str]:
+    """只要正文的调用方用这个；需要知道哪一片是表格的走 `_split_body_typed()`。"""
+    return [text for text, _ in _split_body_typed(body)]
+
+
+def _split_body_typed(body: str) -> list[tuple[str, bool]]:
     """按段落切分长正文，且不切开代码块、不把表格与散文混进同一块。
+
+    返回 `(正文, 是不是表格内容)`。**表格身份必须一路传到 `_merge_small()`**
+    （CR-117）：那里要按"同类优先"决定短片往哪边并，而如果只拿到
+    `list[str]`，它就只能靠事后看正文猜，那正是本函数一开始按下标记录
+    表格片段要避开的判法。
 
     代码块被切断后既不能执行也无法理解，是检索结果里最没用的一类证据。
 
@@ -301,32 +314,77 @@ def _split_body(body: str) -> list[str]:
 
     # 代码块与表格片段整体保留（理由见 docstring）；其余超上限的继续下切，
     # 否则那些块永远进不了上下文预算。
-    final: list[str] = []
+    final: list[tuple[str, bool]] = []
     for i, piece in enumerate(out):
         if _CODE_FENCE.search(piece) or i in table_pieces:
-            final.append(piece)
+            final.append((piece, i in table_pieces))
         else:
-            final.extend(_force_split(piece))
+            final.extend((x, False) for x in _force_split(piece))
     return final
 
 
-def _merge_small(pieces: list[str]) -> list[str]:
-    """把过短的片段并入同一小节的相邻片段。
+def _attach_block_headers(
+    pieces: list[tuple[str, bool]],
+) -> list[tuple[str, bool]]:
+    """把 AsciiDoc 的块首修饰并到**它所修饰的那个块**上，而不是前一个块。
+
+    `.表名` 与 `[cols=...]` 在语法上描述紧随其后的块。锚点行被
+    `_ADOC_ANCHOR` 删掉之后，它们与 `|===` 之间常常多出一个空行，于是被切成
+    独立的一片；再交给"短片一律先向前并"，**一张表的表名就被接到上一张表的
+    末尾去了**。实测 spring-kafka `kafka/container-props.adoc` 有 3 处，全语料
+    共 5 处（`.ContainerProperties Properties` 等）。
+
+    只处理**不足 `MIN_TOKENS`** 的片：这类修饰天然很短，把触发面限制在
+    "本来就要被合并掉的那些片"上，不去动任何能独立成块的正文（§5.4 那条
+    "先问它在哪些输入上会误触发"的自查）。末尾没有可依附的块时原样退回。
+    """
+    out: list[tuple[str, bool]] = []
+    carry: list[str] = []
+    for text, is_table in pieces:
+        lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+        if (evidence_tokens(text) < MIN_TOKENS
+                and lines and all(_ADOC_BLOCK_HEADER.match(l) for l in lines)):
+            carry.append(text)
+            continue
+        if carry:
+            text = "\n\n".join([*carry, text])
+            carry = []
+        out.append((text, is_table))
+    out.extend((c, False) for c in carry)
+    return out
+
+
+def _merge_small(pieces: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """把过短的片段并入同一小节的相邻片段。收 `(正文, 是不是表格)`，原样返回。
 
     只在小节**内部**合并。跨小节合并会让引用张冠李戴——
     早期实现把上一小节的尾巴并进下一小节的首块，于是出现了
     正文来自 A 节、却标注 #sec-b 的块。对一个以可追溯引用为卖点的产品，
     这比丢一小段内容严重得多。
+
+    **T-119「表格与散文不混块」这条承诺在这里有一个例外，明写出来（CR-117）**：
+    不足 `MIN_TOKENS` 的片段本来就不能独立成证据（`sections_to_chunks()`
+    会把它丢掉），所以它只有"并进邻居"和"丢掉"两条路。**并优于丢**——
+    于是当邻居在表格/散文的另一侧时，确实会产生一个小的混合块。
+    这个例外是**有界的**：被吸收的那一侧最多 `MIN_TOKENS - 1` 个 token，
+    而 T-119 量到的稀释来自"半张表拼进散文"（111 token 对 220 token）。
+    不是"低于阈值所以无所谓"——是**在丢内容和小幅混合之间选了后者**，
+    并且把边界写死在这里。
+
+    **方向有一处不能按"一律先向前并"办**，见 `_attach_block_headers()`：
+    表名行（`.Xxx Properties`）不足 20 token，向前并会被接到**上一张表**
+    的末尾，而它明明是**下一张表**的标题。那不是混不混块的问题，是**归属
+    搞错了**——和本函数开头那条"不跨小节合并"是同一类错误，只是尺度更小。
     """
-    out: list[str] = []
-    for p in pieces:
-        if out and evidence_tokens(p) < MIN_TOKENS:
-            out[-1] = f"{out[-1]}\n\n{p}"
+    out: list[tuple[str, bool]] = []
+    for text, is_table in _attach_block_headers(pieces):
+        if out and evidence_tokens(text) < MIN_TOKENS:
+            out[-1] = (f"{out[-1][0]}\n\n{text}", out[-1][1] or is_table)
         else:
-            out.append(p)
-    # 首片过短时向后并
-    while len(out) > 1 and evidence_tokens(out[0]) < MIN_TOKENS:
-        out[1] = f"{out[0]}\n\n{out[1]}"
+            out.append((text, is_table))
+    # 首片过短时向后并（首片没有"前一个邻居"，方向没得选）
+    while len(out) > 1 and evidence_tokens(out[0][0]) < MIN_TOKENS:
+        out[1] = (f"{out[0][0]}\n\n{out[1][0]}", out[0][1] or out[1][1])
         out.pop(0)
     return out
 
@@ -350,7 +408,7 @@ def sections_to_chunks(
         path = _dedupe_path(sec.title_path)
         url = build_url(src, rel_path, sec.anchor, getattr(sec, "page_id", None))
 
-        for piece in _merge_small(_split_body(body)):
+        for piece, _is_table in _merge_small(_split_body_typed(body)):
             if evidence_tokens(piece) < MIN_TOKENS:
                 continue
             chunks.append(

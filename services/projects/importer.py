@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from packages.schemas.chunk import Chunk, PROJECT_LICENSE, estimate_tokens, utc_now
 from services.projects.registry import Project
-from services.sync.chunk import MAX_TOKENS, _merge_small, _split_body
+from services.sync.chunk import MAX_TOKENS, _merge_small, _split_body, _split_body_typed
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,9 @@ def build_material_chunks(project: Project, materials: list[Material]) -> list[C
         # 与官方材料相同的 400-token 上限，避免一份项目文件独占回答上下文。
         # `_merge_small` 可能把一个短尾巴并进已接近上限的前块。通用语料允许
         # 少量超额以保留章节完整性，项目问答的证据预算更紧，故在此重新展开。
-        merged = _merge_small(_split_body(material.text.strip()))
+        # CR-117：`_merge_small` 现在收/返 `(正文, 是不是表格)`——表格身份要一路
+        # 传到它那里才能决定短片往哪边并。项目材料这一侧只用正文。
+        merged = [t for t, _ in _merge_small(_split_body_typed(material.text.strip()))]
         pieces = [
             subpiece
             for piece in merged
