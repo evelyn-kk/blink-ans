@@ -1,47 +1,125 @@
-[
- {
-  "q": "Kafka 日志压缩 compaction 是怎么工作的",
-  "rank": 1,
-  "rank_at_k60": 1
- },
- {
-  "q": "Kubernetes 的资源 requests 和 limits 有什么区别",
-  "rank": 4,
-  "rank_at_k60": 7
- },
- {
-  "q": "Pod 的 QoS 等级是怎么划分的",
-  "rank": 4,
-  "rank_at_k60": 4
- },
- {
-  "q": "PostgreSQL 的 autovacuum 是做什么的",
-  "rank": 1,
-  "rank_at_k60": 1
- },
- {
-  "q": "PostgreSQL 事务隔离级别有哪几种",
-  "rank": 2,
-  "rank_at_k60": 2
- },
- {
-  "q": "PostgreSQL 怎么查看当前的锁等待",
-  "rank": 2,
-  "rank_at_k60": 2
- },
- {
-  "q": "Spring Boot 怎么做优雅停机",
-  "rank": 3,
-  "rank_at_k60": 2
- },
- {
-  "q": "Spring Boot 怎么暴露 Prometheus 指标",
-  "rank": 1,
-  "rank_at_k60": 1
- },
- {
-  "q": "Spring Data Redis 怎么用 Lua 脚本",
-  "rank": 1,
-  "rank_at_k60": 1
- }
-]
+{
+  "schema": "t112-candidate-audit/v1",
+  "kind": "validation",
+  "provenance": {
+    "command": ".venv/bin/python packages/evaltools/t112_candidates.py --output-dir bench/audits --prefix t112-r105",
+    "implementation": {
+      "git_commit": "a954e0d1583dd51a328f75a1e8b2250b8c85f3ad",
+      "files": {
+        "services/retrieval/search.py": "d02be1682a5bbbbdbb11cc9849b30879738882a6464f227b3df0932814386043",
+        "packages/evaltools/probe_ranking.py": "eb055bdbfc33d9d3bad61830664fb8ca5a9d3226dc1b42ec6922218c01c426ce",
+        "packages/evaltools/probe_validation.py": "baf38550b28946df70c7e8de3faa1bcbe0960bfd7475382d508c927c98d386cd",
+        "packages/evaltools/t112_candidates.py": "b9747cbb5acc5ed63c5fe5db2da3d92254b4dc7a717ea6906e97059c0b3488f7"
+      }
+    },
+    "index": {
+      "path": "data/index/current.db",
+      "sha256": "7646daf76583988369366f52c89fb9d768bf0c503b97f77af9c56eb9e62bfbd0",
+      "chunk_count": 15309,
+      "meta": {
+        "chunk_count": "15309",
+        "dictionary_version": "eba42d53742f",
+        "embedding_dim": "1024",
+        "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+        "sources": "{\"spring-boot\": \"6fdf67ea1552\", \"kafka\": \"26b251a451ce\", \"kubernetes\": \"1de955ebabe7\", \"postgresql\": \"61636c17b391\", \"spring-data-redis\": \"2ab177e10e08\", \"spring-kafka\": \"755a68f64a40\", \"debezium\": \"02810e25b19c\", \"scenario-cards\": \"8573f0003506\", \"spring-framework\": \"82a6b40b9366\"}"
+      }
+    },
+    "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+    "datasets": {
+      "knowledge/eval/ranking_probe.yaml": "a3a552c17187a6e9829a6bb2fdf459cd90a9c790422aa23c249ffa95ee059b0a",
+      "knowledge/eval/ranking_validation.yaml": "af0c2a5fa134e1af129924a5cec52b87d76285b63ad64c8f5f4b13bb72d6a6ae"
+    }
+  },
+  "candidate": {
+    "name": "keyword-tail",
+    "candidates": 30,
+    "experiment": {
+      "name": "keyword-tail",
+      "imputed_keyword_rank": null,
+      "imputed_vector_rank": null,
+      "keyword_candidate_depth": 150,
+      "keyword_score_depth": 150,
+      "vector_candidate_depth": null,
+      "vector_score_depth": null,
+      "keyword_rescue_depth": null,
+      "vector_rescue_max_rank": null,
+      "rescue_credit_rank": null
+    },
+    "rationale": "仅关键词候选与计分深度从 30 扩至 150；向量仍为 30，不补虚构名次"
+  },
+  "results": [
+    {
+      "q": "Kafka 日志压缩 compaction 是怎么工作的",
+      "rank": 1,
+      "rank_at_k60": 1
+    },
+    {
+      "q": "Kubernetes 的资源 requests 和 limits 有什么区别",
+      "rank": 4,
+      "rank_at_k60": 7
+    },
+    {
+      "q": "Pod 的 QoS 等级是怎么划分的",
+      "rank": 4,
+      "rank_at_k60": 4
+    },
+    {
+      "q": "PostgreSQL 的 autovacuum 是做什么的",
+      "rank": 1,
+      "rank_at_k60": 1
+    },
+    {
+      "q": "PostgreSQL 事务隔离级别有哪几种",
+      "rank": 2,
+      "rank_at_k60": 2
+    },
+    {
+      "q": "PostgreSQL 怎么查看当前的锁等待",
+      "rank": 2,
+      "rank_at_k60": 2
+    },
+    {
+      "q": "Spring Boot 怎么做优雅停机",
+      "rank": 3,
+      "rank_at_k60": 2
+    },
+    {
+      "q": "Spring Boot 怎么暴露 Prometheus 指标",
+      "rank": 1,
+      "rank_at_k60": 1
+    },
+    {
+      "q": "Spring Data Redis 怎么用 Lua 脚本",
+      "rank": 1,
+      "rank_at_k60": 1
+    }
+  ],
+  "comparison_to_baseline": {
+    "regression_count": 1,
+    "regressions": [
+      {
+        "q": "Spring Boot 怎么做优雅停机",
+        "baseline_rank": 2,
+        "candidate_rank": 3
+      }
+    ],
+    "improvement_count": 1,
+    "improvements": [
+      {
+        "q": "Kubernetes 的资源 requests 和 limits 有什么区别",
+        "baseline_rank": 7,
+        "candidate_rank": 4
+      }
+    ],
+    "unchanged_count": 7,
+    "unchanged": [
+      "Kafka 日志压缩 compaction 是怎么工作的",
+      "Pod 的 QoS 等级是怎么划分的",
+      "PostgreSQL 的 autovacuum 是做什么的",
+      "PostgreSQL 事务隔离级别有哪几种",
+      "PostgreSQL 怎么查看当前的锁等待",
+      "Spring Boot 怎么暴露 Prometheus 指标",
+      "Spring Data Redis 怎么用 Lua 脚本"
+    ]
+  }
+}
