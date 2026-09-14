@@ -1,0 +1,14 @@
+# R85 那次 term_map 改动的**事先声明**（CR-107 要求精确题面 + 完整 added/removed）。
+# 这份是补做的：R85 当时没有这一步，本轮按新形式重建，用于验证工具本身。
+expect:
+  - q: "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快"
+    added:
+      - "INCLUDE"
+      - "covering index"
+      - "heap fetch"
+      - "heap fetches"
+      - "index-only scan"
+      - "secondary index"
+      - "table's heap"
+      - "visibility map"
+    removed: []
