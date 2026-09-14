@@ -27,7 +27,7 @@ import yaml  # noqa: E402
 
 from services.retrieval import search as search_mod  # noqa: E402
 from services.retrieval.embed import Embedder  # noqa: E402
-from services.retrieval.search import hybrid_search  # noqa: E402
+from services.retrieval.search import FusionExperiment, hybrid_search  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 from services.retrieval.tokenize import detect_technology  # noqa: E402
 
@@ -40,11 +40,14 @@ def _matches(hit, gold: str, project: str | None, exact: bool) -> bool:
     return hit.title_path == gold if exact else hit.title_path.startswith(gold)
 
 
-def run(spec: dict, store: ChunkStore, embedder: Embedder, limit: int) -> int | None:
+def run(
+    spec: dict, store: ChunkStore, embedder: Embedder, limit: int,
+    *, candidates: int = 30, experiment: FusionExperiment | None = None,
+) -> int | None:
     q = spec["q"]
     hits = hybrid_search(
         store, q, embedder.encode_one(q), limit=limit,
-        technology=detect_technology(q), candidates=30,
+        technology=detect_technology(q), candidates=candidates, experiment=experiment,
     )
     for i, h in enumerate(hits, 1):
         if _matches(h, spec["gold"], spec.get("project"), spec.get("gold_exact", False)):

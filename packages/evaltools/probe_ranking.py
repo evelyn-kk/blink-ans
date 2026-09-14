@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import yaml  # noqa: E402
 
 from services.retrieval.embed import Embedder  # noqa: E402
-from services.retrieval.search import Hit, hybrid_search  # noqa: E402
+from services.retrieval.search import FusionExperiment, Hit, hybrid_search  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 from services.retrieval.tokenize import detect_technology, to_fts_query  # noqa: E402
 
@@ -169,7 +169,8 @@ def evaluate(
 
 
 def run(spec: dict, store: ChunkStore, embedder: Embedder,
-        *, limit: int = 20) -> list[ProbeResult]:
+        *, limit: int = 20, candidates: int = 30,
+        experiment: FusionExperiment | None = None) -> list[ProbeResult]:
     top_k = int(spec.get("top_k", 5))
     out: list[ProbeResult] = []
     for p in spec["probes"]:
@@ -179,7 +180,7 @@ def run(spec: dict, store: ChunkStore, embedder: Embedder,
         # 与生产路径一致：技术域当过滤条件而非检索词（见 tokenize.PROJECT_TERMS）
         hits = hybrid_search(
             store, q, vector, limit=limit,
-            technology=detect_technology(q), candidates=30,
+            technology=detect_technology(q), candidates=candidates, experiment=experiment,
         )
         gold_exact = bool(p.get("gold_exact", False))
         gold_contains = p.get("gold_contains")

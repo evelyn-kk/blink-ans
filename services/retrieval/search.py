@@ -157,6 +157,26 @@ class Hit:
         )
 
 
+@dataclass(frozen=True)
+class FusionExperiment:
+    """仅供可复现调研使用的融合候选，生产调用必须显式传入。
+
+    T-112 的四个候选不能靠改模块全局量、跑完再手动还原：那样 JSON 无法说明
+    到底跑了什么。这个值对象把临时规则作为一次 `hybrid_search()` 调用的输入，
+    默认 `None` 时走与历史生产路径逐字相同的 RRF。
+
+    `imputed_*_rank` 是为另一条已命中的路补一个假定名次；
+    `keyword_rescue_*` 则只把关键词的**真实**尾部名次加回给向量强相关的块。
+    两者都不是生产策略，是否有资格变成策略须由 evaltools 的独立验证决定。
+    """
+
+    name: str
+    imputed_keyword_rank: int | None = None
+    imputed_vector_rank: int | None = None
+    keyword_rescue_depth: int | None = None
+    vector_rescue_max_rank: int | None = None
+
+
 def _pack(vec: Sequence[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
@@ -265,6 +285,19 @@ def _rrf_accumulate(
         entry[slot] = rank
 
 
+def _rrf_add_at_rank(
+    scores: dict[int, list], rid: int, rank: int, weight: float, k: int, slot: int,
+) -> None:
+    """为调研候选加入一条明确名次的 RRF 信号。
+
+    常规路径必须继续用 `_rrf_accumulate()`；这个小函数只让显式传入的
+    `FusionExperiment` 能表达“补第 N 名”或“采用真实的关键词尾部第 N 名”。
+    """
+    entry = scores.setdefault(rid, [0.0, None, None])
+    entry[0] += weight / (k + rank)
+    entry[slot] = rank
+
+
 def rrf_fuse(
     keyword: list[tuple[int, float]],
     vector: list[tuple[int, float]],
@@ -297,6 +330,7 @@ def hybrid_search(
     symbol: str | None = None,
     version: str | None = None,
     candidates: int = 30,
+    experiment: FusionExperiment | None = None,
 ) -> list[Hit]:
     """关键词与向量并行检索后 RRF 融合，可选按 token 预算截断。
 
@@ -310,11 +344,18 @@ def hybrid_search(
     """
     techs = TECHNOLOGY_GROUPS.get(technology, ((technology, 1.0),)) if technology else ((None, 1.0),)
 
+    if experiment and bool(experiment.keyword_rescue_depth) != bool(experiment.vector_rescue_max_rank):
+        raise ValueError("关键词尾部救援必须同时给出深度与向量名次上限")
+
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
     for tech, tech_weight in techs:
+        keyword_limit = max(
+            candidates,
+            experiment.keyword_rescue_depth if experiment and experiment.keyword_rescue_depth else candidates,
+        )
         kw = keyword_search(
-            store, query, candidates, tech, project,
+            store, query, keyword_limit, tech, project,
             project_id=project_id, module=module, symbol=symbol, version=version,
         )
         vec = vector_search(
@@ -322,8 +363,36 @@ def hybrid_search(
             project_id=project_id, module=module, symbol=symbol, version=version,
         ) if query_vector else []
         distances.update(vec)
-        _rrf_accumulate(scores, kw, KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
+        # 生产路径仍只累加 `candidates` 条。尾部关键词仅可由显式调研候选、
+        # 且满足向量强相关条件时带着它自己的真实 rank 加入。
+        _rrf_accumulate(scores, kw[:candidates], KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
         _rrf_accumulate(scores, vec, VECTOR_WEIGHT * tech_weight, RRF_K, 2)
+        if not experiment:
+            continue
+
+        keyword_ids = {rid for rid, _ in kw[:candidates]}
+        vector_ids = {rid for rid, _ in vec}
+        if experiment.imputed_keyword_rank:
+            for rid in vector_ids - keyword_ids:
+                _rrf_add_at_rank(
+                    scores, rid, experiment.imputed_keyword_rank,
+                    KEYWORD_WEIGHT * tech_weight, RRF_K, 1,
+                )
+        if experiment.imputed_vector_rank:
+            for rid in keyword_ids - vector_ids:
+                _rrf_add_at_rank(
+                    scores, rid, experiment.imputed_vector_rank,
+                    VECTOR_WEIGHT * tech_weight, RRF_K, 2,
+                )
+        if experiment.keyword_rescue_depth:
+            vector_ranks = {rid: rank for rank, (rid, _) in enumerate(vec, 1)}
+            for rank, (rid, _) in enumerate(kw[candidates:], candidates + 1):
+                if rank > experiment.keyword_rescue_depth:
+                    break
+                if vector_ranks.get(rid, candidates + 1) <= experiment.vector_rescue_max_rank:
+                    _rrf_add_at_rank(
+                        scores, rid, rank, KEYWORD_WEIGHT * tech_weight, RRF_K, 1,
+                    )
 
     fused = {rid: tuple(v) for rid, v in scores.items()}
     if not fused:
