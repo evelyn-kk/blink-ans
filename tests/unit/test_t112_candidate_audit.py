@@ -7,13 +7,16 @@ CR-121/122 的要求不是“JSON 看起来更丰富”，而是候选参数、�
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from packages.evaltools import t112_candidates as runner  # noqa: E402
 from packages.evaltools.t112_candidates import CANDIDATES, _audit, compare_ranks  # noqa: E402
 
 
@@ -76,3 +79,143 @@ def test_audit_embeds_provenance_candidate_and_computed_comparison():
     assert audit["candidate"]["experiment"]["imputed_keyword_rank"] == 31
     assert audit["provenance"]["index"]["sha256"] == "index"
     assert audit["comparison_to_baseline"]["regression_count"] == 1
+
+
+class _FakeStore:
+    """可控 index 身份；值在候选执行中变化时应被 run_all 发现。"""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.meta = {"embedding_model": "fake-embed", "dictionary_version": "dict-v1"}
+        self._count = 3
+        self.closed = False
+
+    def count(self):
+        return self._count
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeEmbedder:
+    model_id = "fake-embed"
+    error = None
+
+    def load(self):
+        return None
+
+
+def _install_fake_run_all(monkeypatch, tmp_path, *, mutate: str | None = None):
+    """让真正的 run_all/main 走完，仅替换模型/索引和两个评测执行器。"""
+    index = tmp_path / "current.db"
+    index.write_bytes(b"index-v1")
+    probes = tmp_path / "probe.yaml"
+    validation = tmp_path / "validation.yaml"
+    probes.write_text(yaml.safe_dump({"probes": []}), encoding="utf-8")
+    validation.write_text(yaml.safe_dump({"limit": 5, "cases": [{"q": "held-out"}]}), encoding="utf-8")
+    store = _FakeStore(index)
+    calls = []
+    mutated = False
+
+    monkeypatch.setattr(runner, "PROBES", probes)
+    monkeypatch.setattr(runner, "VALIDATION", validation)
+    monkeypatch.setattr(runner, "ChunkStore", lambda: store)
+    monkeypatch.setattr(runner, "Embedder", _FakeEmbedder)
+    monkeypatch.setattr(runner.validation, "unresolvable_golds", lambda spec, active: [])
+
+    def fake_ranking(spec, active, embedder, *, limit, candidates, experiment):
+        nonlocal mutated
+        calls.append(("probe", candidates, experiment))
+        # baseline 已经测完之后才让身份变化，逼出 run_all 的收尾门而非开头门。
+        if experiment is not None and not mutated and mutate:
+            mutated = True
+            if mutate == "sha":
+                index.write_bytes(b"index-v2")
+            elif mutate == "count":
+                store._count += 1
+            elif mutate == "meta":
+                store.meta["dictionary_version"] = "dict-v2"
+        rank = 1 if experiment is None else 2
+        return [SimpleNamespace(question="probe", gold="gold", rank=rank, passed=True,
+                                top=[f"rank-{rank}"], fts_query="fake")]
+
+    def fake_validation(case, active, embedder, limit, *, candidates, experiment):
+        calls.append(("validation", candidates, experiment))
+        return 1 if experiment is None else 2
+
+    monkeypatch.setattr(runner.ranking, "run", fake_ranking)
+    monkeypatch.setattr(runner.validation, "run", fake_validation)
+    return store, index, calls
+
+
+def test_run_all_collects_runtime_provenance_and_forwards_every_candidate(monkeypatch, tmp_path):
+    """不能靠构造 common 字典假装采集过：真实 run_all 必须产生身份与候选结果。"""
+    store, index, calls = _install_fake_run_all(monkeypatch, tmp_path)
+
+    audits = runner.run_all("fake-command --prefix audit")
+
+    assert store.closed is True
+    baseline_probe = audits["baseline"][0]
+    provenance = baseline_probe["provenance"]
+    assert provenance["command"] == "fake-command --prefix audit"
+    assert provenance["index"]["path"] == str(index)
+    assert provenance["index"]["sha256"] == runner._sha256(index)
+    assert provenance["index"]["chunk_count"] == 3
+    assert provenance["index"]["meta"] == store.meta
+    assert provenance["embedding_model"] == "fake-embed"
+    assert provenance["implementation"]["git_commit"] == runner._git_commit()
+    assert set(provenance["implementation"]["files"]) == {
+        str(path.relative_to(ROOT)) for path in runner.IMPLEMENTATION_FILES
+    }
+    # baseline 明确传 None；每个声明的实验都实际抵达两种 runner，且 rank 改变。
+    assert calls[0] == ("probe", 30, None)
+    passed = [call[2] for call in calls if call[0] == "probe"]
+    assert passed == [candidate.experiment for candidate in CANDIDATES]
+    assert audits["single-path-credit"][0]["results"][0]["rank"] == 2
+    assert audits["single-path-credit"][0]["comparison_to_baseline"]["regression_count"] == 1
+
+
+@pytest.mark.parametrize("mutate", ["sha", "count", "meta"])
+def test_identity_change_fails_closed_before_main_overwrites_any_audit(monkeypatch, tmp_path, mutate):
+    """CR-123：三种身份字段在候选中变化都必须拒绝，旧产物一个字节也不能覆盖。"""
+    _, _, _ = _install_fake_run_all(monkeypatch, tmp_path, mutate=mutate)
+    output = tmp_path / "audits"
+    output.mkdir()
+    sentinel = output / "t112-baseline-probe.json"
+    sentinel.write_text("keep-me", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "t112_candidates.py", "--output-dir", str(output), "--prefix", "t112",
+    ])
+
+    with pytest.raises(RuntimeError, match="current.db"):
+        runner.main()
+
+    assert sentinel.read_text(encoding="utf-8") == "keep-me"
+
+
+def test_fusion_experiment_changes_real_hybrid_order_not_just_runner_arguments(monkeypatch):
+    """删掉 experiment 融合分支会让同一组候选的排序不再变化。"""
+    from services.retrieval import search as search_mod
+
+    rows = {
+        1: {"id": 1, "text": "keyword only", "title_path": "keyword", "source_url": "u1",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+        2: {"id": 2, "text": "vector only", "title_path": "vector", "source_url": "u2",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+    }
+
+    class Store:
+        def execute(self, sql, params=()):
+            return [rows[rid] for rid in params]
+
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: [(1, -1.0)])
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.1)])
+    baseline = search_mod.hybrid_search(Store(), "q", [0.0], limit=2)
+    candidate = search_mod.hybrid_search(
+        Store(), "q", [0.0], limit=2, experiment=CANDIDATES[2].experiment,
+    )
+
+    assert [hit.rowid for hit in baseline] == [1, 2]
+    assert [hit.rowid for hit in candidate] == [2, 1]

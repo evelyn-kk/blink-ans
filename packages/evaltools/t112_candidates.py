@@ -114,9 +114,17 @@ def _implementation() -> dict[str, Any]:
     }
 
 
+def _path_label(path: Path) -> str:
+    """记录真实路径；生产内路径用相对名，测试/外置资产保留绝对名。"""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _index_identity(store: ChunkStore) -> dict[str, Any]:
     return {
-        "path": str(store.path.relative_to(ROOT)),
+        "path": _path_label(store.path),
         "sha256": _sha256(store.path),
         "chunk_count": store.count(),
         "meta": dict(sorted(store.meta.items())),
@@ -209,8 +217,8 @@ def run_all(command: str) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
             "index": before_identity,
             "embedding_model": embedder.model_id,
             "datasets": {
-                str(PROBES.relative_to(ROOT)): _sha256(PROBES),
-                str(VALIDATION.relative_to(ROOT)): _sha256(VALIDATION),
+                _path_label(PROBES): _sha256(PROBES),
+                _path_label(VALIDATION): _sha256(VALIDATION),
             },
         }
         raw: dict[str, tuple[Candidate, list[dict[str, Any]], list[dict[str, Any]]]] = {}
