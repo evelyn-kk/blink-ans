@@ -6,6 +6,12 @@
 
 举证因此固定为三件产出：**可枚举的资产与谓词 / 预期命中 / 碰撞负例**。
 
+**这三件能说明什么、不能说明什么**（CR-110）：全部结论都限定在
+**120 道已登记评测题这个固定观测集**上。它不是查询空间的样本，更不构成
+"影响范围有限"的证明——把它说成证明是 R85 那次的老毛病换个说法。工具因此
+还要求**每个改动键在观测集里至少有一条正向见证**：连落脚点都没有的键，
+说明的是"不知道它影响什么"，按 §6 一律改跑检索验证集。
+
 R91 的第一版有三条可绕过路径，codex R91 逐条复现（CR-106/107/108），
 这一版按意见重写，三处都改成失败关闭：
 
@@ -112,32 +118,63 @@ def all_eval_questions() -> list[tuple[str, str]]:
     return out
 
 
-def _expansions_under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, list[str]]:
-    """把某一版词典装进分词器，算出每道题的展开词。
+def _with_terms(terms: dict[str, list[str]], fn):
+    """把某一版词典临时装进分词器，跑 `fn()`，然后**逐项还原**模块状态。
 
-    必须真的换掉词典再算，不能只比键——`matched_terms()` 里有"最具体者胜"
-    这类跨键规则（CR-013），删掉一个具体键会让通用键重新生效，只看键差分
-    看不出这种**遮蔽**变化。
+    还原清单必须覆盖 `_load()` 写的每一项——CR-109 就漏在 `_version` 上：
+    它是 `dictionary_version()` 的来源，也是"索引词典版本与查询侧一致"那道
+    护栏的依据（`store.ChunkStore`），停在临时 YAML 的版本上会让后面任何
+    一次开索引报假的不一致。jieba 的自定义词是全局副作用，同样要清理。
     """
     from services.retrieval import tokenize as tk
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "term_map.yaml"
         path.write_text(yaml.safe_dump({"version": 1, "terms": terms},
                                        allow_unicode=True, sort_keys=False), encoding="utf-8")
-        saved_path, saved_ready = tk.TERM_MAP_PATH, tk._ready
-        saved_map = dict(tk._term_map)
-        saved_parts = dict(tk._KEY_PARTS)
+        saved = {
+            "path": tk.TERM_MAP_PATH, "ready": tk._ready, "version": tk._version,
+            "map": dict(tk._term_map), "parts": dict(tk._KEY_PARTS),
+        }
+        # jieba 的自定义词是**全局**副作用。粗暴地"跑完 del_word"会把 jieba
+        # 本来就认识的词一并删掉（实测：临时词典里放 `索引`，跑完之后
+        # `tests/unit/test_tokenize.py` 里一条切词用例直接挂了）。
+        # 因此按词逐个记住**进来之前的词频**，跑完原样放回：之前没有的才删。
+        import jieba
+        prior_freq = {zh: jieba.dt.FREQ.get(zh) for zh in terms if zh not in saved["map"]}
         try:
             tk.TERM_MAP_PATH = path
             tk._ready = False
             tk._term_map.clear()
             tk._KEY_PARTS.clear()
-            return {q: sorted(tk.expand_terms(q)) for q in questions}
+            return fn()
         finally:
-            tk.TERM_MAP_PATH = saved_path
-            tk._term_map.clear(); tk._term_map.update(saved_map)
-            tk._KEY_PARTS.clear(); tk._KEY_PARTS.update(saved_parts)
-            tk._ready = saved_ready
+            for zh, freq in prior_freq.items():
+                if freq is None:
+                    jieba.del_word(zh)
+                else:
+                    jieba.add_word(zh, freq=freq)
+            tk.TERM_MAP_PATH = saved["path"]
+            tk._term_map.clear(); tk._term_map.update(saved["map"])
+            tk._KEY_PARTS.clear(); tk._KEY_PARTS.update(saved["parts"])
+            tk._version = saved["version"]
+            tk._ready = saved["ready"]
+
+
+def _expansions_under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, list[str]]:
+    """某一版词典下每道题的展开词。
+
+    必须真的换掉词典再算，不能只比键——`matched_terms()` 里有"最具体者胜"
+    这类跨键规则（CR-013），删掉一个具体键会让通用键重新生效，只看键差分
+    看不出这种**遮蔽**变化。
+    """
+    from services.retrieval import tokenize as tk
+    return _with_terms(terms, lambda: {q: sorted(tk.expand_terms(q)) for q in questions})
+
+
+def _matched_under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, set[str]]:
+    """某一版词典下每道题**命中了哪些键**（逐键归因用，见 key_witnesses）。"""
+    from services.retrieval import tokenize as tk
+    return _with_terms(terms, lambda: {q: set(tk.matched_terms(q)) for q in questions})
 
 
 def expansion_diff(old_terms: dict, new_terms: dict,
@@ -152,6 +189,28 @@ def expansion_diff(old_terms: dict, new_terms: dict,
         removed = sorted(set(before[q]) - set(after[q]))
         if added or removed:
             out[q] = {"added": added, "removed": removed}
+    return out
+
+
+def key_witnesses(old_terms: dict, new_terms: dict,
+                  questions: list[str]) -> dict[str, list[str]]:
+    """每个改动键的**正向见证**：观测集里哪些题的**命中键集合**因它而变（CR-110）。
+
+    **按键归因，不按展开词归因**：几个键常常共享同一个英文词
+    （`index-only scan` 同时出现在 `覆盖索引`/`回表`/`索引只扫描`/`仅索引扫描`
+    的展开里），按词匹配会把一道题算成四个键的见证——第一版就是这么写的，
+    等于给没有落脚点的键发了假证明。
+
+    为什么按键要见证：整体"只有 1 道题受影响"说明不了**每一个**键的范围。
+    没有见证不等于没有影响，等于**不知道**，按 §6 应当改跑检索验证集。
+    """
+    before = _matched_under(old_terms, questions)
+    after = _matched_under(new_terms, questions)
+    changed = changed_keys(old_terms, new_terms)
+    out: dict[str, list[str]] = {}
+    for key in changed:
+        out[key] = sorted(q for q in questions
+                          if (key in after[q]) != (key in before[q]))
     return out
 
 
@@ -232,6 +291,13 @@ def main() -> int:
     for q, d in actual.items():
         print(f"   [{label_of[q]:<10}] +{d['added']} -{d['removed']} :: {q[:40]}")
 
+    witnesses = key_witnesses(old_terms, new_terms, questions)
+    unwitnessed = [k for k, qs in witnesses.items() if not qs]
+    print(f"\n   逐键正向见证（观测集 {len(questions)} 道题里能归因到该键的）：")
+    for key, qs in witnesses.items():
+        print(f"     {'✓' if qs else '✗'} {key}: {len(qs)} 道" +
+              (f" 例：{qs[0][:32]}" if qs else "  ← 观测集里没有落脚点"))
+
     problems: list[str] = []
     if args.expect_file:
         try:
@@ -259,7 +325,9 @@ def main() -> int:
         Path(args.json).write_text(json.dumps({
             "since_resolved": sha,
             "changed_keys": {k: {"old": v[0], "new": v[1]} for k, v in changed.items()},
-            "affected": actual, "expect_file": args.expect_file,
+            "affected": actual, "key_witnesses": witnesses,
+             "unwitnessed_keys": unwitnessed,
+             "expect_file": args.expect_file,
             "expect_problems": problems,
             "negatives": args.negatives,
             "negatives_affected": neg_diff,
@@ -276,6 +344,12 @@ def main() -> int:
         return 1
     if not args.negatives:
         print("\n没有给碰撞负例：举证不完整（『没触发的样本』不等于『范围有限』）。")
+        return 1
+    if unwitnessed:
+        print(f"\n这些键在观测集里没有正向见证：{unwitnessed}。"
+              f"\n观测集是**固定的 {len(questions)} 道题**，不是查询空间——"
+              f"没有见证说明的是『不知道它影响什么』，不是『它没有影响』。"
+              f"按 §6 应当改跑检索验证集。")
         return 1
     print("\n三件产出齐了。命中面是否可接受由审查方判断，本工具不下这个结论。")
     return 0
