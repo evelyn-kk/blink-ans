@@ -4,12 +4,12 @@
   "provenance": {
     "command": ".venv/bin/python packages/evaltools/t112_candidates.py --output-dir bench/audits --prefix t112-r105",
     "implementation": {
-      "git_commit": "a954e0d1583dd51a328f75a1e8b2250b8c85f3ad",
+      "git_commit": "9028e9e52b808ba02a8a5c2cbe0b63b03e74a760",
       "files": {
         "services/retrieval/search.py": "d02be1682a5bbbbdbb11cc9849b30879738882a6464f227b3df0932814386043",
         "packages/evaltools/probe_ranking.py": "eb055bdbfc33d9d3bad61830664fb8ca5a9d3226dc1b42ec6922218c01c426ce",
         "packages/evaltools/probe_validation.py": "baf38550b28946df70c7e8de3faa1bcbe0960bfd7475382d508c927c98d386cd",
-        "packages/evaltools/t112_candidates.py": "b9747cbb5acc5ed63c5fe5db2da3d92254b4dc7a717ea6906e97059c0b3488f7"
+        "packages/evaltools/t112_candidates.py": "9d1eb560db4a80f3cb6dabc4543ea9fe5e551adf74ca19ea863e85d0d504011c"
       }
     },
     "index": {
