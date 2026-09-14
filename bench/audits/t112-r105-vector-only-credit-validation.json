@@ -1,0 +1,47 @@
+[
+ {
+  "q": "Kafka 日志压缩 compaction 是怎么工作的",
+  "rank": 1,
+  "rank_at_k60": 1
+ },
+ {
+  "q": "Kubernetes 的资源 requests 和 limits 有什么区别",
+  "rank": 4,
+  "rank_at_k60": 7
+ },
+ {
+  "q": "Pod 的 QoS 等级是怎么划分的",
+  "rank": 4,
+  "rank_at_k60": 4
+ },
+ {
+  "q": "PostgreSQL 的 autovacuum 是做什么的",
+  "rank": 1,
+  "rank_at_k60": 1
+ },
+ {
+  "q": "PostgreSQL 事务隔离级别有哪几种",
+  "rank": 2,
+  "rank_at_k60": 2
+ },
+ {
+  "q": "PostgreSQL 怎么查看当前的锁等待",
+  "rank": 2,
+  "rank_at_k60": 2
+ },
+ {
+  "q": "Spring Boot 怎么做优雅停机",
+  "rank": null,
+  "rank_at_k60": 2
+ },
+ {
+  "q": "Spring Boot 怎么暴露 Prometheus 指标",
+  "rank": 1,
+  "rank_at_k60": 1
+ },
+ {
+  "q": "Spring Data Redis 怎么用 Lua 脚本",
+  "rank": 1,
+  "rank_at_k60": 1
+ }
+]
