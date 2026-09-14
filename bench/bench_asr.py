@@ -19,6 +19,8 @@ manifest**，不允许用 TTS 结果伪装成英文术语识别率或时延。�
 from __future__ import annotations
 
 import argparse
+import hashlib
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -108,16 +110,76 @@ def load_real_manifest(path: Path, language: str) -> list[dict[str, Any]]:
         if clip.get("language") != language:
             raise ValueError(f"{path}: {clip_id} 的 language 必须为 {language!r}")
         reference = clip.get("reference_text")
+        reference_path = clip.get("reference_path")
+        if reference is not None and reference_path is not None:
+            raise ValueError(f"{path}: {clip_id} 只能登记 reference_text 或 reference_path 之一")
+        if reference_path is not None:
+            if not isinstance(reference_path, str) or not reference_path:
+                raise ValueError(f"{path}: {clip_id} 的 reference_path 必须为非空路径")
+            resolved_reference = (path.parent / reference_path).resolve()
+            if not resolved_reference.is_file():
+                raise ValueError(f"{path}: {clip_id} 逐字稿不存在: {resolved_reference}")
+            reference = resolved_reference.read_text(encoding="utf-8").strip()
         if not isinstance(reference, str) or not reference.strip():
-            raise ValueError(f"{path}: {clip_id} 缺 reference_text")
+            raise ValueError(f"{path}: {clip_id} 缺 reference_text 或 reference_path")
         audio = clip.get("audio")
         if not isinstance(audio, str) or not audio:
             raise ValueError(f"{path}: {clip_id} 缺 audio")
         audio_path = (path.parent / audio).resolve()
         if not audio_path.is_file():
             raise ValueError(f"{path}: {clip_id} 音频不存在: {audio_path}")
-        loaded.append({"id": clip_id, "wav": audio_path, "reference_text": reference})
+        loaded.append({
+            "id": clip_id, "wav": audio_path, "reference_text": reference,
+            "reference_sha256": hashlib.sha256(reference.encode("utf-8")).hexdigest(),
+        })
     return loaded
+
+
+def _wer_words(text: str) -> list[str]:
+    """英文 WER 的固定归一化：casefold、忽略标点、保留词内 apostrophe。"""
+    return re.findall(r"[a-z0-9]+(?:'[a-z0-9]+)?", text.casefold().replace("’", "'"))
+
+
+def word_error_rate(reference: str, hypothesis: str) -> dict[str, int | float]:
+    """按词 Levenshtein 对齐；WER = (S + D + I) / 参考词数。"""
+    ref, hyp = _wer_words(reference), _wer_words(hypothesis)
+    if not ref:
+        raise ValueError("WER 的 reference_text 归一化后为空")
+    # cell = (distance, substitutions, deletions, insertions)
+    rows = [[(0, 0, 0, 0)] * (len(hyp) + 1) for _ in range(len(ref) + 1)]
+    for i in range(1, len(ref) + 1):
+        rows[i][0] = (i, 0, i, 0)
+    for j in range(1, len(hyp) + 1):
+        rows[0][j] = (j, 0, 0, j)
+    for i, ref_word in enumerate(ref, 1):
+        for j, hyp_word in enumerate(hyp, 1):
+            if ref_word == hyp_word:
+                rows[i][j] = rows[i - 1][j - 1]
+                continue
+            sub = rows[i - 1][j - 1]
+            delete = rows[i - 1][j]
+            insert = rows[i][j - 1]
+            options = [
+                (sub[0] + 1, sub[1] + 1, sub[2], sub[3]),
+                (delete[0] + 1, delete[1], delete[2] + 1, delete[3]),
+                (insert[0] + 1, insert[1], insert[2], insert[3] + 1),
+            ]
+            rows[i][j] = min(options)
+    distance, substitutions, deletions, insertions = rows[-1][-1]
+    return {
+        "reference_words": len(ref), "hypothesis_words": len(hyp),
+        "substitutions": substitutions, "deletions": deletions, "insertions": insertions,
+        "word_error_rate": round(distance / len(ref), 4),
+    }
+
+
+def initial_prompt_token_count(prompt: str | None, language: str) -> int:
+    """用实际 Whisper multilingual tokenizer 计 initial_prompt，不拿字符数冒充 token。"""
+    if not prompt:
+        return 0
+    from mlx_whisper.tokenizer import get_tokenizer
+    tokenizer = get_tokenizer(True, language=language, task="transcribe")
+    return len(tokenizer.encode(prompt))
 
 
 def synth(name: str, text: str) -> Path:
@@ -167,6 +229,8 @@ def main() -> None:
                     help="会话选择传入 Whisper 的语言；英文必须配 --manifest 真人录音")
     ap.add_argument("--manifest", type=Path,
                     help="真人录音清单（格式见 bench/asr_real_manifest.example.yaml）")
+    ap.add_argument("--clip", action="append", default=[], metavar="ID",
+                    help="只跑 manifest 中指定 clip（可重复，用于可恢复地复跑长录音）")
     ap.add_argument(
         "--compare-glossary",
         action="store_true",
@@ -188,6 +252,13 @@ def main() -> None:
             "英文 ASR 基准需要 --manifest 真人录音；仓库没有英文真实音频，"
             f"请先按 {REAL_MANIFEST_EXAMPLE} 录制并登记。"
         )
+    if args.clip:
+        requested = set(args.clip)
+        known = {clip["id"] for clip in clips}
+        unknown = sorted(requested - known)
+        if unknown:
+            raise SystemExit(f"未知 clip id: {', '.join(unknown)}")
+        clips = [clip for clip in clips if clip["id"] in requested]
     for clip in clips:
         clip["audio_seconds"] = duration_s(clip["wav"])
         print(f"素材 {clip['id']}: {clip['audio_seconds']:.2f}s")
@@ -198,10 +269,12 @@ def main() -> None:
 
     results = []
     options = transcribe_options(args.language, glossary=args.compare_glossary)
+    prompt_tokens = initial_prompt_token_count(options["initial_prompt"], args.language)
     for clip in clips:
         name, wav = clip["id"], clip["wav"]
         dur, reference = clip["audio_seconds"], clip["reference_text"]
         reset_peak_memory()
+        transcription_samples: list[dict[str, Any]] = []
 
         def once() -> dict[str, float]:
             t0 = time.perf_counter()
@@ -212,7 +285,12 @@ def main() -> None:
             )
             elapsed = time.perf_counter() - t0
             once.text = out["text"]
-            return {"transcribe_s": round(elapsed, 4), "rtf": round(dur / elapsed, 2)}
+            wer = word_error_rate(reference, once.text)
+            transcription_samples.append({"transcribed_text": once.text, **wer})
+            return {
+                "transcribe_s": round(elapsed, 4), "rtf": round(dur / elapsed, 2),
+                "word_error_rate": wer["word_error_rate"],
+            }
 
         print(f"  测量 {name} ...", flush=True)
         stats = repeat(once, args.runs)
@@ -221,10 +299,13 @@ def main() -> None:
             "language": args.language,
             "input_kind": input_kind,
             "audio_seconds": round(dur, 2),
+            "reference_sha256": clip.get("reference_sha256"),
+            "initial_prompt_tokens": prompt_tokens,
             "peak_memory_gb": peak_memory_gb(),
             "glossary_biased": args.compare_glossary,
             "reference_text": reference,
             "transcribed_text": getattr(once, "text", ""),
+            "transcription_samples": transcription_samples,
             **stats,
         }
         results.append(entry)
@@ -235,7 +316,8 @@ def main() -> None:
     path = write_report(
         "asr",
         {"model": args.model, "runtime": "mlx-whisper", "language": args.language,
-         "input_kind": input_kind, "initial_prompt": options["initial_prompt"], "results": results},
+         "input_kind": input_kind, "initial_prompt": options["initial_prompt"],
+         "initial_prompt_tokens": prompt_tokens, "results": results},
     )
     print(f"\n报告已写入 {path}")
 

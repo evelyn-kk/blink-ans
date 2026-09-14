@@ -9,4 +9,5 @@ clips: []
 # - id: en-kafka-offset
 #   language: en
 #   audio: recordings/en-kafka-offset.wav
-#   reference_text: "Our Kafka consumer is processing duplicate messages; how should we inspect offset commits?"
+#   # reference_path keeps user-provided transcript content out of git.
+#   reference_path: recordings/en-kafka-offset.txt

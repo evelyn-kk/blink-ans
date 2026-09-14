@@ -1,0 +1,17 @@
+# T-024 真人英文 ASR 对照（R111）。音频和逐字稿由用户本地提供，均被 .gitignore
+# 排除；此文件只记录可复放的 ID、相对路径和语言，不含私有内容。
+version: 1
+kind: real_recording
+clips:
+  - id: en-test1
+    language: en
+    audio: ../resource/test1.m4a
+    reference_path: ../resource/test1.txt
+  - id: en-test2
+    language: en
+    audio: ../resource/test2.m4a
+    reference_path: ../resource/test2.txt
+  - id: en-test3
+    language: en
+    audio: ../resource/test3.m4a
+    reference_path: ../resource/test3.txt

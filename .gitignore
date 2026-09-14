@@ -32,6 +32,7 @@ bench/reports/*.md
 *.wav
 *.pcm
 *.m4a
+resource/*.txt
 
 .env
 .env.*

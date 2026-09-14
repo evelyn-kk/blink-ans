@@ -48,6 +48,7 @@ def test_english_main_passes_english_prompt_to_the_real_transcribe_call(monkeypa
     monkeypatch.setattr(bench_asr, "duration_s", lambda _path: 1.0)
     monkeypatch.setattr(bench_asr, "reset_peak_memory", lambda: None)
     monkeypatch.setattr(bench_asr, "peak_memory_gb", lambda: None)
+    monkeypatch.setattr(bench_asr, "initial_prompt_token_count", lambda _prompt, _language: 17)
     monkeypatch.setattr(bench_asr, "write_report", lambda _component, payload: payloads.append(payload) or tmp_path / "report.json")
     monkeypatch.setattr(sys, "argv", [
         "bench_asr.py", "--language", "en", "--manifest", str(manifest), "--runs", "1",
@@ -66,6 +67,8 @@ def test_english_main_passes_english_prompt_to_the_real_transcribe_call(monkeypa
     assert payloads[0]["language"] == "en"
     assert payloads[0]["input_kind"] == "real_recording"
     assert payloads[0]["initial_prompt"] == bench_asr.LANGUAGE_GLOSSARIES["en"]
+    assert payloads[0]["initial_prompt_tokens"] == 17
+    assert payloads[0]["results"][0]["transcription_samples"][0]["word_error_rate"] == 0.0
 
 
 def test_real_manifest_rejects_missing_audio_instead_of_falling_back_to_synthetic(tmp_path):
@@ -90,6 +93,32 @@ def test_english_main_fails_for_missing_manifest_before_loading_metal(monkeypatc
         bench_asr.main()
 
 
+def test_main_rejects_an_unknown_clip_before_loading_metal(monkeypatch, tmp_path):
+    audio = tmp_path / "speaker.wav"
+    audio.write_bytes(b"audio")
+    manifest = tmp_path / "english.yaml"
+    manifest.write_text(yaml.safe_dump({
+        "kind": "real_recording",
+        "clips": [{"id": "known", "language": "en", "audio": audio.name,
+                   "reference_text": "A real English utterance."}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "bench_asr.py", "--language", "en", "--manifest", str(manifest), "--clip", "unknown",
+    ])
+
+    with pytest.raises(SystemExit, match="未知 clip id: unknown"):
+        bench_asr.main()
+
+
 def test_example_manifest_cannot_be_mistaken_for_a_ready_english_benchmark():
     with pytest.raises(ValueError, match="clips 不能为空"):
         bench_asr.load_real_manifest(bench_asr.REAL_MANIFEST_EXAMPLE, "en")
+
+
+def test_word_error_rate_records_word_level_substitution_deletion_and_insertion():
+    wer = bench_asr.word_error_rate("Kafka offset commits", "Kafka retries commits extra")
+
+    assert wer == {
+        "reference_words": 3, "hypothesis_words": 4,
+        "substitutions": 1, "deletions": 0, "insertions": 1, "word_error_rate": 0.6667,
+    }
