@@ -353,8 +353,9 @@ def test_a_full_run_starts_one_worker_per_dictionary_version(monkeypatch):
     但没有任何东西钉住这句话——审查方一数，实际是 **4 次**：负例是另一批题，
     缓存只能各自命中各自那批，两版词典于是各起了两个 worker。
 
-    子进程的固定开销（起 Python + 载 jieba 词典）约 0.5 秒，是这里唯一值钱的
-    东西，所以判据按**版本数**写死：一版词典一个 worker，与调用它几次无关。
+    起一次 worker（起 Python + 载 jieba 词典）实测 0.26~0.29 秒，是这里唯一值钱
+    的东西，所以判据按**版本数**写死：一版词典一个 worker，与调用它几次无关。
+    判据本身不看时间——耗时随机器变，进程数不变（CR-113）。
     """
     import term_scope
 

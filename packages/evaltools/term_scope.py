@@ -189,8 +189,10 @@ def _prime(versions: list[dict[str, list[str]]], *batches: list[str]) -> None:
     """把所有要算的题**并成一批**先喂给每版词典，一版一个子进程（CR-112）。
 
     不做这一步的话，观测集与负例是两次独立调用，缓存只能各自命中各自那批，
-    两版词典就会各起两个 worker。子进程的固定开销（起 Python + 载 jieba 词典）
-    大约 0.5 秒，是这里唯一值钱的东西，所以要按"版本数"收费而不是"调用次数"。
+    两版词典就会各起两个 worker。起一次 worker（起 Python + 载 jieba 词典）实测
+    0.26~0.29 秒（空闲，n=12），是这里唯一值钱的东西，所以要按"版本数"收费而不是
+    "调用次数"。**这个数是微基准，不是固定成本**（CR-113）：后台跑着快速门禁时
+    同样量法是 0.28~0.32 秒，换台机器只会差更多。
     """
     every = [q for batch in batches for q in batch]
     if not every:
