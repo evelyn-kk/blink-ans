@@ -35,6 +35,21 @@ cd bench
 ../.venv/bin/python bench_llm_remote.py --providers claude kimi
 ```
 
+### ASR 的语言与真实录音（T-024）
+
+遗留中文时延基线可直接运行 `bench_asr.py --language zh`，其素材是 macOS
+`say` 合成音，**不能**用于真人术语识别率。英文基准不提供 TTS 回退：先把真人录音
+（默认不提交）及逐字参考写入 `asr_real_manifest.yaml`，格式见
+`asr_real_manifest.example.yaml`，再运行：
+
+```bash
+../.venv/bin/python bench_asr.py --language en --manifest asr_real_manifest.yaml --compare-glossary
+```
+
+报告会记录 `language`、`input_kind` 与实际 `initial_prompt`，使中英文词表偏置能按同一
+口径比较。manifest 缺音频、参考文本或语言不匹配时脚本失败关闭；没有真实英文音频时不产出
+英文识别率或时延结论。
+
 报告写入 `bench/reports/*.json`（不入版本控制）。每次更换模型、量化位宽或运行时都复跑同一套脚本，结果记入 `progress.md`。
 
 ## 怎么读这些数字

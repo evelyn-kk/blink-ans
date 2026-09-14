@@ -1,0 +1,12 @@
+# 真人技术提问录音的本地清单模板（T-024）。音频默认不提交：请录制后放在本机
+# 受控目录，复制本文件为 asr_real_manifest.yaml，并以相对路径登记。不要把合成
+# TTS 当作 real_recording；它只能测可复现的运行时，不能测真人口音下的术语识别。
+version: 1
+kind: real_recording
+clips: []
+
+# 示例（取消注释并填写真实路径）：
+# - id: en-kafka-offset
+#   language: en
+#   audio: recordings/en-kafka-offset.wav
+#   reference_text: "Our Kafka consumer is processing duplicate messages; how should we inspect offset commits?"

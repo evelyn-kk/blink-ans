@@ -4,12 +4,16 @@ architecture.md 第 6 节给转写留了 0.7 秒预算，但那是"语音结束�
 对应的是流式分片场景。本脚本先测整段实时率（RTF = 音频时长 / 转写耗时），
 RTF 必须显著大于 1 才有可能在 I4 做到流式低延迟。
 
-测试音频用 macOS 的 say 合成，保证任何机器上都能复现。
-注意：合成语音比真实口语干净得多，本脚本的数字只用于时延选型，
-准确率必须在 I4 用真实录音重新评估。
+遗留中文时延基线可继续用 macOS `say` 合成；**英文评测必须显式提供真人录音
+manifest**，不允许用 TTS 结果伪装成英文术语识别率或时延。合成语音比真实口语
+干净得多，现有中文数字只用于时延选型，准确率必须在 I4 用真实录音重新评估。
 
 用法:
-    python bench/bench_asr.py --model mlx-community/whisper-large-v3-turbo
+    # 复跑遗留中文合成时延基线
+    python bench/bench_asr.py --language zh
+
+    # 英文：录制后把音频和逐字参考写进 manifest；没有它会失败关闭
+    python bench/bench_asr.py --language en --manifest bench/asr_real_manifest.yaml
 """
 
 from __future__ import annotations
@@ -18,16 +22,21 @@ import argparse
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from common import Timer, peak_memory_gb, repeat, reset_peak_memory, write_report
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+REAL_MANIFEST_EXAMPLE = Path(__file__).resolve().parent / "asr_real_manifest.example.yaml"
 
 # 中英混杂的技术口语，贴近真实提问方式
 # 技术术语词表偏置：whisper 的 initial_prompt 会影响解码时的先验。
 # 中英混杂的技术口语里，Kafka / PostgreSQL 这类词一旦识别错，检索必然失败，
 # 因此词表偏置的收益直接体现在检索命中率上，而不只是转写准确率。
-GLOSSARY = (
+LANGUAGE_GLOSSARIES = {
+"zh": (
     "以下是一段关于 Java 后端技术的讨论，涉及这些术语："
     "Kafka、RabbitMQ、Redis、PostgreSQL、MySQL、Oracle、Elasticsearch、"
     "Spring Boot、Spring Cloud、Hibernate、MyBatis、JPA、"
@@ -35,9 +44,19 @@ GLOSSARY = (
     "Outbox、DLQ、offset、rebalance、幂等、预扣、超卖、扣减、对账、"
     "慢查询、执行计划、索引、事务、回滚、连接池、"
     "P95、P99、QPS、TPS、GC、JVM、OOM、CPU、liveness probe、readiness probe。"
-)
+),
+"en": (
+    "This is a discussion about Java backend operations. It uses these technical terms: "
+    "Kafka, RabbitMQ, Redis, PostgreSQL, MySQL, Oracle, Elasticsearch, Spring Boot, "
+    "Spring Cloud, Hibernate, MyBatis, JPA, Kubernetes, Docker, Helm, Istio, "
+    "OpenTelemetry, Prometheus, Grafana, Outbox, DLQ, offset, rebalance, idempotency, "
+    "inventory reservation, overselling, reconciliation, slow query, execution plan, "
+    "index, transaction, rollback, connection pool, P95, P99, QPS, TPS, GC, JVM, OOM, "
+    "CPU, liveness probe, and readiness probe."
+),
+}
 
-UTTERANCES = {
+ZH_SYNTHETIC_UTTERANCES = {
     "short": "我们线上的 Kafka 消费者一直重复消费，offset 提交好像有问题，怎么排查？",
     "medium": (
         "我们的订单服务用 Spring Boot 三点二，最近发现库存扣减出现超卖。"
@@ -53,6 +72,52 @@ UTTERANCES = {
         "不确定这两件事有没有关联，帮我理一下排查思路和需要确认的监控指标。"
     ),
 }
+
+
+def transcribe_options(language: str, *, glossary: bool) -> dict[str, str | None]:
+    """唯一的 ASR 语言/词表入口；不能让英文会话悄悄沿用中文偏置。"""
+    if language not in LANGUAGE_GLOSSARIES:
+        raise ValueError(f"不支持的 ASR 语言: {language}")
+    return {
+        "language": language,
+        "initial_prompt": LANGUAGE_GLOSSARIES[language] if glossary else None,
+    }
+
+
+def load_real_manifest(path: Path, language: str) -> list[dict[str, Any]]:
+    """加载真人录音清单，缺元数据或音频都失败关闭。
+
+    参考文本是之后算术语命中/错误率的地面真值；没有音频或参考文本时，所谓
+    “英文识别率”没有测量对象，不能退回 TTS 或只测时延。
+    """
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if raw.get("kind") != "real_recording":
+        raise ValueError(f"{path}: kind 必须为 real_recording，不能把合成语音当真人基准")
+    clips = raw.get("clips")
+    if not isinstance(clips, list) or not clips:
+        raise ValueError(f"{path}: clips 不能为空；参见 {REAL_MANIFEST_EXAMPLE.name}")
+    loaded: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for clip in clips:
+        if not isinstance(clip, dict):
+            raise ValueError(f"{path}: clips 每项必须是对象")
+        clip_id = clip.get("id")
+        if not isinstance(clip_id, str) or not clip_id or clip_id in seen:
+            raise ValueError(f"{path}: clip id 必须非空且唯一")
+        seen.add(clip_id)
+        if clip.get("language") != language:
+            raise ValueError(f"{path}: {clip_id} 的 language 必须为 {language!r}")
+        reference = clip.get("reference_text")
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError(f"{path}: {clip_id} 缺 reference_text")
+        audio = clip.get("audio")
+        if not isinstance(audio, str) or not audio:
+            raise ValueError(f"{path}: {clip_id} 缺 audio")
+        audio_path = (path.parent / audio).resolve()
+        if not audio_path.is_file():
+            raise ValueError(f"{path}: {clip_id} 音频不存在: {audio_path}")
+        loaded.append({"id": clip_id, "wav": audio_path, "reference_text": reference})
+    return loaded
 
 
 def synth(name: str, text: str) -> Path:
@@ -85,10 +150,23 @@ def duration_s(wav: Path) -> float:
     return float(out.stdout.strip())
 
 
+def _synthetic_zh_clips() -> list[dict[str, Any]]:
+    """仅保留历史中文合成素材，明确不作为英文准确率基准。"""
+    clips = []
+    for name, text in ZH_SYNTHETIC_UTTERANCES.items():
+        wav = synth(name, text)
+        clips.append({"id": name, "wav": wav, "reference_text": text})
+    return clips
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--language", choices=sorted(LANGUAGE_GLOSSARIES), default="zh",
+                    help="会话选择传入 Whisper 的语言；英文必须配 --manifest 真人录音")
+    ap.add_argument("--manifest", type=Path,
+                    help="真人录音清单（格式见 bench/asr_real_manifest.example.yaml）")
     ap.add_argument(
         "--compare-glossary",
         action="store_true",
@@ -96,16 +174,33 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.manifest:
+        try:
+            clips = load_real_manifest(args.manifest, args.language)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            raise SystemExit(f"真人录音 manifest 无效: {exc}") from exc
+        input_kind = "real_recording"
+    elif args.language == "zh":
+        clips = _synthetic_zh_clips()
+        input_kind = "synthetic_legacy"
+    else:
+        raise SystemExit(
+            "英文 ASR 基准需要 --manifest 真人录音；仓库没有英文真实音频，"
+            f"请先按 {REAL_MANIFEST_EXAMPLE} 录制并登记。"
+        )
+    for clip in clips:
+        clip["audio_seconds"] = duration_s(clip["wav"])
+        print(f"素材 {clip['id']}: {clip['audio_seconds']:.2f}s")
+
+    # 先验证输入资产再加载 Metal：没有英文真人录音时应给出可行动的失败信息，
+    # 而不是在无 GPU 环境先报一个与语料无关的导入错误。
     import mlx_whisper
 
-    clips = []
-    for name, text in UTTERANCES.items():
-        wav = synth(name, text)
-        clips.append((name, wav, duration_s(wav), text))
-        print(f"素材 {name}: {clips[-1][2]:.2f}s")
-
     results = []
-    for name, wav, dur, reference in clips:
+    options = transcribe_options(args.language, glossary=args.compare_glossary)
+    for clip in clips:
+        name, wav = clip["id"], clip["wav"]
+        dur, reference = clip["audio_seconds"], clip["reference_text"]
         reset_peak_memory()
 
         def once() -> dict[str, float]:
@@ -113,8 +208,7 @@ def main() -> None:
             out = mlx_whisper.transcribe(
                 str(wav),
                 path_or_hf_repo=args.model,
-                language="zh",
-                initial_prompt=GLOSSARY if args.compare_glossary else None,
+                **options,
             )
             elapsed = time.perf_counter() - t0
             once.text = out["text"]
@@ -124,6 +218,8 @@ def main() -> None:
         stats = repeat(once, args.runs)
         entry = {
             "clip": name,
+            "language": args.language,
+            "input_kind": input_kind,
             "audio_seconds": round(dur, 2),
             "peak_memory_gb": peak_memory_gb(),
             "glossary_biased": args.compare_glossary,
@@ -138,7 +234,8 @@ def main() -> None:
 
     path = write_report(
         "asr",
-        {"model": args.model, "runtime": "mlx-whisper", "results": results},
+        {"model": args.model, "runtime": "mlx-whisper", "language": args.language,
+         "input_kind": input_kind, "initial_prompt": options["initial_prompt"], "results": results},
     )
     print(f"\n报告已写入 {path}")
 
