@@ -209,7 +209,7 @@ def _split_body_typed(body: str) -> list[tuple[str, bool]]:
     """按段落切分长正文，且不切开代码块、不把表格与散文混进同一块。
 
     返回 `(正文, 是不是表格内容)`。**表格身份必须一路传到 `_merge_small()`**
-    （CR-117）：那里要按"同类优先"决定短片往哪边并，而如果只拿到
+    （CR-117）：那里要写明"短片并进邻居时表格边界怎么算"，而如果只拿到
     `list[str]`，它就只能靠事后看正文猜，那正是本函数一开始按下标记录
     表格片段要避开的判法。
 
@@ -331,8 +331,12 @@ def _attach_block_headers(
     `.表名` 与 `[cols=...]` 在语法上描述紧随其后的块。锚点行被
     `_ADOC_ANCHOR` 删掉之后，它们与 `|===` 之间常常多出一个空行，于是被切成
     独立的一片；再交给"短片一律先向前并"，**一张表的表名就被接到上一张表的
-    末尾去了**。实测 spring-kafka `kafka/container-props.adoc` 有 3 处，全语料
-    共 5 处（`.ContainerProperties Properties` 等）。
+    末尾去了**。实测全语料共 5 处：spring-kafka `kafka/container-props.adoc`
+    3 处（`.AbstractMessageListenerContainer Properties` /
+    `.KafkaMessageListenerContainer Properties` /
+    `.ConcurrentMessageListenerContainer Properties`；原文里类名还带反引号）、
+    spring-data-redis `redis/template.adoc` 1 处、
+    debezium `transformations/partition-routing.adoc` 1 处（`.Products table`）。
 
     只处理**不足 `MIN_TOKENS`** 的片：这类修饰天然很短，把触发面限制在
     "本来就要被合并掉的那些片"上，不去动任何能独立成块的正文（§5.4 那条
