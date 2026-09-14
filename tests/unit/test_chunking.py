@@ -12,7 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.sync.chunk import (  # noqa: E402
-    MAX_TOKENS, _dedupe_path, _split_body, build_url, estimate_tokens, sections_to_chunks,
+    MAX_TOKENS, _dedupe_path, _merge_small, _split_body, build_url, estimate_tokens,
+    sections_to_chunks,
 )
 from services.sync.parse import Section, parse_asciidoc, parse_markdown  # noqa: E402
 from services.sync.registry import Source  # noqa: E402
@@ -488,18 +489,75 @@ def test_table_inside_a_code_fence_is_not_treated_as_a_table():
     assert holding[0].count("|===") == 2, "示例里的分隔符不成对，说明被切断过"
 
 
-def test_oversized_table_is_split_at_row_boundaries():
-    """超过硬上限的表按**行**切，不按字符切——半行单元格不是证据。
+def test_multirow_table_is_split_at_row_boundaries():
+    """多行表按**行**切：每一块都从行首开始，没有被切断的单元格。
 
-    **这同样是护栏，不是回归**：旧实现也满足它（表格行之间有空行，
-    按空行切本来就落在行边界上）。钉住它是因为新规则改变了表格的
-    封口时机，得确认没有把行切开；它不证明本轮修复了什么。
+    **这是护栏，不是回归**：旧实现也满足它（表格行之间有空行，按空行切
+    本来就落在行边界上）。钉住它是因为表格规则改变了封口时机，得确认
+    没有把行切开；它不证明修复了什么。
+    **它也不能替 `test_oversized_table_cell_*` 那两条作证**：这里每一行
+    都不到硬上限，`_force_split()` 根本不会动它——CR-116 指出的正是
+    T-119 第一版拿这条测试去支持"不切断单元格"这句承诺，而它测不到。
     """
     pieces = _split_body(_adoc_table(rows=12, cell_words=40))
     table_pieces = [p for p in pieces if "attr" in p]
     assert len(table_pieces) > 1, "这张表本该超过硬上限并被切开"
+    assert all(estimate_tokens(p) <= MAX_TOKENS for p in table_pieces), "行都不超上限时不该有超上限的块"
     for p in table_pieces:
-        assert estimate_tokens(p) <= MAX_TOKENS, "表格块超过硬上限"
-        # 每一块都从某一行的行首开始：不存在被切断的单元格内容
         first = p.strip().split("\n", 1)[0]
         assert first.startswith("|") or first.startswith("."), f"表格在行中间被切开: {first!r}"
+
+
+def _long_cell_table(words: int = 1000) -> str:
+    """一张只有一行、但那一行的 description 单元格远超硬上限的表。
+
+    参数说明类文档里这是常见形状（一个字段一段长说明）。
+    """
+    cell = " ".join(f"word{i}" for i in range(words))
+    return f"|===\n| Name | Description\n\n| `some.property`\n| {cell}\n|==="
+
+
+def test_oversized_table_cell_is_not_shredded_into_bare_text():
+    """CR-116：单个超过硬上限的单元格不得被 `_force_split()` 按空白切碎。
+
+    判别性（旧实现上实测）：同一份输入产出 8 块，承载正文的被切成
+    `400/399/399/399/371` token 五块，**后四块里连一个 `|` 都没有**——
+    没有表名、没有表头、没有行键，检索到中段碎片判断不出它在讲哪个字段。
+    这正是 T-119 要消灭的形态，只是触发条件从"多行表"换成"单个长单元"。
+    """
+    pieces = _merge_small(_split_body(_long_cell_table()))
+    carrying = [p for p in pieces if "word500" in p]
+    assert len(carrying) == 1, f"长单元格被切成了 {len(carrying)} 块"
+    piece = carrying[0]
+    assert "word0" in piece and "word999" in piece, "单元格内容被截断"
+    # 行身份必须还在：行键与表头都和正文待在同一块里
+    assert "`some.property`" in piece, "碎片丢掉了行键"
+    assert "| Name | Description" in piece, "碎片丢掉了表头"
+    assert all("|" in p for p in pieces), "产出了不含任何竖线的裸文本碎片"
+
+
+def test_oversized_table_cell_exceeds_the_hard_cap_on_purpose():
+    """上一条的代价，明写出来：这样的块会超过硬上限，和代码块同档。
+
+    不把它藏在"表格整体保留"这句话后面——超上限意味着它可能放不进本地
+    证据预算（`AnswerConfig` 本地档 650 token），于是在本地路径上永远
+    选不中。这是有意的取舍：**选不中是可见的沉默，裸文本碎片是看起来
+    像证据的错误证据**。哪天决定改成"按单元格语义边界拆 + 每片重复
+    表头行键"，这条测试会红，那时候连同 docstring 一起改。
+    """
+    pieces = _merge_small(_split_body(_long_cell_table()))
+    assert len(pieces) == 1
+    assert estimate_tokens(pieces[0]) > MAX_TOKENS
+
+
+def test_oversized_prose_is_still_split_even_if_it_follows_a_table():
+    """表格豁免只能罩住表格自己：表后的散文照旧受硬上限约束。
+
+    判别性是**反向**的——如果把豁免写成"这一节里只要有表就整节不切"，
+    这条会红。
+    """
+    prose = "\n".join(f"* 第 {i} 条变更说明，描述某个配置项的行为调整。" for i in range(400))
+    pieces = _split_body(f"{_adoc_table(rows=2, cell_words=8)}\n\n{prose}")
+    prose_pieces = [p for p in pieces if "变更说明" in p]
+    assert len(prose_pieces) > 1, "表后的长散文没有被切"
+    assert all(estimate_tokens(p) <= MAX_TOKENS for p in prose_pieces)

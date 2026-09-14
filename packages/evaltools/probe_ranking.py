@@ -259,8 +259,14 @@ def main() -> int:
     if args.json:
         args.json.write_text(json.dumps(
             {"top_k": top_k, "passed": passed, "total": len(results),
+             # `top` 是 R99 审查（自陈核对第 2 条）暴露的一个缺口：那一轮
+             # 我想给出"改动前后 top5 有多少题变了"，产物里却只有名次——
+             # 我当时按 `p["top"]` 比较、两边都取到空列表，于是得出一个
+             # 凭空的"0/13 题有变化"。**产物里没有的字段，不会因为代码里
+             # 有同名属性就自动存在**。写进来之后这类对照才做得成。
              "results": [{"q": r.question, "gold": r.gold, "rank": r.rank,
-                          "passed": r.passed, "fts_query": r.fts_query}
+                          "passed": r.passed, "fts_query": r.fts_query,
+                          "top": r.top}
                          for r in results]},
             ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"已写入 {args.json}")

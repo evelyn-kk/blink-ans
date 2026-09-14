@@ -207,13 +207,41 @@ def _split_body(body: str) -> list[str]:
     一块。**两路检索受的影响方向相反**，所以只看关键词路会以为无害——
     向量路上那半张表把整块的嵌入往表格语义拉（实测 L2 一致变差），
     关键词路上它反而因为多出 transaction/annotation 这类词而虚高。
+
+    **表格片段与代码块同档，整体保留、不受硬上限约束（CR-116）**。
+    T-119 第一版只让表格在**块之间**按行边界切，末尾仍把它交给通用的
+    `_force_split()`；于是单个超过 `MAX_TOKENS` 的单元格（参数说明这类长
+    description 最容易超）被按空白切成一串**连 `|` 都没有**的裸文本——
+    没有表名、没有表头、没有行键，检索到中段碎片根本判断不出它在讲哪个字段。
+    那正是 T-119 要消灭的形态，只是触发条件从"多行表"换成"单个长单元"。
+    判据和代码块是同一条：**切断之后就不再是可解释的证据**。
+
+    代价要说清楚：这样产生的块可能超过本地证据预算（`AnswerConfig` 本地档
+    650 token），于是**在本地路径上永远选不中**。这是有意的取舍——
+    选不中是可见的沉默，而裸文本碎片是**看起来像证据的错误证据**。
+    （实测：当前语料 53 个含表格的 `.adoc`、约 124 张表、789 个表格行块里，
+    **没有一个行块超过 400 token**，所以这条例外今天不改变任何一个块；
+    它挡的是语料增长后才会出现的那一类。）
     """
     blocks = re.split(r"\n\s*\n", body)
     out: list[str] = []
+    # out 里哪几个下标是表格内容。按下标记而不是事后看正文认（"首行以 `|`
+    # 开头"这种判法会把 markdown 表和以竖线开头的散文一起豁免掉硬上限，
+    # 那是个静默的后门，§5.4）。
+    table_pieces: set[int] = set()
     buf: list[str] = []
     buf_tokens = 0
     in_code = False
     in_table = False
+
+    def _flush(is_table: bool) -> None:
+        nonlocal buf, buf_tokens
+        if not buf:
+            return
+        if is_table:
+            table_pieces.add(len(out))
+        out.append("\n\n".join(buf))
+        buf, buf_tokens = [], 0
 
     for b in blocks:
         if not b.strip():
@@ -237,15 +265,16 @@ def _split_body(body: str) -> list[str]:
         # 完整的小表，同样不该和前面的散文拼成一块——围栏那条例外是为了
         # 让短示例能跟着解释它的句子走，而表格从来不解释相邻的那段散文，
         # 它只是恰好排在后面。
-        if (opens_multiblock_fence or starts_table) and not in_code and buf:
-            out.append("\n\n".join(buf))
-            buf, buf_tokens = [], 0
+        if (opens_multiblock_fence or starts_table) and not in_code:
+            _flush(in_table)
 
         # 代码块内部一律不切，哪怕超过硬上限
         if in_code or (buf_tokens + t <= MAX_TOKENS) or not buf:
             buf.append(b)
             buf_tokens += t
         else:
+            if in_table:
+                table_pieces.add(len(out))
             out.append("\n\n".join(buf))
             buf, buf_tokens = [b], t
 
@@ -260,24 +289,21 @@ def _split_body(body: str) -> list[str]:
         # 单块内开合的完整示例留给下面的常规 TARGET_TOKENS 触发，允许和相邻
         # 散文合并成正常大小的证据块，不再被强制拆成一块一个短示例。
         if was_in_code and not in_code:
-            out.append("\n\n".join(buf))
-            buf, buf_tokens = [], 0
+            _flush(False)
         # 表格结束后同样封口，否则表尾那一块会把紧随其后的散文接进来——
         # 那是同一个混合块，只是前后顺序换了个方向。
         elif (was_in_table or starts_table) and not in_table:
-            out.append("\n\n".join(buf))
-            buf, buf_tokens = [], 0
+            _flush(True)
         elif not in_code and buf_tokens >= TARGET_TOKENS:
-            out.append("\n\n".join(buf))
-            buf, buf_tokens = [], 0
+            _flush(in_table)
 
-    if buf:
-        out.append("\n\n".join(buf))
+    _flush(in_table)
 
-    # 代码块整体保留；其余超上限的继续下切，否则这些块永远进不了上下文预算
+    # 代码块与表格片段整体保留（理由见 docstring）；其余超上限的继续下切，
+    # 否则那些块永远进不了上下文预算。
     final: list[str] = []
-    for piece in out:
-        if _CODE_FENCE.search(piece):
+    for i, piece in enumerate(out):
+        if _CODE_FENCE.search(piece) or i in table_pieces:
             final.append(piece)
         else:
             final.extend(_force_split(piece))
