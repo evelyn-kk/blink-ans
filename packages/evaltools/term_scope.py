@@ -127,7 +127,10 @@ def all_eval_questions() -> list[tuple[str, str]]:
 WORKER = Path(__file__).with_name("_scope_worker.py")
 
 # 每版词典的实测结果缓存：键是词典本身（同一版词典的结果与算过哪些题无关），
-# 值里按题累积。这样 main() 里"旧/新 × 观测集/负例"四次调用只落成两次子进程。
+# 值里按题累积。缓存只保证"同一批题不重算"，**不会**把两批题合成一次子进程——
+# CR-112 就是栽在这上面：我据此写了"四次调用只落成两次子进程"，实际是 4 次，
+# 因为负例是另一批题，两版词典各自又起了一个 worker。要真的压到两次，得在
+# 算之前**主动把观测集与负例并成一批**喂进来（见 main 里的 _prime）。
 _CACHE: dict[str, dict[str, dict[str, list[str]]]] = {}
 
 
@@ -146,7 +149,8 @@ def _under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, dict[
     """
     key = json.dumps(terms, ensure_ascii=False, sort_keys=True)
     cached = _CACHE.setdefault(key, {"expansions": {}, "matched": {}})
-    missing = [q for q in questions if q not in cached["expansions"]]
+    # 去重：负例里出现一道已登记题面是合法的（测试里就有），不该让 worker 算两遍。
+    missing = list(dict.fromkeys(q for q in questions if q not in cached["expansions"]))
     if missing:
         with tempfile.TemporaryDirectory() as d:
             inp, outp = Path(d) / "in.json", Path(d) / "out.json"
@@ -179,6 +183,20 @@ def _matched_under(terms: dict[str, list[str]], questions: list[str]) -> dict[st
     """某一版词典下每道题**命中了哪些键**（逐键归因用，见 key_witnesses）。"""
     got = _under(terms, questions)["matched"]
     return {q: set(got[q]) for q in questions}
+
+
+def _prime(versions: list[dict[str, list[str]]], *batches: list[str]) -> None:
+    """把所有要算的题**并成一批**先喂给每版词典，一版一个子进程（CR-112）。
+
+    不做这一步的话，观测集与负例是两次独立调用，缓存只能各自命中各自那批，
+    两版词典就会各起两个 worker。子进程的固定开销（起 Python + 载 jieba 词典）
+    大约 0.5 秒，是这里唯一值钱的东西，所以要按"版本数"收费而不是"调用次数"。
+    """
+    every = [q for batch in batches for q in batch]
+    if not every:
+        return
+    for terms in versions:
+        _under(terms, every)
 
 
 def expansion_diff(old_terms: dict, new_terms: dict,
@@ -295,6 +313,8 @@ def main() -> int:
         print(f"   [{state}] {k}: {old} -> {new}")
     print("\n   匹配谓词（见 tokenize.matched_terms）：子串命中，或键的组成词全部出现；"
           "命中后按'最具体者胜'丢弃被包含的键。")
+
+    _prime([old_terms, new_terms], questions, args.negatives)
 
     actual = expansion_diff(old_terms, new_terms, questions)
     print(f"\n② 展开差分（逐题比较旧/新 expand_terms，登记 {len(labelled)} 条题面、"

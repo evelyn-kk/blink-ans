@@ -12,6 +12,8 @@
 - **CR-111**：R93 的差分在同一个进程里换词典再还原，**两版词典其实互相看得见**
   ——`_load()` 往 jieba 的全局前缀树里 `add_word`，还原清单管不到。现在两版
   各自在短生命周期子进程里算，判别性用例见文件末尾。
+- **CR-112**：R94 声称"四次调用只落成两次子进程"，实测是 4 次——缓存不会把
+  两批题合成一批。现在主动并批，并用**起了几个 worker** 这个计数钉住。
 """
 
 from __future__ import annotations
@@ -342,6 +344,38 @@ def test_public_tokenizer_still_works_after_a_diff():
 
     assert sorted(tk.matched_terms(probe)) == before_matched
     assert tk.tokenize(leak_probe) == before_tokens, "临时词典的自定义词泄漏进了 jieba"
+
+
+def test_a_full_run_starts_one_worker_per_dictionary_version(monkeypatch):
+    """CR-112：缓存**不会**自己把两批题合成一次子进程，得主动并批。
+
+    R94 我在文档里写了"旧/新 × 观测集/负例四次调用只落成两次子进程"，
+    但没有任何东西钉住这句话——审查方一数，实际是 **4 次**：负例是另一批题，
+    缓存只能各自命中各自那批，两版词典于是各起了两个 worker。
+
+    子进程的固定开销（起 Python + 载 jieba 词典）约 0.5 秒，是这里唯一值钱的
+    东西，所以判据按**版本数**写死：一版词典一个 worker，与调用它几次无关。
+    """
+    import term_scope
+
+    spawns: list[list[str]] = []
+    real_run = term_scope.subprocess.run
+
+    def counting(cmd, *a, **kw):
+        if len(cmd) > 1 and cmd[1] == str(term_scope.WORKER):
+            spawns.append(cmd)
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(term_scope.subprocess, "run", counting)
+    TS._CACHE.clear()          # 别让别的用例先把结果算好了，那样一次都不会起
+    monkeypatch.setattr(sys, "argv", [
+        "term_scope.py", "--since", R85_SHA, "--expect-file", str(EXPECT_FILE),
+        "--negatives", "JVM 堆内存怎么调", "Kafka 消息堆积了怎么办"])
+    TS.main()
+
+    assert len(spawns) == 2, (
+        f"旧/新两版词典应当各起一个 worker，实际起了 {len(spawns)} 次"
+    )
 
 
 def test_worker_failure_is_an_evidence_error_not_a_silent_zero():
