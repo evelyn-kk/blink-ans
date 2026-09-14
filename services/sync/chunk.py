@@ -48,6 +48,10 @@ _ADOC_ANCHOR = re.compile(r"^\[\[([\w.-]+)\]\]\s*$", re.M)
 _ADOC_TABLE = re.compile(r"^\|===\s*$", re.M)
 # AsciiDoc 的「块首修饰」：块标题 `.表名`（点后紧跟非空白，区别于有序列表的
 # `. 条目`）与属性行 `[cols=...]`、`[NOTE]`。它们在语法上描述**紧随其后**的块。
+#
+# **这两个形状只在 AsciiDoc 里是这个意思**（CR-118）：`[release-notes]` 单独成行
+# 在 Markdown 里是合法的 shortcut reference link，是**正文**，不是块属性。
+# 因此用它的地方必须显式知道自己在处理哪种格式，见 `_merge_small(asciidoc=...)`。
 _ADOC_BLOCK_HEADER = re.compile(r"^(?:\.\S.*|\[.*\])$")
 # Antora 的 include 指令行（CR-084）。围栏**之外**的这类行由
 # `parse.py` 直接删掉；但围栏**之内**的删不得——删了会留下一个空代码块，
@@ -341,6 +345,13 @@ def _attach_block_headers(
     只处理**不足 `MIN_TOKENS`** 的片：这类修饰天然很短，把触发面限制在
     "本来就要被合并掉的那些片"上，不去动任何能独立成块的正文（§5.4 那条
     "先问它在哪些输入上会误触发"的自查）。末尾没有可依附的块时原样退回。
+
+    **调用方必须先确认正文是 AsciiDoc**（CR-118）：`[release-notes]` 这样的
+    行在 Markdown 里是合法的 shortcut reference link、是正文的一部分，把它
+    按块属性前移会改变可引用正文的邻接关系。R101 第一版没有这个条件，
+    而 `services/projects/importer.py` 恰好允许 `.md` / `.rst` / `.txt`——
+    §5.4 那条自查我上一轮问了（"这个模式在别的格式上会不会误触发"），
+    却只问到自陈里，没有落成条件。
     """
     out: list[tuple[str, bool]] = []
     carry: list[str] = []
@@ -358,8 +369,14 @@ def _attach_block_headers(
     return out
 
 
-def _merge_small(pieces: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+def _merge_small(
+    pieces: list[tuple[str, bool]], *, asciidoc: bool,
+) -> list[tuple[str, bool]]:
     """把过短的片段并入同一小节的相邻片段。收 `(正文, 是不是表格)`，原样返回。
+
+    `asciidoc` **没有默认值**，调用方必须自己回答"这份正文是不是 AsciiDoc"
+    （CR-118）。给它一个默认值等于让某个调用方在不知情的情况下拿到块首修饰
+    规则——那正是这条意见发生的方式。
 
     只在小节**内部**合并。跨小节合并会让引用张冠李戴——
     早期实现把上一小节的尾巴并进下一小节的首块，于是出现了
@@ -381,7 +398,7 @@ def _merge_small(pieces: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
     搞错了**——和本函数开头那条"不跨小节合并"是同一类错误，只是尺度更小。
     """
     out: list[tuple[str, bool]] = []
-    for text, is_table in _attach_block_headers(pieces):
+    for text, is_table in (_attach_block_headers(pieces) if asciidoc else pieces):
         if out and evidence_tokens(text) < MIN_TOKENS:
             out[-1] = (f"{out[-1][0]}\n\n{text}", out[-1][1] or is_table)
         else:
@@ -412,7 +429,9 @@ def sections_to_chunks(
         path = _dedupe_path(sec.title_path)
         url = build_url(src, rel_path, sec.anchor, getattr(sec, "page_id", None))
 
-        for piece, _is_table in _merge_small(_split_body_typed(body)):
+        for piece, _is_table in _merge_small(
+            _split_body_typed(body), asciidoc=src.format == "asciidoc",
+        ):
             if evidence_tokens(piece) < MIN_TOKENS:
                 continue
             chunks.append(

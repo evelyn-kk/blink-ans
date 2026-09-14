@@ -94,7 +94,15 @@ def build_material_chunks(project: Project, materials: list[Material]) -> list[C
         # 少量超额以保留章节完整性，项目问答的证据预算更紧，故在此重新展开。
         # CR-117：`_merge_small` 现在收/返 `(正文, 是不是表格)`——表格身份要一路
         # 传到它那里才能决定短片往哪边并。项目材料这一侧只用正文。
-        merged = [t for t, _ in _merge_small(_split_body_typed(material.text.strip()))]
+        # CR-118：`asciidoc` 按**这份材料自己的后缀**判，不能一律给 True——
+        # `_DOCUMENT_SUFFIXES` 里 `.md` / `.rst` / `.txt` 都在，而 AsciiDoc 的
+        # 块首修饰规则（`.标题` / `[attr]`）在那些格式里会误伤正文。
+        is_adoc = PurePosixPath(material.path).suffix.lower() in _ASCIIDOC_SUFFIXES
+        merged = [
+            t for t, _ in _merge_small(
+                _split_body_typed(material.text.strip()), asciidoc=is_adoc,
+            )
+        ]
         pieces = [
             subpiece
             for piece in merged
@@ -123,6 +131,8 @@ def build_material_chunks(project: Project, materials: list[Material]) -> list[C
 
 
 _DOCUMENT_SUFFIXES = {".md", ".markdown", ".adoc", ".rst", ".txt"}
+# CR-118：只有这些后缀的正文才适用 AsciiDoc 的块首修饰规则。
+_ASCIIDOC_SUFFIXES = {".adoc", ".asciidoc"}
 
 
 def read_materials(project: Project, paths: list[str]) -> list[Material]:

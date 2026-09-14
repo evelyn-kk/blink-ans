@@ -413,9 +413,13 @@ def test_navigation_files_are_skipped():
         p.unlink()
 
 
-def _chunked(body: str) -> list[str]:
-    """走和 `sections_to_chunks()` 一样的两步：切块 + 合并短片。"""
-    return [t for t, _ in _merge_small(_split_body_typed(body))]
+def _chunked(body: str, *, asciidoc: bool = True) -> list[str]:
+    """走和 `sections_to_chunks()` 一样的两步：切块 + 合并短片。
+
+    `asciidoc` 默认 True 只是因为本文件的用例绝大多数是 AsciiDoc；
+    `_merge_small()` 本身**不给默认值**（CR-118）。
+    """
+    return [t for t, _ in _merge_small(_split_body_typed(body), asciidoc=asciidoc)]
 
 
 # ---------- AsciiDoc 表格（T-119） ----------
@@ -639,3 +643,68 @@ def test_block_title_at_the_very_end_is_not_dropped():
     prose = "Some prose with enough content to stand on its own. " * 6
     pieces = _chunked(f"{prose}\n\n.Dangling Title")
     assert any("Dangling Title" in p for p in pieces), "结尾的块首修饰被弄丢了"
+
+
+# ---------- 块首修饰只属于 AsciiDoc（CR-118） ----------
+
+def test_markdown_shortcut_reference_link_is_not_treated_as_a_block_attribute():
+    """CR-118：`[release-notes]` 单独成行在 Markdown 里是合法的 shortcut
+    reference link，是**正文**，不是 AsciiDoc 块属性。
+
+    判别性（R101 实现上实测）：它被当成块属性，从前一段挪到了后一段——
+    可引用正文的邻接关系因此改变。R101 那版 `_attach_block_headers()` 没有
+    格式条件，而 `services/projects/importer.py` 允许 `.md` / `.rst` / `.txt`。
+    """
+    before = "prior " * 200
+    after = "following " * 1000
+    body = f"{before}\n\n[release-notes]\n\n{after}"
+    pieces = _chunked(body, asciidoc=False)
+    holding = [p for p in pieces if "[release-notes]" in p]
+    assert len(holding) == 1
+    assert "prior" in holding[0], "Markdown 的引用式链接被当成块属性挪到了后一段"
+    assert "following" not in holding[0]
+
+
+def test_block_header_rule_still_applies_on_the_asciidoc_path():
+    """同一份输入在 AsciiDoc 下**要**前移——这是上一条的反向判据。
+
+    没有它，"关掉块首修饰"和"在所有格式上都关掉"分不出来。
+    """
+    before = "prior " * 200
+    after = "following " * 1000
+    body = f"{before}\n\n[release-notes]\n\n{after}"
+    holding = [p for p in _chunked(body, asciidoc=True) if "[release-notes]" in p]
+    assert len(holding) == 1
+    assert "following" in holding[0] and "prior" not in holding[0]
+
+
+def test_merge_small_requires_an_explicit_format_decision():
+    """`asciidoc` 没有默认值：调用方必须自己回答这份正文是不是 AsciiDoc。
+
+    给它默认值等于让某个调用方在不知情的情况下拿到 AsciiDoc 规则，
+    **那正是 CR-118 发生的方式**。这条把"没有默认值"钉成判据，
+    而不是一句写在 docstring 里的约定。
+    """
+    import inspect
+    sig = inspect.signature(_merge_small)
+    param = sig.parameters["asciidoc"]
+    assert param.default is inspect.Parameter.empty, "`asciidoc` 不该有默认值"
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY, "`asciidoc` 应当是关键字参数"
+
+
+def test_project_import_does_not_apply_asciidoc_rules_to_markdown_materials():
+    """项目材料按**每份材料自己的后缀**判，不是一律当 AsciiDoc。
+
+    `_DOCUMENT_SUFFIXES` 里有 `.md` / `.rst` / `.txt`，所以这条路径是
+    CR-118 真正会发作的地方，不是理论问题。
+    """
+    from services.projects.importer import Material, build_material_chunks
+    from services.projects.registry import Project
+
+    body = "prior " * 200 + "\n\n[release-notes]\n\n" + "following " * 1000
+    project = Project(id="p1", version="v1", root=Path("."), cloud_generation_allowed=False)
+    for path, expect_with_prior in (("docs/notes.md", True), ("docs/notes.adoc", False)):
+        chunks = build_material_chunks(project, [Material(path=path, text=body)])
+        holding = [c.text for c in chunks if "[release-notes]" in c.text]
+        assert len(holding) == 1, path
+        assert ("prior" in holding[0]) is expect_with_prior, path
