@@ -9,6 +9,9 @@
   + 完整 added/removed，逐词比对。
 - **CR-108**：`--since HEAD~1` 会漂移（CR-093 已定过"固定 SHA"的规矩）。
   现在拒绝非 SHA，并把解析后的完整 commit 写进产物。
+- **CR-111**：R93 的差分在同一个进程里换词典再还原，**两版词典其实互相看得见**
+  ——`_load()` 往 jieba 的全局前缀树里 `add_word`，还原清单管不到。现在两版
+  各自在短生命周期子进程里算，判别性用例见文件末尾。
 """
 
 from __future__ import annotations
@@ -63,6 +66,26 @@ def test_json_product_records_the_resolved_commit(tmp_path, monkeypatch, capsys)
     data = json.loads(out.read_text(encoding="utf-8"))
     assert len(data["since_resolved"]) == 40
     assert set(data["unwitnessed_keys"]) == {"仅索引扫描", "可见性映射", "索引只扫描"}
+    assert all(len(qs) == len(set(qs)) for qs in data["key_witnesses"].values()), (
+        "见证列表里出现了重复题面——观测面被数了两遍"
+    )
+
+
+def test_the_observation_set_is_deduplicated(monkeypatch, capsys):
+    """登记题面里有重复（同一道题同时登记在两个评测集里），观测面必须按去重算。
+
+    R93 存档的产物里 `回表`/`覆盖索引` 各写着"2 道见证"，其实是同一道题
+    被列了两遍——不是假证明（CR-110 那种），但会把观测面说大一倍。
+    """
+    labelled = TS.all_eval_questions()
+    distinct = len({q for _, q in labelled})
+    assert distinct < len(labelled), "前置条件：登记题面里确实有重复"
+
+    monkeypatch.setattr(sys, "argv", [
+        "term_scope.py", "--since", R85_SHA, "--expect-file", str(EXPECT_FILE),
+        "--negatives", "JVM 堆内存怎么调"])
+    TS.main()
+    assert f"登记 {len(labelled)} 条题面、去重后 {distinct} 道" in capsys.readouterr().out
 
 
 # ---------- CR-106：删除/遮蔽必须可见 ----------
@@ -225,82 +248,115 @@ def test_complete_evidence_passes(monkeypatch, capsys, tmp_path):
     assert "三件产出齐了" in out and "本工具不下这个结论" in out
 
 
-# ---------- `_expansions_under()` 换词典之后必须原样还原 ----------
+# ---------- CR-111：两版词典必须互不可见 ----------
 
-def test_swapping_dictionaries_restores_the_tokenizer_state():
-    """差分实现要把两版词典轮流装进 `tokenize` 模块，跑完必须还原。
+def test_old_side_does_not_see_words_that_only_the_new_dictionary_adds():
+    """判别性：**新词典独有的键泄漏到旧侧**时，差分会漏报。
 
-    不还原的后果很隐蔽：同一个进程里后续任何一次 `expand_terms()` 都会用着
-    临时词典——而 `term_scope` 常常和别的评测脚本跑在同一个会话里。
-    这条是自陈薄弱处里登记后当场补掉的（§5.1）。
+    R93 的实现在本进程里换词典再还原。还原清单管得住 `tokenize` 的模块状态，
+    管不住 jieba：`_load()` 对每个键 `add_word(freq=900)`，改的是第三方库的
+    全局前缀树，而清单只记得住"我们知道要记"的那些词。于是主进程一旦加载过
+    当前词典（`dictionary_version()`、任何一次 `expand_terms()` 都会），
+    当前独有的键就一直在 jieba 里，**以旧词典运行时也还在**。
+
+    下面这组是能把后果显出来的最小构造：`同步机制` 是当前词典里的真实键，
+    只出现在新侧；它在 jieba 里会让提问多切出一个 `同步机`，而那正是
+    `同步机故障` 这个键的组成词之一（`_split_key` 切成 `同步机` + `故障`）。
+
+    - 隔离之后：旧侧没有 `同步机` → `同步机故障` 不命中；新侧命中 →
+      `added` 里两个键的展开都在。
+    - R93 的进程内实现：旧侧因为 jieba 里残留的 `同步机制` **也**命中了
+      `同步机故障`，两侧抵消 → `added` 只剩 `replication`，`sync failure`
+      被静默吞掉。
+
+    键名是为这条用例构造的（要让贪心切分正好落在跨词边界的三字词上），
+    但机制不是：实测加载当前词典后以 R85 旧词典运行，120 道登记题里有
+    19 道的 `tokenize()` 输出与干净进程不同。
     """
     from services.retrieval import tokenize as tk
 
-    # 先热一次，确保分词器已加载——否则快照到的是"还没加载"那个瞬间的状态，
-    # 断言就变成了和一个陈旧快照比（写这条时先踩了这个坑）。
+    # 先把真实词典装进本进程——这正是污染的来源。不热身的话，跑在别的用例
+    # 前面时 jieba 里恰好没有 `同步机制`，旧实现也能蒙混过关。
+    tk.dictionary_version()
+
+    q = "Kafka 分区副本的同步机制故障怎么办"
+    old = {"同步机故障": ["sync failure"]}
+    new = {"同步机故障": ["sync failure"], "同步机制": ["replication"]}
+
+    diff = TS.expansion_diff(old, new, [q])
+    assert diff[q]["added"] == ["replication", "sync failure"], (
+        "旧侧看见了只属于新词典的 `同步机制`，`sync failure` 因此被抵消掉"
+    )
+    assert TS.key_witnesses(old, new, [q]) == {"同步机制": [q]}
+
+
+# ---------- 主进程的分词器状态：现在是"压根没碰过" ----------
+
+def test_the_diff_does_not_touch_the_process_tokenizer_at_all():
+    """CR-109 那批还原断言的继任者：不再是"还原得对不对"，而是"有没有碰"。
+
+    换成子进程之后，主进程不再改 `tokenize` 的模块状态，也不再改 jieba，
+    因此可以直接断言**全等**——比逐项还原强，也不用再维护还原清单
+    （CR-109 就是漏在清单少了一项 `_version` 上）。
+    """
+    import jieba
+
+    from services.retrieval import tokenize as tk
+
+    # 先热一次：否则快照到的是"还没加载"那个瞬间，断言就成了和陈旧快照比。
     before_expand = sorted(tk.expand_terms(R85_Q))
-    before_path = tk.TERM_MAP_PATH
-    before_ready = tk._ready
-    before_map = dict(tk._term_map)
-    before_version = tk._version
     before_dict_version = tk.dictionary_version()
-    assert before_ready is True, "热身之后分词器应当已加载"
+    before_module = (tk.TERM_MAP_PATH, tk._ready, tk._version,
+                     dict(tk._term_map), dict(tk._KEY_PARTS))
+    before_freq = dict(jieba.dt.FREQ)
 
     TS.expansion_diff({"覆盖索引": ["covering index"]}, {}, [R85_Q])
 
-    assert tk.TERM_MAP_PATH == before_path, "词典路径没还原"
-    assert tk._ready == before_ready
-    assert dict(tk._term_map) == before_map, "词典内容没还原"
-    assert sorted(tk.expand_terms(R85_Q)) == before_expand, (
-        "跑完差分之后，真实词典下的展开结果必须与跑之前一致"
-    )
-    # CR-109：上一版就漏在这里——`_version` 没还原，`dictionary_version()`
-    # 会停在临时 YAML 的版本上，而它正是"索引词典版本必须与查询侧一致"
-    # 那道护栏的依据（`store.ChunkStore`）。跑完一次差分就能让后面任何一次
-    # 开索引报假的不一致。
-    assert tk._version == before_version, "_version 没还原"
-    assert tk.dictionary_version() == before_dict_version, (
-        "dictionary_version() 必须回到真实词典的版本，否则索引一致性护栏会误报"
-    )
+    assert (tk.TERM_MAP_PATH, tk._ready, tk._version,
+            dict(tk._term_map), dict(tk._KEY_PARTS)) == before_module
+    assert jieba.dt.FREQ == before_freq, "jieba 的全局词频被改了"
+    # CR-109 的两个外部可观测量仍然逐条断言：它们才是当时真正出事的地方
+    # （`dictionary_version()` 是"索引词典版本与查询侧一致"那道护栏的依据）。
+    assert tk.dictionary_version() == before_dict_version
+    assert sorted(tk.expand_terms(R85_Q)) == before_expand
 
 
-def test_cleanup_does_not_delete_words_jieba_already_knew():
-    """清理临时词时不能误删 jieba 本来就认识的词。
+def test_public_tokenizer_still_works_after_a_diff():
+    """CR-109 第二个问题的回归：那次是清理逻辑把 jieba 本来认识的词删掉了，
+    `matched_terms()` 的"组成词全部出现"规则随之失效
+    （`tests/unit/test_tokenize.py` 的 CR-013 用例当场挂掉）。
 
-    **这条是实测踩出来的**：第一版 `finally` 里对每个临时键无条件
-    `del_word`，于是临时词典里放一个 `索引`（jieba 原本认识）跑完之后，
-    `tests/unit/test_tokenize.py` 里一条切词用例直接挂了——工具把公共分词器
-    改坏了。现在按词记住进来之前的词频，跑完原样放回。
+    隔离之后这条按理不可能再犯，但断言留着：它比字段自比灵敏，
+    盯的是"公共分词器还能不能用"这个外部可观测量。
     """
     from services.retrieval import tokenize as tk
 
-    # 复刻当时真正挂掉的那条断言（tests/unit/test_tokenize.py 的 CR-013 用例）：
-    # 它依赖"组成词全部出现"这条规则，而组成词是**切出来**的——jieba 少认识
-    # 一个词，这条就崩。只比 tokenize() 的输出不够灵敏，要比到 matched_terms。
     probe = "PostgreSQL 的 B-tree 索引什么时候会失效"
-    before = sorted(tk.matched_terms(probe))
-    assert "索引失效" in before, "前置条件：真实词典下这条本来就该命中"
+    leak_probe = "临时造的词到底会不会被切出来"
+    before_matched = sorted(tk.matched_terms(probe))
+    before_tokens = tk.tokenize(leak_probe)
+    assert "索引失效" in before_matched, "前置条件：真实词典下这条本来就该命中"
 
-    TS.expansion_diff({"索引": ["index"]}, {}, [R85_Q])
+    TS.expansion_diff({"索引": ["index"]}, {}, [R85_Q])          # 会误删 jieba 原有词的那种
+    TS.expansion_diff({"临时造的词": ["temp"]}, {}, [R85_Q])      # 会把自定义词泄漏进去的那种
 
-    assert sorted(tk.matched_terms(probe)) == before, (
-        "jieba 原本认识的词被清理逻辑删掉了，组成词匹配随之失效"
-    )
+    assert sorted(tk.matched_terms(probe)) == before_matched
+    assert tk.tokenize(leak_probe) == before_tokens, "临时词典的自定义词泄漏进了 jieba"
 
 
-def test_temporary_dictionary_does_not_leak_custom_words_into_jieba(capsys):
-    """临时词典引入的自定义词必须从 jieba 里删掉（CR-109 的同源问题）。
+def test_worker_failure_is_an_evidence_error_not_a_silent_zero():
+    """子进程算不出来时必须炸，不能当成"零影响"——那是 CR-106 同一类静默通过。"""
+    import term_scope
 
-    `_load()` 会把每个键 `jieba.add_word`，那是**全局副作用**：不清理的话，
-    同进程后续的分词会认得一个本不存在的词，`matched_terms()` 的"组成词全部
-    出现"规则因此可能改判。
-    """
-    from services.retrieval import tokenize as tk
-
-    probe = "临时造的词到底会不会被切出来"
-    before = tk.tokenize(probe)
-    TS.expansion_diff({"临时造的词": ["temp"]}, {}, [R85_Q])
-    assert tk.tokenize(probe) == before, "临时词典的自定义词泄漏进了 jieba"
+    orig = term_scope.WORKER
+    try:
+        term_scope.WORKER = ROOT / "packages" / "evaltools" / "no-such-worker.py"
+        TS._CACHE.clear()
+        with pytest.raises(TS.ScopeError, match="隔离子进程"):
+            TS.expansion_diff({"覆盖索引": ["covering index"]}, {}, [R85_Q])
+    finally:
+        term_scope.WORKER = orig
+        TS._CACHE.clear()
 
 
 def test_all_eval_questions_covers_every_registered_set():

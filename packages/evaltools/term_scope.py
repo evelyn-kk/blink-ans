@@ -7,7 +7,7 @@
 举证因此固定为三件产出：**可枚举的资产与谓词 / 预期命中 / 碰撞负例**。
 
 **这三件能说明什么、不能说明什么**（CR-110）：全部结论都限定在
-**120 道已登记评测题这个固定观测集**上。它不是查询空间的样本，更不构成
+**已登记评测题这个固定观测集**上（120 条登记题面，去重后 106 道）。它不是查询空间的样本，更不构成
 "影响范围有限"的证明——把它说成证明是 R85 那次的老毛病换个说法。工具因此
 还要求**每个改动键在观测集里至少有一条正向见证**：连落脚点都没有的键，
 说明的是"不知道它影响什么"，按 §6 一律改跑检索验证集。
@@ -25,6 +25,12 @@ R91 的第一版有三条可绕过路径，codex R91 逐条复现（CR-106/107/1
 3. **`--since HEAD~1` 会漂移**（CR-108）→ 与 CR-093 定下的"审计引用一律用
    固定 SHA"冲突。现在拒绝任何非 SHA 的写法，并把**解析后的完整 commit**
    写进产物。
+
+R93 的版本在本进程里换词典再还原，codex R93 指出这个差分**根本没有隔离**
+（CR-111）：`_load()` 会把每个键 `jieba.add_word`，而 jieba 的前缀树是进程级
+全局状态。加载当前词典之后再以旧词典运行，当前独有的键仍在 jieba 里——
+旧态被新词污染。现在**两版词典各自在短生命周期子进程里算**
+（`_scope_worker.py`），主进程全程不碰分词器，还原清单随之取消。
 
 `--expect-file` 的格式（YAML 或 JSON 皆可）::
 
@@ -118,46 +124,44 @@ def all_eval_questions() -> list[tuple[str, str]]:
     return out
 
 
-def _with_terms(terms: dict[str, list[str]], fn):
-    """把某一版词典临时装进分词器，跑 `fn()`，然后**逐项还原**模块状态。
+WORKER = Path(__file__).with_name("_scope_worker.py")
 
-    还原清单必须覆盖 `_load()` 写的每一项——CR-109 就漏在 `_version` 上：
-    它是 `dictionary_version()` 的来源，也是"索引词典版本与查询侧一致"那道
-    护栏的依据（`store.ChunkStore`），停在临时 YAML 的版本上会让后面任何
-    一次开索引报假的不一致。jieba 的自定义词是全局副作用，同样要清理。
+# 每版词典的实测结果缓存：键是词典本身（同一版词典的结果与算过哪些题无关），
+# 值里按题累积。这样 main() 里"旧/新 × 观测集/负例"四次调用只落成两次子进程。
+_CACHE: dict[str, dict[str, dict[str, list[str]]]] = {}
+
+
+def _under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, dict[str, list[str]]]:
+    """某一版词典下每道题的展开词与命中键，**在短生命周期子进程里算**（CR-111）。
+
+    上一版是在本进程里换词典再还原。还原清单能管住 `tokenize` 的模块状态
+    （CR-109 补的那五项），却管不住 jieba：`_load()` 对每个键 `add_word`，
+    改的是第三方库的全局前缀树。于是加载当前词典之后再以旧词典运行时，
+    **当前独有的键仍然在 jieba 里**（实测 `索引只扫描` 词频 900，120 道题里
+    19 道的切词与干净进程不同）——旧态被新词污染，差分随之漏报。
+
+    快照"进来之前的词频"救不了这个：它只覆盖我们**知道要记**的词，而这里
+    要排除的恰恰是"上一版留下的、清单里没有的"那些。换成进程边界之后，
+    主进程全程不碰分词器状态，也就没有还原清单要维护了。
     """
-    from services.retrieval import tokenize as tk
-    with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "term_map.yaml"
-        path.write_text(yaml.safe_dump({"version": 1, "terms": terms},
-                                       allow_unicode=True, sort_keys=False), encoding="utf-8")
-        saved = {
-            "path": tk.TERM_MAP_PATH, "ready": tk._ready, "version": tk._version,
-            "map": dict(tk._term_map), "parts": dict(tk._KEY_PARTS),
-        }
-        # jieba 的自定义词是**全局**副作用。粗暴地"跑完 del_word"会把 jieba
-        # 本来就认识的词一并删掉（实测：临时词典里放 `索引`，跑完之后
-        # `tests/unit/test_tokenize.py` 里一条切词用例直接挂了）。
-        # 因此按词逐个记住**进来之前的词频**，跑完原样放回：之前没有的才删。
-        import jieba
-        prior_freq = {zh: jieba.dt.FREQ.get(zh) for zh in terms if zh not in saved["map"]}
-        try:
-            tk.TERM_MAP_PATH = path
-            tk._ready = False
-            tk._term_map.clear()
-            tk._KEY_PARTS.clear()
-            return fn()
-        finally:
-            for zh, freq in prior_freq.items():
-                if freq is None:
-                    jieba.del_word(zh)
-                else:
-                    jieba.add_word(zh, freq=freq)
-            tk.TERM_MAP_PATH = saved["path"]
-            tk._term_map.clear(); tk._term_map.update(saved["map"])
-            tk._KEY_PARTS.clear(); tk._KEY_PARTS.update(saved["parts"])
-            tk._version = saved["version"]
-            tk._ready = saved["ready"]
+    key = json.dumps(terms, ensure_ascii=False, sort_keys=True)
+    cached = _CACHE.setdefault(key, {"expansions": {}, "matched": {}})
+    missing = [q for q in questions if q not in cached["expansions"]]
+    if missing:
+        with tempfile.TemporaryDirectory() as d:
+            inp, outp = Path(d) / "in.json", Path(d) / "out.json"
+            inp.write_text(json.dumps({"terms": terms, "questions": missing},
+                                      ensure_ascii=False), encoding="utf-8")
+            run = subprocess.run([sys.executable, str(WORKER), str(inp), str(outp)],
+                                 capture_output=True, text=True, cwd=ROOT)
+            if run.returncode != 0 or not outp.exists():
+                raise ScopeError(
+                    f"隔离子进程算词典结果失败（退出码 {run.returncode}）：\n"
+                    + (run.stderr or "")[-800:])
+            got = json.loads(outp.read_text(encoding="utf-8"))
+        cached["expansions"].update(got["expansions"])
+        cached["matched"].update(got["matched"])
+    return cached
 
 
 def _expansions_under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, list[str]]:
@@ -167,14 +171,14 @@ def _expansions_under(terms: dict[str, list[str]], questions: list[str]) -> dict
     这类跨键规则（CR-013），删掉一个具体键会让通用键重新生效，只看键差分
     看不出这种**遮蔽**变化。
     """
-    from services.retrieval import tokenize as tk
-    return _with_terms(terms, lambda: {q: sorted(tk.expand_terms(q)) for q in questions})
+    got = _under(terms, questions)["expansions"]
+    return {q: got[q] for q in questions}
 
 
 def _matched_under(terms: dict[str, list[str]], questions: list[str]) -> dict[str, set[str]]:
     """某一版词典下每道题**命中了哪些键**（逐键归因用，见 key_witnesses）。"""
-    from services.retrieval import tokenize as tk
-    return _with_terms(terms, lambda: {q: set(tk.matched_terms(q)) for q in questions})
+    got = _under(terms, questions)["matched"]
+    return {q: set(got[q]) for q in questions}
 
 
 def expansion_diff(old_terms: dict, new_terms: dict,
@@ -275,8 +279,15 @@ def main() -> int:
     old_terms, new_terms = _terms_at(sha), _terms_at(None)
     changed = changed_keys(old_terms, new_terms)
     labelled = all_eval_questions()
-    questions = [q for _, q in labelled]
-    label_of = {q: label for label, q in labelled}
+    # 登记的题面里有重复（有 14 道同时登记在两个评测集里）。不去重的话观测面会
+    # 被夸大，见证列表还会把同一道题列两遍——R93 存档的 `term-map-r85-scope.json`
+    # 里 `回表`/`覆盖索引` 各"2 道见证"，其实是同一道题数了两次。
+    questions: list[str] = []
+    label_of: dict[str, str] = {}
+    for label, q in labelled:
+        if q not in label_of:
+            label_of[q] = label
+            questions.append(q)
 
     print(f"① 可枚举的资产（相对 {sha[:12]}，完整 commit {sha}）：{len(changed)} 个键")
     for k, (old, new) in changed.items():
@@ -286,14 +297,14 @@ def main() -> int:
           "命中后按'最具体者胜'丢弃被包含的键。")
 
     actual = expansion_diff(old_terms, new_terms, questions)
-    print(f"\n② 展开差分（逐题比较旧/新 expand_terms，共 {len(questions)} 道题）："
-          f"{len(actual)} 道受影响")
+    print(f"\n② 展开差分（逐题比较旧/新 expand_terms，登记 {len(labelled)} 条题面、"
+          f"去重后 {len(questions)} 道）：{len(actual)} 道受影响")
     for q, d in actual.items():
         print(f"   [{label_of[q]:<10}] +{d['added']} -{d['removed']} :: {q[:40]}")
 
     witnesses = key_witnesses(old_terms, new_terms, questions)
     unwitnessed = [k for k, qs in witnesses.items() if not qs]
-    print(f"\n   逐键正向见证（观测集 {len(questions)} 道题里能归因到该键的）：")
+    print(f"\n   逐键正向见证（观测集去重后 {len(questions)} 道题里能归因到该键的）：")
     for key, qs in witnesses.items():
         print(f"     {'✓' if qs else '✗'} {key}: {len(qs)} 道" +
               (f" 例：{qs[0][:32]}" if qs else "  ← 观测集里没有落脚点"))
