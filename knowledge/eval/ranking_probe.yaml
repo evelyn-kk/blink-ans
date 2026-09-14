@@ -130,8 +130,17 @@ probes:
     # 2026-09-13（T-112）：RRF_K 改 10 时这条实测第 7 名，曾按 CR-086 固化为 7；
     # **codex R86 裁定回退**（CR-097：端到端净退步未审计前不接受那次全局改动），
     # 常量与本条基线一并还原为 9。扫描记录保留在 `search.py` 的 RRF_K 注释里。
-    baseline: 9
-    known_open: true
+    #
+    # 2026-09-14（T-119）：**9 → 4，第一次进前 5**，按 CR-086 就地固化，
+    # 并**摘掉 `known_open`**——它原本豁免的是 top_k 那道闸，现在这条已经
+    # 自己过了，留着只会是一个不判任何东西的标记（CR-015 那类"恰好什么都
+    # 不判"的形状）。摘掉之后两道闸同时生效：跌到第 5 名过 top_k 但触发退步，
+    # 跌到第 6 名两条都红。
+    # 原因不在排序，在切块：讲 Outbox 表列定义的那张 `|Column |Effect` 表
+    # 原来被拆在 4 块散文里（314/266/276/69 token），现在自己独立成一块
+    # （260 token，id 14709）——**这道题问的就是"表里要有哪些字段"，
+    # 而那张表本身就是答案**。
+    baseline: 4
     note: |
       2026-09-06（CR-039）：人工打开 `outbox-event-router.adoc` 源文件确认
       该小节正文是 Outbox 表的标准列定义（id/aggregatetype/aggregateid/
@@ -368,7 +377,8 @@ probes:
   - q: Spring 事务传播行为 REQUIRES_NEW 和 REQUIRED 有什么区别
     project: spring-framework
     gold: "Tx Propagation › Transaction Propagation › Understanding `PROPAGATION_REQUIRES_NEW`"
-    baseline: 2
+    # 2026-09-14（T-119）：2 → 1，按 CR-086 就地固化。
+    baseline: 1
     note: |
       官方原文：`PROPAGATION_REQUIRES_NEW, in contrast to
       PROPAGATION_REQUIRED, always uses an independent physical transaction

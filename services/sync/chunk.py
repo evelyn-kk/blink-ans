@@ -24,6 +24,21 @@ MIN_TOKENS = 20          # 低于此长度不成为独立证据，并入相邻�
 
 _CODE_FENCE = re.compile(r"^```", re.M)
 _ADOC_ANCHOR = re.compile(r"^\[\[([\w.-]+)\]\]\s*$", re.M)
+# AsciiDoc 表格的起止分隔符（T-119）。表格**行与行之间有空行**，而
+# `_split_body` 正是按空行切块的，于是一张表会散成一串普通段落：
+# 开头那几行（表名 + `|===` + 表头 + 第一行）被接到前面的散文后面，
+# 剩下的行各自成为没有表头的孤立碎片。
+#
+# 实测代价（T-115 诊断）：spring-framework `Annotations › Using
+# `@Transactional`` 里讲自调用的那段 NOTE 是 220 token 的正文，却和
+# `Annotation driven transaction settings` 表的前两行拼成了一块 331 token
+# 的混合块。把表剥掉之后，五种自然中文问法下该块与提问的 L2 距离
+# 一致下降（0.7032→0.6547 / 0.8011→0.7545 / 0.7874→0.7403 / 0.7943→0.7377），
+# 向量路名次 82 → 10。**稀释是可量的，不是观感。**
+#
+# 全语料规模：15190 块里 307 块带表格标记或表格行，其中 117 块是
+# "散文 + 表头"的混合型、148 块是没有表头的孤立行碎片（`bench/audits/`）。
+_ADOC_TABLE = re.compile(r"^\|===\s*$", re.M)
 # Antora 的 include 指令行（CR-084）。围栏**之外**的这类行由
 # `parse.py` 直接删掉；但围栏**之内**的删不得——删了会留下一个空代码块，
 # 等于把"这里本来有段代码"换成"这里什么都没有"，比留着更误导。
@@ -176,15 +191,22 @@ def _force_split(block: str) -> list[str]:
 
 
 def _split_body(body: str) -> list[str]:
-    """按段落切分长正文，且不切开代码块。
+    """按段落切分长正文，且不切开代码块、不把表格与散文混进同一块。
 
     代码块被切断后既不能执行也无法理解，是检索结果里最没用的一类证据。
+
+    AsciiDoc 表格（`|===` 起止）与散文之间强制封口（T-119）：表格行之间有
+    空行，本函数按空行切块，不识别表格就会把"散文 + 表头 + 第一行"拼成
+    一块。**两路检索受的影响方向相反**，所以只看关键词路会以为无害——
+    向量路上那半张表把整块的嵌入往表格语义拉（实测 L2 一致变差），
+    关键词路上它反而因为多出 transaction/annotation 这类词而虚高。
     """
     blocks = re.split(r"\n\s*\n", body)
     out: list[str] = []
     buf: list[str] = []
     buf_tokens = 0
     in_code = False
+    in_table = False
 
     for b in blocks:
         if not b.strip():
@@ -195,12 +217,20 @@ def _split_body(body: str) -> list[str]:
         # 检查无限累加（见下方追加逻辑的 `in_code or ...` 短路）。偶数围栏是
         # 单块内自行开合的完整示例，不会绕过检查，本身已受常规大小控制。
         opens_multiblock_fence = fences % 2 == 1
+        # 围栏**内部**出现的 `|===` 是示例正文（"这段配置长这样"），不是表格。
+        table_marks = 0 if (in_code or opens_multiblock_fence) else len(_ADOC_TABLE.findall(b))
+        starts_table = bool(table_marks) and not in_table
 
         # 只在真正会跨块累积的场景先封口：即将进入 in_code 的散文缓冲区必须
         # 提前封口，否则整段散文会被拖进不受控增长的多块代码/图示。单块内
         # 开合的完整围栏（偶数）不做强制封口——曾经对所有含围栏的块一律封口，
         # 把 Kubernetes 定义列表里逐条内联的短示例切成了孤立碎片（CR-019）。
-        if opens_multiblock_fence and not in_code and buf:
+        #
+        # 表格用的是另一条理由（T-119），所以它**不看奇偶**：单块内自成一张
+        # 完整的小表，同样不该和前面的散文拼成一块——围栏那条例外是为了
+        # 让短示例能跟着解释它的句子走，而表格从来不解释相邻的那段散文，
+        # 它只是恰好排在后面。
+        if (opens_multiblock_fence or starts_table) and not in_code and buf:
             out.append("\n\n".join(buf))
             buf, buf_tokens = [], 0
 
@@ -215,11 +245,19 @@ def _split_body(body: str) -> list[str]:
         was_in_code = in_code
         if fences % 2 == 1:
             in_code = not in_code
+        was_in_table = in_table
+        if table_marks % 2 == 1:
+            in_table = not in_table
 
         # 只有真正跨块的围栏结束时才强制独立成块，避免后续解释被再次拼接；
         # 单块内开合的完整示例留给下面的常规 TARGET_TOKENS 触发，允许和相邻
         # 散文合并成正常大小的证据块，不再被强制拆成一块一个短示例。
         if was_in_code and not in_code:
+            out.append("\n\n".join(buf))
+            buf, buf_tokens = [], 0
+        # 表格结束后同样封口，否则表尾那一块会把紧随其后的散文接进来——
+        # 那是同一个混合块，只是前后顺序换了个方向。
+        elif (was_in_table or starts_table) and not in_table:
             out.append("\n\n".join(buf))
             buf, buf_tokens = [], 0
         elif not in_code and buf_tokens >= TARGET_TOKENS:

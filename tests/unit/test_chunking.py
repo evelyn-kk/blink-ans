@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.sync.chunk import (  # noqa: E402
-    MAX_TOKENS, _dedupe_path, _split_body, build_url, sections_to_chunks,
+    MAX_TOKENS, _dedupe_path, _split_body, build_url, estimate_tokens, sections_to_chunks,
 )
 from services.sync.parse import Section, parse_asciidoc, parse_markdown  # noqa: E402
 from services.sync.registry import Source  # noqa: E402
@@ -410,3 +410,96 @@ def test_navigation_files_are_skipped():
         p.write_text("= 导航\n\n* xref:a.adoc[A]\n", encoding="utf-8")
         assert parse_file(p, src()) == [], f"{name} 未被跳过"
         p.unlink()
+
+
+# ---------- AsciiDoc 表格（T-119） ----------
+
+def _adoc_table(rows: int = 4, cell_words: int = 25) -> str:
+    """造一张 AsciiDoc 表：行与行之间有空行，正是 `_split_body` 的切块边界。"""
+    body = "\n\n".join(
+        f"| `attr{i}`\n| `Attr{i}`\n| `default{i}`\n| " + " ".join(f"word{i}x{j}" for j in range(cell_words))
+        for i in range(rows)
+    )
+    return (
+        ".Annotation driven transaction settings\n|===\n"
+        "| XML Attribute| Annotation Attribute| Default| Description\n\n"
+        f"{body}\n|===")
+
+
+def test_table_is_not_merged_into_the_preceding_prose():
+    """T-119：讲自调用的那段 NOTE 原本和表头拼成一块，向量路名次 82 → 10。
+
+    判别性：修复前第一块必然同时含正文末句与 `|===`（表被接在散文后面）。
+    """
+    prose = (
+        "NOTE: In proxy mode (which is the default), only external method calls coming in "
+        "through the proxy are intercepted. This means that self-invocation does not lead to "
+        "an actual transaction at runtime.\n\n"
+        "Consider using AspectJ mode if you expect self-invocations to be wrapped with "
+        "transactions as well. In this case, there is no proxy in the first place."
+    )
+    pieces = _split_body(f"{prose}\n\n{_adoc_table()}")
+    holding = [p for p in pieces if "self-invocation" in p]
+    assert len(holding) == 1, "讲自调用的正文被切散了"
+    assert "|===" not in holding[0], "表格又被拼进了讲自调用的那一块"
+    assert "attr0" not in holding[0], "表格第一行被拼进了正文块"
+
+
+def test_table_is_not_merged_into_the_following_prose():
+    """封口要封两头：只挡住"散文在前"，表尾那一块照样会把后文接进来。
+
+    判别性靠**表小**：表本身超过 TARGET_TOKENS 时旧实现也会在表后封口，
+    看上去像已经修好了（第一版这条测试就是这么写的，在旧实现上照样绿）。
+    只有整表 + 后文合起来仍不到 TARGET_TOKENS 时，旧实现才会把两者并成
+    一块——旧实现实测 1 块 148 token，新实现 2 块 77 / 71。
+    """
+    after = "The preceding table lists every attribute understood by the namespace. " * 4
+    pieces = _split_body(f"{_adoc_table(rows=2, cell_words=8)}\n\n{after}")
+    tail = [p for p in pieces if "preceding table" in p]
+    assert len(tail) == 1
+    assert "|===" not in tail[0], "表尾与后文混在同一块"
+
+
+def test_self_contained_small_table_is_still_kept_apart_from_prose():
+    """单块内自成一张完整小表（两个 `|===` 都在同一块里）也要封口。
+
+    这是与围栏的分界：CR-019 让单块内开合的**完整围栏**跟着解释它的散文走，
+    因为那是"这段配置长这样"；表格不解释相邻散文，它只是恰好排在后面。
+    """
+    prose = "The following table lists the supported attributes and their defaults. " * 6
+    table = "|===\n| Name | Default\n| `mode` | `proxy`\n| `order` | `LOWEST_PRECEDENCE`\n|==="
+    pieces = _split_body(f"{prose}\n\n{table}")
+    holding = [p for p in pieces if "|===" in p]
+    assert len(holding) == 1
+    assert "following table lists" not in holding[0], "单块内的完整小表仍被拼在散文后面"
+
+
+def test_table_inside_a_code_fence_is_not_treated_as_a_table():
+    """围栏里的 `|===` 是示例正文，不能触发表格封口，否则示例会被切断。
+
+    **这是护栏，不是回归**（AGENTS.md §5.2）：它在旧实现上也是绿的，
+    因为旧实现根本没有表格规则。它防的是**新规则误触发**，
+    所以只能这么写——要求它在旧实现上失败没有意义。
+    """
+    code = "```\n|===\n| a | b\n| 1 | 2\n|===\n```"
+    pieces = _split_body(f"说明这段配置的写法。\n\n{code}\n\n后续说明。")
+    holding = [p for p in pieces if "| 1 | 2" in p]
+    assert len(holding) == 1, "围栏里的示例被表格规则切散了"
+    assert holding[0].count("|===") == 2, "示例里的分隔符不成对，说明被切断过"
+
+
+def test_oversized_table_is_split_at_row_boundaries():
+    """超过硬上限的表按**行**切，不按字符切——半行单元格不是证据。
+
+    **这同样是护栏，不是回归**：旧实现也满足它（表格行之间有空行，
+    按空行切本来就落在行边界上）。钉住它是因为新规则改变了表格的
+    封口时机，得确认没有把行切开；它不证明本轮修复了什么。
+    """
+    pieces = _split_body(_adoc_table(rows=12, cell_words=40))
+    table_pieces = [p for p in pieces if "attr" in p]
+    assert len(table_pieces) > 1, "这张表本该超过硬上限并被切开"
+    for p in table_pieces:
+        assert estimate_tokens(p) <= MAX_TOKENS, "表格块超过硬上限"
+        # 每一块都从某一行的行首开始：不存在被切断的单元格内容
+        first = p.strip().split("\n", 1)[0]
+        assert first.startswith("|") or first.startswith("."), f"表格在行中间被切开: {first!r}"
