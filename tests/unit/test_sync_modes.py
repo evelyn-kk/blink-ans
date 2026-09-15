@@ -812,6 +812,57 @@ def test_status_resets_embedding_progress_for_first_batch_failure_of_next_source
     assert not (tmp_path / "current.db").exists()
 
 
+def test_status_records_successful_first_batch_before_next_batch_fails(monkeypatch, tmp_path):
+    """CR-139：B=17 时第二批失败也必须留下第一批实际写入的 16 块。"""
+    from services.sync import pipeline as pl
+
+    source_a = Source(
+        id="source-a", project="source-a", technology="java", format="markdown", locale="en",
+        paths=("docs",), repo="https://example.invalid/a.git", ref="main", license="MIT",
+        license_file="LICENSE", base_url="https://example.invalid",
+    )
+    source_b = Source(
+        id="source-b", project="source-b", technology="java", format="markdown", locale="en",
+        paths=("docs",), repo="https://example.invalid/b.git", ref="main", license="MIT",
+        license_file="LICENSE", base_url="https://example.invalid",
+    )
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    monkeypatch.setattr(pl, "_resolve_sources", lambda *_args: [source_a, source_b])
+
+    def collect(src, *_args, **_kwargs):
+        result = pl.SourceResult(source_id=src.id, commit="aaa")
+        count = 1 if src.id == source_a.id else EMBED_BATCH + 1
+        chunks = [_chunk(src.project, src.technology, i, f"{src.id} chunk {i}") for i in range(count)]
+        return chunks, result
+
+    calls: list[tuple[str, int]] = []
+
+    def fail_second_batch_of_b(chunks, *_args):
+        calls.append((chunks[0].source_project, len(chunks)))
+        if chunks[0].source_project == source_b.project and len(calls) == 3:
+            raise RuntimeError("source-b second encode failed")
+        return [_vec(i % DIM) for i in range(len(chunks))]
+
+    monkeypatch.setattr(pl, "collect_chunks", collect)
+    monkeypatch.setattr(pl, "_embed_with_cache", fail_second_batch_of_b)
+    with pytest.raises(RuntimeError, match="source-b second encode failed"):
+        pl.sync(log=lambda *_: None)
+
+    status = json.loads((tmp_path / "current.building.status.json").read_text(encoding="utf-8"))
+    assert calls == [(source_a.project, 1), (source_b.project, EMBED_BATCH), (source_b.project, 1)]
+    assert status["stage"] == "failed"
+    assert status["active_source"] == source_b.id
+    assert status["source_chunks"] == EMBED_BATCH + 1
+    assert status["source_chunks_embedded"] == EMBED_BATCH
+    # sources 是完成来源的累计视图；B 未完成，不会把已写的局部 16 伪装成 B 完成。
+    assert status["sources"] == [{
+        "id": source_a.id, "stage": "source_complete", "files": 0,
+        "chunks": 1, "rejected": 0, "error": None,
+    }]
+    assert not (tmp_path / "current.building.db").exists()
+    assert not (tmp_path / "current.db").exists()
+
+
 @pytest.mark.parametrize("factory_name, message", [
     ("Embedder", "embedder startup broke"),
     ("EmbeddingCache", "embedding cache startup broke"),

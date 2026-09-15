@@ -34,7 +34,6 @@ from .registry import Source, ingestible, load_registry  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 REGRESSION_PATH = ROOT / "knowledge" / "regression_queries.yaml"
 EMBED_BATCH = 16
-SYNC_PROGRESS_BATCH = 1024
 
 
 def _utc_now() -> str:
@@ -224,7 +223,10 @@ def _add_with_cache(
         batch = chunks[start:start + EMBED_BATCH]
         added += builder.add(batch, _embed_with_cache(batch, embedder, cache))
         processed = start + len(batch)
-        if progress and (processed % SYNC_PROGRESS_BATCH == 0 or processed == len(chunks)):
+        # status 的 source_chunks_embedded 承诺的是本来源已经成功写入的块数，
+        # 不是“上一次 1024 块节流落盘时的数”。下一批 encode 可能立刻失败，
+        # 所以每个成功 add 的批次都必须先持久化进度（CR-139）。
+        if progress:
             progress(processed)
     return added
 
