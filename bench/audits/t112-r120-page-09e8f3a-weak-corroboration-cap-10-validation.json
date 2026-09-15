@@ -1,0 +1,120 @@
+{
+  "schema": "t112-candidate-audit/v1",
+  "kind": "validation",
+  "provenance": {
+    "command": ".venv/bin/python packages/evaltools/t112_candidates.py --output-dir bench/audits --prefix t112-r120-page-09e8f3a",
+    "implementation": {
+      "git_commit": "09e8f3a3733f14688b32bcc7baa92f183e60a76b",
+      "files": {
+        "services/retrieval/search.py": "870e21d076bc404a6d400806d2152e5792d176fe33b6c355369e4ecda3bf0429",
+        "packages/evaltools/probe_ranking.py": "eb055bdbfc33d9d3bad61830664fb8ca5a9d3226dc1b42ec6922218c01c426ce",
+        "packages/evaltools/probe_validation.py": "baf38550b28946df70c7e8de3faa1bcbe0960bfd7475382d508c927c98d386cd",
+        "packages/evaltools/t112_candidates.py": "a630be08533efa9f9b62b5750ae46001521014ae8e1cf7b58e9a928e706f59f4"
+      }
+    },
+    "index": {
+      "path": "data/index/current.db",
+      "sha256": "7646daf76583988369366f52c89fb9d768bf0c503b97f77af9c56eb9e62bfbd0",
+      "chunk_count": 15309,
+      "meta": {
+        "chunk_count": "15309",
+        "dictionary_version": "eba42d53742f",
+        "embedding_dim": "1024",
+        "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+        "sources": "{\"spring-boot\": \"6fdf67ea1552\", \"kafka\": \"26b251a451ce\", \"kubernetes\": \"1de955ebabe7\", \"postgresql\": \"61636c17b391\", \"spring-data-redis\": \"2ab177e10e08\", \"spring-kafka\": \"755a68f64a40\", \"debezium\": \"02810e25b19c\", \"scenario-cards\": \"8573f0003506\", \"spring-framework\": \"82a6b40b9366\"}"
+      }
+    },
+    "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+    "datasets": {
+      "knowledge/eval/ranking_probe.yaml": "a3a552c17187a6e9829a6bb2fdf459cd90a9c790422aa23c249ffa95ee059b0a",
+      "knowledge/eval/ranking_validation.yaml": "af0c2a5fa134e1af129924a5cec52b87d76285b63ad64c8f5f4b13bb72d6a6ae"
+    }
+  },
+  "candidate": {
+    "name": "weak-corroboration-cap-10",
+    "candidates": 30,
+    "experiment": {
+      "name": "weak-corroboration-cap-10",
+      "imputed_keyword_rank": null,
+      "imputed_vector_rank": null,
+      "keyword_candidate_depth": null,
+      "keyword_score_depth": null,
+      "vector_candidate_depth": null,
+      "vector_score_depth": null,
+      "keyword_rescue_depth": null,
+      "vector_rescue_max_rank": null,
+      "rescue_credit_rank": null,
+      "vector_distance_max": null,
+      "vector_distance_credit": null,
+      "relative_vector_credit": null,
+      "weak_corroboration_rank_max": 10,
+      "source_url_page_fusion": false
+    },
+    "rationale": "与 cap-5 同一弱双路佐证抑制规则，但把“强佐证”预登记为前 10；用于检验规则边界而非重调 RRF_K"
+  },
+  "results": [
+    {
+      "q": "Kafka 日志压缩 compaction 是怎么工作的",
+      "rank": 1,
+      "rank_at_k60": 1
+    },
+    {
+      "q": "Kubernetes 的资源 requests 和 limits 有什么区别",
+      "rank": 7,
+      "rank_at_k60": 7
+    },
+    {
+      "q": "Pod 的 QoS 等级是怎么划分的",
+      "rank": 4,
+      "rank_at_k60": 4
+    },
+    {
+      "q": "PostgreSQL 的 autovacuum 是做什么的",
+      "rank": 1,
+      "rank_at_k60": 1
+    },
+    {
+      "q": "PostgreSQL 事务隔离级别有哪几种",
+      "rank": 2,
+      "rank_at_k60": 2
+    },
+    {
+      "q": "PostgreSQL 怎么查看当前的锁等待",
+      "rank": 2,
+      "rank_at_k60": 2
+    },
+    {
+      "q": "Spring Boot 怎么做优雅停机",
+      "rank": 2,
+      "rank_at_k60": 2
+    },
+    {
+      "q": "Spring Boot 怎么暴露 Prometheus 指标",
+      "rank": 1,
+      "rank_at_k60": 1
+    },
+    {
+      "q": "Spring Data Redis 怎么用 Lua 脚本",
+      "rank": 1,
+      "rank_at_k60": 1
+    }
+  ],
+  "comparison_to_baseline": {
+    "regression_count": 0,
+    "regressions": [],
+    "improvement_count": 0,
+    "improvements": [],
+    "unchanged_count": 9,
+    "unchanged": [
+      "Kafka 日志压缩 compaction 是怎么工作的",
+      "Kubernetes 的资源 requests 和 limits 有什么区别",
+      "Pod 的 QoS 等级是怎么划分的",
+      "PostgreSQL 的 autovacuum 是做什么的",
+      "PostgreSQL 事务隔离级别有哪几种",
+      "PostgreSQL 怎么查看当前的锁等待",
+      "Spring Boot 怎么做优雅停机",
+      "Spring Boot 怎么暴露 Prometheus 指标",
+      "Spring Data Redis 怎么用 Lua 脚本"
+    ]
+  }
+}
