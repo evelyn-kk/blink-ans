@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from packages.schemas.chunk import Chunk, utc_now  # noqa: E402
 from services.retrieval import store as store_mod  # noqa: E402
 from services.retrieval.embed import DIM  # noqa: E402
 from services.retrieval.store import ChunkStore, IndexBuilder, IndexError_  # noqa: E402
-from services.sync.pipeline import _resolve_sources, run_regression  # noqa: E402
+from services.sync.pipeline import EMBED_BATCH, _add_with_cache, _resolve_sources, run_regression  # noqa: E402
 from services.sync import version as transform_version_mod  # noqa: E402
 from services.sync.version import content_transform_version  # noqa: E402
 
@@ -78,6 +79,31 @@ def _vec(i: int) -> list[float]:
     v = [0.0] * DIM
     v[i] = 1.0
     return v
+
+
+def test_embedding_writes_are_bounded_to_embed_batch():
+    """大来源不能先攒完整向量列表再一次性交给 SQLite。"""
+    class Builder:
+        def __init__(self):
+            self.batch_sizes: list[int] = []
+
+        def add(self, chunks, vectors):
+            assert len(chunks) == len(vectors)
+            self.batch_sizes.append(len(chunks))
+            return len(chunks)
+
+    class Embedder:
+        def encode(self, texts):
+            return [[0.0] * DIM for _ in texts]
+
+    class Cache:
+        def get(self, _checksum):
+            return None
+
+    chunks = [_chunk("kafka", "kafka", i, f"chunk {i}") for i in range(EMBED_BATCH * 2 + 1)]
+    builder = Builder()
+    assert _add_with_cache(builder, chunks, Embedder(), Cache()) == len(chunks)
+    assert builder.batch_sizes == [EMBED_BATCH, EMBED_BATCH, 1]
 
 
 @pytest.fixture
@@ -560,6 +586,37 @@ def test_clean_full_sync_activates(monkeypatch, tmp_path):
     rep = pl.sync(log=lambda *_: None)
     assert rep.activated and not rep.incomplete
     assert (tmp_path / "current.db").exists()
+
+    # R121 的残留 building.db 没有 meta，只能推知没跑到 finalize，无法知道是
+    # 哪个来源/阶段或是否已触及内存上界。状态文件必须由真实 sync 控制流写出，
+    # 不是单独测一个 JSON helper。
+    assert rep.diagnostics_path == tmp_path / "current.building.status.json"
+    status = json.loads(rep.diagnostics_path.read_text(encoding="utf-8"))
+    assert status["stage"] == "activated"
+    assert status["index_path"] == str(tmp_path / "current.db")
+    assert {entry["id"] for entry in status["sources"]} == set(status["requested_sources"])
+    assert status["peak_rss"]["value"] > 0
+    assert status["peak_rss"]["unit"] in {"bytes", "KiB"}
+
+
+def test_sync_exception_persists_failure_phase_and_reason(monkeypatch, tmp_path):
+    """Python 异常不能再只留下无 meta 的 staging DB。"""
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+
+    def fail_regression(*_args, **_kwargs):
+        raise RuntimeError("deliberate regression harness failure")
+
+    monkeypatch.setattr(pl, "run_regression", fail_regression)
+    with pytest.raises(RuntimeError, match="deliberate regression"):
+        pl.sync(log=lambda *_: None)
+
+    status = json.loads((tmp_path / "current.building.status.json").read_text(encoding="utf-8"))
+    assert status["stage"] == "failed"
+    assert status["error_type"] == "RuntimeError"
+    assert status["error_message"] == "deliberate regression harness failure"
+    assert not (tmp_path / "current.building.db").exists(), (
+        "保留失败原因后仍维持旧语义：普通 Python 异常丢弃未完成索引"
+    )
 
 
 def test_merge_failure_does_not_delete_the_source(monkeypatch, tmp_path):

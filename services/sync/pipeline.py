@@ -7,7 +7,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+import platform
+import resource
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
@@ -29,6 +34,68 @@ from .registry import Source, ingestible, load_registry  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 REGRESSION_PATH = ROOT / "knowledge" / "regression_queries.yaml"
 EMBED_BATCH = 16
+SYNC_PROGRESS_BATCH = 1024
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _peak_rss() -> dict[str, int | str]:
+    """返回本进程 RSS 高水位及其平台口径，避免猜测单位。"""
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # macOS 的 ru_maxrss 是 bytes；Linux/BSD 通常是 KiB。状态文件保留原始值与
+    # 单位，诊断时不能把一个平台的数值套到另一个平台上。
+    return {"value": value, "unit": "bytes" if platform.system() == "Darwin" else "KiB"}
+
+
+class _SyncStatus:
+    """同步进度的原子、低敏感度诊断记录。
+
+    `current.building.db` 在进程被杀时只能说明 finalize 尚未发生；此文件把最后
+    已完成阶段、来源 ID、块计数和进程 RSS 高水位留在索引旁。它刻意不写题面、
+    块正文或堆栈，以免把知识库内容复制到诊断文件。
+    """
+
+    def __init__(self, path: Path, *, mode: str, sources: list[Source], activate: bool) -> None:
+        self.path = path
+        self.data: dict[str, object] = {
+            "schema_version": 1,
+            "started_at": _utc_now(),
+            "pid": os.getpid(),
+            "mode": mode,
+            "requested_sources": [s.id for s in sources],
+            "activate_requested": activate,
+            "stage": "started",
+            "peak_rss": _peak_rss(),
+            "sources": [],
+        }
+        self.write()
+
+    def update(self, stage: str, **fields: object) -> None:
+        self.data.update(fields)
+        self.data["stage"] = stage
+        self.data["updated_at"] = _utc_now()
+        self.data["peak_rss"] = _peak_rss()
+        self.write()
+
+    def source(self, result: SourceResult, stage: str) -> None:
+        entries = self.data["sources"]
+        assert isinstance(entries, list)
+        entries.append({
+            "id": result.source_id,
+            "stage": stage,
+            "files": result.files,
+            "chunks": result.chunks,
+            "rejected": result.rejected,
+            "error": result.error,
+        })
+        self.update(stage, active_source=result.source_id)
+
+    def write(self) -> None:
+        temp = self.path.with_name(self.path.name + ".tmp")
+        temp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, self.path)
 
 
 def collect_chunks(
@@ -142,6 +209,24 @@ def _embed_with_cache(
     return [v for v in vectors if v is not None]
 
 
+def _add_with_cache(
+    builder: IndexBuilder,
+    chunks: list[Chunk],
+    embedder: Embedder,
+    cache: EmbeddingCache,
+    progress: Callable[[int], None] | None = None,
+) -> int:
+    """以小批向量写入，避免整个来源的 Python float 列表同时常驻内存。"""
+    added = 0
+    for start in range(0, len(chunks), EMBED_BATCH):
+        batch = chunks[start:start + EMBED_BATCH]
+        added += builder.add(batch, _embed_with_cache(batch, embedder, cache))
+        processed = start + len(batch)
+        if progress and (processed % SYNC_PROGRESS_BATCH == 0 or processed == len(chunks)):
+            progress(processed)
+    return added
+
+
 MODES = ("full", "verify", "merge")
 
 
@@ -247,6 +332,10 @@ def sync(
 
     log(f"同步模式 {mode}，{len(sources)} 个来源" + (f": {', '.join(s.id for s in sources)}" if only else ""))
     builder = IndexBuilder()
+    status = _SyncStatus(
+        builder.staging.with_suffix(".status.json"), mode=mode, sources=sources, activate=activate,
+    )
+    report.diagnostics_path = status.path
     embedder = Embedder()
     cache = (
         EmbeddingCache(embedding_model=DEFAULT_MODEL)
@@ -264,6 +353,7 @@ def sync(
     known_urls: dict[str, set[str]] = {}
     try:
         if mode == "merge":
+            status.update("carry_over_running")
             # 先搬底座再写新来源：底座里若还留着这些来源的旧块，
             # (source_url, checksum) 唯一键会把新块当重复丢掉，
             # 结果是"更新了却没变"。exclude 掉本次同步的项目即可。
@@ -279,39 +369,54 @@ def sync(
             moved = builder.carry_over(CURRENT, projects, DEFAULT_MODEL, exclude_paths)
             report.carried_chunks = moved
             log(f"  从当前索引搬运 {moved} 块（{', '.join(sorted(projects))} 之外的来源）")
+            status.update("carry_over_complete", carried_chunks=moved)
 
         for src in sources:
+            status.update("source_collecting", active_source=src.id)
             # authored 来源（场景卡片）用它们把引用解析成"本轮/当前索引里
             # 该来源的真实版本/真实块地址"；拉取式来源忽略这两个参数。
             chunks, res = collect_chunks(src, log, versions, known_urls)
             report.sources.append(res)
             if res.error:
                 log(f"  {src.id}: 跳过 —— {res.error}")
+                status.source(res, "source_failed")
                 continue
             versions[src.id] = res.commit
             known_urls[src.id] = {c.source_url for c in chunks}
 
             # 以 add() 的实际写入数为准：重复的块会被跳过，
             # 用 len(chunks) 会让同一条命令打印出两个不一致的总数。
-            res.chunks = builder.add(chunks, _embed_with_cache(chunks, embedder, cache))
+            status.update("source_embedding", active_source=src.id, source_chunks=len(chunks))
+            res.chunks = _add_with_cache(
+                builder, chunks, embedder, cache,
+                lambda processed: status.update(
+                    "source_embedding", active_source=src.id,
+                    source_chunks=len(chunks), source_chunks_embedded=processed,
+                ),
+            )
             report.total_chunks += res.chunks
+            status.source(res, "source_complete")
 
         if cache.available:
             log(f"  向量复用 {cache.hits} 条，新算 {cache.misses} 条")
         cache.close()
+        status.update("finalize_running", total_chunks=report.total_chunks)
         stats = builder.finalize(versions, DEFAULT_MODEL)
         report.index_chunks = stats.chunks
         report.staging_path = stats.path
         log(f"暂存索引: {stats.chunks} 块 -> {stats.path.name}")
         for p, n in stats.projects.items():
             log(f"    {p}: {n}")
+        status.update("finalize_complete", index_chunks=stats.chunks)
 
         # 局部索引里本来就没有其他来源，只跑相关回归；全量与合并都跑全量回归。
         scope = projects if mode == "verify" else None
+        status.update("regression_running")
         ok, failures, skipped = run_regression(stats.path, log, scope)
         report.regression_passed = ok
         report.regression_failures = failures
         report.regression_skipped = skipped
+        status.update("regression_complete", regression_passed=ok, regression_failures=failures)
 
         # 有来源拉取或许可校验失败时不得激活。回归只有 6 条烟雾查询，
         # 少掉一整个来源它照样可能通过——merge 模式下更危险：
@@ -361,6 +466,7 @@ def sync(
 
         if mode == "verify":
             log(f"局部验证模式不激活索引；暂存索引留在 {stats.path} 供检查与 kb search --index")
+            status.update("completed_not_activated", reason="verify_mode")
         elif report.uncovered_cards:
             # 单独一条文案：这条路径拒绝激活的理由不是"某个来源没拉全"，
             # 而且 --allow-partial 对它无效，不能给出那句建议（CR-088）。
@@ -369,17 +475,32 @@ def sync(
                 f"**--allow-partial 不放行**。请修好卡片引用后重新同步，"
                 f"或先把它从 knowledge/sources.yaml 的 authored 来源里正式去掉"
                 + (f"（本次另有来源未完整同步: {', '.join(failed)}）" if failed else ""))
+            status.update("completed_not_activated", reason="uncovered_cards")
         elif report.incomplete:
             log(f"{', '.join(failed)} 未能完整同步，索引不完整，拒绝激活；"
                 f"确认要带着缺口上线请加 --allow-partial")
+            status.update("completed_not_activated", reason="incomplete_sources")
         elif ok and activate:
+            status.update("activation_running")
             report.index_path = builder.activate()
             report.activated = True
             log(f"已激活: {report.index_path}")
+            status.update("activated", index_path=str(report.index_path))
         elif not ok:
             log("回归未通过，保留当前索引不变；暂存索引留在磁盘上供排查")
-    except Exception:
-        builder.discard()
+            status.update("completed_not_activated", reason="regression_failed")
+        else:
+            status.update("completed_not_activated", reason="activation_disabled")
+    except BaseException as exc:
+        # SIGKILL 不能执行这里；它至少能保留上一次原子状态，从而区分“杀在
+        # 哪个阶段”与“Python 异常”。其它可捕获退出原因必须写入，不能只剩
+        # 一个无 meta 的 SQLite 暂存文件。
+        status.update(
+            "interrupted" if not isinstance(exc, Exception) else "failed",
+            error_type=type(exc).__name__, error_message=str(exc),
+        )
+        if isinstance(exc, Exception):
+            builder.discard()
         raise
 
     return report

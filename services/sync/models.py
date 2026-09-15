@@ -39,3 +39,4 @@ class SyncReport:
     uncovered_cards: list[str] = field(default_factory=list)
     index_path: Path | None = None
     staging_path: Path | None = None
+    diagnostics_path: Path | None = None
