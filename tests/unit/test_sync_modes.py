@@ -619,6 +619,34 @@ def test_sync_exception_persists_failure_phase_and_reason(monkeypatch, tmp_path)
     )
 
 
+@pytest.mark.parametrize("factory_name, message", [
+    ("Embedder", "embedder startup broke"),
+    ("EmbeddingCache", "embedding cache startup broke"),
+])
+def test_sync_initialization_exception_is_diagnostic_and_discards_staging(
+    monkeypatch, tmp_path, factory_name, message,
+):
+    """CR-130：状态保护不能从 collect/regression 才开始。"""
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    pl.sync(log=lambda *_: None)
+    current = tmp_path / "current.db"
+    before = current.read_bytes()
+
+    def fail_startup(*_args, **_kwargs):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(pl, factory_name, fail_startup)
+    with pytest.raises(RuntimeError, match=message):
+        pl.sync(log=lambda *_: None)
+
+    status = json.loads((tmp_path / "current.building.status.json").read_text(encoding="utf-8"))
+    assert status["stage"] == "failed"
+    assert status["error_type"] == "RuntimeError"
+    assert status["error_message"] == message
+    assert not (tmp_path / "current.building.db").exists()
+    assert current.read_bytes() == before, "初始化失败不得误伤或发布 current 索引"
+
+
 def test_merge_failure_does_not_delete_the_source(monkeypatch, tmp_path):
     """merge 模式下最危险的一幕：旧块已在 carry_over 时排除，
     新块又没拉下来，激活即等于把这个来源从索引里静默删掉。"""

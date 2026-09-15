@@ -336,22 +336,25 @@ def sync(
         builder.staging.with_suffix(".status.json"), mode=mode, sources=sources, activate=activate,
     )
     report.diagnostics_path = status.path
-    embedder = Embedder()
-    cache = (
-        EmbeddingCache(embedding_model=DEFAULT_MODEL)
-        if reuse_embeddings
-        else EmbeddingCache(Path("/nonexistent"))
-    )
-    if cache.available:
-        log("  复用当前索引中未变更正文的向量")
-    elif cache.rejected_reason:
-        log(f"  {cache.rejected_reason}")
-
     versions: dict[str, str] = {}
     # 只在本次同步内有效，不写入索引 meta——供 authored 来源的 URL 归属
     # 校验用（CR-045），键与 versions 一样按来源 id。
     known_urls: dict[str, set[str]] = {}
+    cache: EmbeddingCache | None = None
     try:
+        # 状态文件已在 builder 之后落盘；任何本地模型/缓存初始化失败都必须
+        # 走下面的失败关闭，不得伪装成“刚启动后被 SIGKILL”。
+        embedder = Embedder()
+        cache = (
+            EmbeddingCache(embedding_model=DEFAULT_MODEL)
+            if reuse_embeddings
+            else EmbeddingCache(Path("/nonexistent"))
+        )
+        if cache.available:
+            log("  复用当前索引中未变更正文的向量")
+        elif cache.rejected_reason:
+            log(f"  {cache.rejected_reason}")
+
         if mode == "merge":
             status.update("carry_over_running")
             # 先搬底座再写新来源：底座里若还留着这些来源的旧块，
@@ -502,5 +505,10 @@ def sync(
         if isinstance(exc, Exception):
             builder.discard()
         raise
+    finally:
+        # 正常路径已经提前 close 以释放 current.db；异常初始化后/来源中断时
+        # 仍确保已打开的缓存连接不滞留。
+        if cache is not None:
+            cache.close()
 
     return report
