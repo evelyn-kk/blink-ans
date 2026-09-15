@@ -191,13 +191,29 @@ def test_real_offline_sync_uses_two_local_git_queries_per_source(monkeypatch, tm
             return [[0.0] * DIM for _ in texts]
     monkeypatch.setattr(pl, "Embedder", lambda: SyncEmbedder())
     monkeypatch.setattr(pl, "run_regression", lambda *_args: (True, [], []))
+    expected_full = {
+        source.id: subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path / source.slug,
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        for source in (src, src2)
+    }
+    expected = {key: value[:12] for key, value in expected_full.items()}
     calls = []
     original = fetch_mod._git
-    monkeypatch.setattr(fetch_mod, "_git", lambda *args, **kwargs: calls.append(args) or original(*args, **kwargs))
+    def traced_git(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls.append((args, kwargs["cwd"], result))
+        return result
+    monkeypatch.setattr(fetch_mod, "_git", traced_git)
     rep = pl.sync(offline=True, activate=False, log=lambda *_: None)
     assert len(rep.sources) == 2
-    assert all(r.commit and not r.error and r.files == 1 and r.chunks > 0 for r in rep.sources)
-    assert calls == [("rev-parse", "--is-inside-work-tree"), ("rev-parse", "HEAD")] * 2
+    assert all(not r.error and r.files == 1 and r.chunks > 0 for r in rep.sources)
+    assert {r.source_id: r.commit for r in rep.sources} == expected
+    assert calls == [
+        (("rev-parse", "--is-inside-work-tree"), tmp_path / src.slug, "true"),
+        (("rev-parse", "HEAD"), tmp_path / src.slug, expected_full[src.id]),
+        (("rev-parse", "--is-inside-work-tree"), tmp_path / src2.slug, "true"),
+        (("rev-parse", "HEAD"), tmp_path / src2.slug, expected_full[src2.id]),
+    ]
 
 
 # ---------- 合并更新：搬运底座 ----------
