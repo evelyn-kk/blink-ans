@@ -138,6 +138,30 @@ def test_sync_report_and_status_record_offline_mode(monkeypatch, tmp_path):
     assert status["offline"] is True
 
 
+def test_offline_sync_passes_preflight_identity_to_collect_once(monkeypatch, tmp_path):
+    """CR-134：完整 sync 不能预检一次、collect/fetch 又重新验一次。"""
+    from services.sync import pipeline as pl
+    from services.sync.fetch import CachedSource
+
+    src = _offline_source()
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    monkeypatch.setattr(pl, "_resolve_sources", lambda *_args: [src])
+    identity = CachedSource(tmp_path / "cached", "fixed-head")
+    calls = []
+    monkeypatch.setattr(pl, "cached_source_head", lambda got: calls.append(got) or identity)
+    received = []
+    original = pl.collect_chunks
+
+    def collect(*args, cached=None, **kwargs):
+        received.append(cached)
+        return original(*args, cached=cached, **kwargs)
+
+    monkeypatch.setattr(pl, "collect_chunks", collect)
+    pl.sync(offline=True, log=lambda *_: None)
+    assert calls == [src]
+    assert received == [identity]
+
+
 # ---------- 合并更新：搬运底座 ----------
 
 def _chunk(proj: str, tech: str, n: int, text: str, source_path: str | None = None) -> Chunk:
