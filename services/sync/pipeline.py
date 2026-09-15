@@ -222,12 +222,11 @@ def _add_with_cache(
     for start in range(0, len(chunks), EMBED_BATCH):
         batch = chunks[start:start + EMBED_BATCH]
         added += builder.add(batch, _embed_with_cache(batch, embedder, cache))
-        processed = start + len(batch)
         # status 的 source_chunks_embedded 承诺的是本来源已经成功写入的块数，
-        # 不是“上一次 1024 块节流落盘时的数”。下一批 encode 可能立刻失败，
-        # 所以每个成功 add 的批次都必须先持久化进度（CR-139）。
+        # 不是已编码/输入数：SQLite 去重可能让本批 add 为 0。下一批 encode
+        # 可能立刻失败，所以每个成功 add 的批次都必须先持久化累计 added（CR-139/140）。
         if progress:
-            progress(processed)
+            progress(added)
     return added
 
 

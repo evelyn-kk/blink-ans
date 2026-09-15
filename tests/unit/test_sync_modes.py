@@ -259,6 +259,27 @@ def test_embedding_writes_are_bounded_to_embed_batch():
     assert builder.batch_sizes == [EMBED_BATCH, EMBED_BATCH, 1]
 
 
+def test_embedding_progress_counts_actual_persisted_chunks_not_duplicate_inputs():
+    """CR-140：SQLite 去重的 batch 不能被状态写成“已嵌入”。"""
+    class DuplicateBuilder:
+        def add(self, chunks, vectors):
+            assert len(chunks) == len(vectors) == EMBED_BATCH
+            return 0  # 模拟 SQLite 唯一约束将整批重复块跳过
+
+    class Embedder:
+        def encode(self, texts):
+            return [[0.0] * DIM for _ in texts]
+
+    class Cache:
+        def get(self, _checksum):
+            return None
+
+    progress: list[int] = []
+    chunks = [_chunk("duplicate", "java", i, "same duplicate text") for i in range(EMBED_BATCH)]
+    assert _add_with_cache(DuplicateBuilder(), chunks, Embedder(), Cache(), progress.append) == 0
+    assert progress == [0]
+
+
 @pytest.fixture
 def base_index(tmp_path, monkeypatch) -> Path:
     """一个两来源的底座索引：kafka 2 块、postgresql 1 块。"""
