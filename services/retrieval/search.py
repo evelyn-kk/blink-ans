@@ -182,6 +182,8 @@ class FusionExperiment:
     keyword_rescue_depth: int | None = None
     vector_rescue_max_rank: int | None = None
     rescue_credit_rank: str | None = None
+    vector_distance_max: float | None = None
+    vector_distance_credit: float | None = None
 
 
 def _pack(vec: Sequence[float]) -> bytes:
@@ -359,6 +361,12 @@ def hybrid_search(
         raise ValueError("关键词计分深度必须同时给出关键词候选深度")
     if experiment and experiment.vector_score_depth and not experiment.vector_candidate_depth:
         raise ValueError("向量计分深度必须同时给出向量候选深度")
+    if experiment and ((experiment.vector_distance_max is None) != (experiment.vector_distance_credit is None)):
+        raise ValueError("向量距离信用必须同时给出距离上限与信用系数")
+    if experiment and experiment.vector_distance_max is not None and experiment.vector_distance_max <= 0:
+        raise ValueError("向量距离上限必须为正数")
+    if experiment and experiment.vector_distance_credit is not None and experiment.vector_distance_credit <= 0:
+        raise ValueError("向量距离信用系数必须为正数")
 
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
@@ -413,6 +421,17 @@ def hybrid_search(
                         else vector_rank if experiment.rescue_credit_rank == "vector" else rank
                     )
                     _rrf_add_at_rank(scores, rid, credit_rank, KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
+        if experiment.vector_distance_max is not None:
+            # T-112 候选：只给“语义距离确实落在声明阈值内、且关键词路没有候选”的块
+            # 额外信用。与“补一个第 31 名”不同，信用随实际向量距离连续衰减；既不
+            # 虚构另一条路的名次，也不扩大任一路的候选池。
+            for rid, distance in vec[:vector_score_depth]:
+                if rid in keyword_ids or distance >= experiment.vector_distance_max:
+                    continue
+                scores[rid][0] += (
+                    (experiment.vector_distance_max - distance)
+                    * experiment.vector_distance_credit * tech_weight
+                )
 
     fused = {rid: tuple(v) for rid, v in scores.items()}
     if not fused:

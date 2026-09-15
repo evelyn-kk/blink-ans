@@ -91,6 +91,24 @@ CANDIDATES = (
         ),
         rationale="两路各取 150 以保留过滤后的真实名次，但只计各自前 30；关键词真实排在 31..150 且向量前 15 时，再按该向量名次补一条关键词权重 RRF 分（R105 临时实现的实际规则）",
     ),
+    Candidate(
+        "vector-distance-credit-0.75-0.10",
+        experiment=FusionExperiment(
+            "vector-distance-credit-0.75-0.10",
+            vector_distance_max=0.75,
+            vector_distance_credit=0.10,
+        ),
+        rationale="关键词候选外且向量 L2 距离小于 0.75 时，按 (0.75 - distance) × 0.10 加连续信用；不虚构缺席名次、不扩候选池",
+    ),
+    Candidate(
+        "vector-distance-credit-0.75-0.20",
+        experiment=FusionExperiment(
+            "vector-distance-credit-0.75-0.20",
+            vector_distance_max=0.75,
+            vector_distance_credit=0.20,
+        ),
+        rationale="与 0.10 候选同一实际距离规则，仅将连续信用系数增至 0.20，用来观察强度是否越过排序稳定区间",
+    ),
 )
 
 

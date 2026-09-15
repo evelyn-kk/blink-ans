@@ -53,6 +53,7 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
     assert set(by_name) == {
         "baseline", "single-path-credit", "vector-only-credit",
         "keyword-tail", "vector-keyword-rescue",
+        "vector-distance-credit-0.75-0.10", "vector-distance-credit-0.75-0.20",
     }
     assert by_name["single-path-credit"].experiment.imputed_keyword_rank == 31
     assert by_name["single-path-credit"].experiment.imputed_vector_rank == 31
@@ -65,6 +66,8 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
     assert (rescue.vector_candidate_depth, rescue.vector_score_depth) == (150, 30)
     assert (rescue.keyword_rescue_depth, rescue.vector_rescue_max_rank) == (150, 15)
     assert rescue.rescue_credit_rank == "vector_zero"
+    distance = by_name["vector-distance-credit-0.75-0.10"].experiment
+    assert (distance.vector_distance_max, distance.vector_distance_credit) == (0.75, 0.10)
 
 
 def test_audit_embeds_provenance_candidate_and_computed_comparison():
@@ -219,3 +222,35 @@ def test_fusion_experiment_changes_real_hybrid_order_not_just_runner_arguments(m
 
     assert [hit.rowid for hit in baseline] == [1, 2]
     assert [hit.rowid for hit in candidate] == [2, 1]
+
+
+def test_vector_distance_credit_uses_actual_distance_without_imputing_a_missing_rank(monkeypatch):
+    """距离信用只作用于关键词候选外、距离低于阈值的向量块。"""
+    from services.retrieval import search as search_mod
+
+    rows = {
+        1: {"id": 1, "text": "keyword only", "title_path": "keyword", "source_url": "u1",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+        2: {"id": 2, "text": "vector only", "title_path": "vector", "source_url": "u2",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+    }
+
+    class Store:
+        def execute(self, sql, params=()):
+            return [rows[rid] for rid in params]
+
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: [(1, -1.0)])
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.60)])
+    credit = search_mod.FusionExperiment(
+        "distance", vector_distance_max=0.75, vector_distance_credit=0.10,
+    )
+    baseline = search_mod.hybrid_search(Store(), "q", [0.0], limit=2)
+    boosted = search_mod.hybrid_search(Store(), "q", [0.0], limit=2, experiment=credit)
+    assert [hit.rowid for hit in baseline] == [1, 2]
+    assert [hit.rowid for hit in boosted] == [2, 1]
+
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.80)])
+    threshold_miss = search_mod.hybrid_search(Store(), "q", [0.0], limit=2, experiment=credit)
+    assert [hit.rowid for hit in threshold_miss] == [1, 2]
