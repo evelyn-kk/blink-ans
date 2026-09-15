@@ -606,7 +606,7 @@ def _fake_sync_env(monkeypatch, tmp_path, failing: set[str], rejected: set[str] 
     monkeypatch.setattr(pl, "_embed_with_cache",
                         lambda chunks, *a: [_vec(i % DIM) for i in range(len(chunks))])
 
-    def fake_collect(src, log, versions=None, known_urls=None, offline=False):
+    def fake_collect(src, log, versions=None, known_urls=None, offline=False, cached=None):
         res = pl.SourceResult(source_id=src.id)
         if src.id in failing:
             res.error = "FetchError: 登记路径不存在于仓库中"

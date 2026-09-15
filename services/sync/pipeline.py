@@ -26,7 +26,7 @@ from services.retrieval.store import CURRENT, ChunkStore, EmbeddingCache, IndexB
 
 from . import cards  # noqa: E402
 from .chunk import sections_to_chunks  # noqa: E402
-from .fetch import LicenseError, collect_files, fetch, head_commit, validate_cached_source  # noqa: E402
+from .fetch import CachedSource, LicenseError, collect_files, fetch, head_commit, cached_source_head, validate_cached_source  # noqa: E402
 from .models import SourceResult, SyncReport  # noqa: E402
 from .parse import parse_file  # noqa: E402
 from .registry import Source, ingestible, load_registry  # noqa: E402
@@ -104,6 +104,7 @@ def collect_chunks(
     versions: dict[str, str] | None = None,
     known_urls: dict[str, set[str]] | None = None,
     offline: bool = False,
+    cached: CachedSource | None = None,
 ) -> tuple[list[Chunk], SourceResult]:
     if src.format == "authored":
         # 场景卡片没有上游仓库，完全不走下面的 fetch/许可校验/通用解析——
@@ -112,7 +113,7 @@ def collect_chunks(
 
     res = SourceResult(source_id=src.id)
     try:
-        fetched = fetch(src, offline=offline)
+        fetched = fetch(src, offline=offline, cached=cached)
     except LicenseError as exc:
         res.error = f"许可校验失败: {exc}"
         return [], res
@@ -334,10 +335,11 @@ def sync(
 
     # CR-131: 缺缓存不是“一个来源本轮没拉全”，而是 offline 调用的入口前提。
     # 在任何 builder/model/status 创建前检查所有远程来源，避免空 staging 或模型加载。
+    cached_sources: dict[str, CachedSource] = {}
     if offline:
         for src in sources:
             if src.format != "authored":
-                validate_cached_source(src)
+                cached_sources[src.id] = cached_source_head(src)
 
     log(f"同步模式 {mode}，{len(sources)} 个来源" + (f": {', '.join(s.id for s in sources)}" if only else ""))
     builder = IndexBuilder()
@@ -388,7 +390,8 @@ def sync(
             status.update("source_collecting", active_source=src.id)
             # authored 来源（场景卡片）用它们把引用解析成"本轮/当前索引里
             # 该来源的真实版本/真实块地址"；拉取式来源忽略这两个参数。
-            chunks, res = collect_chunks(src, log, versions, known_urls, offline=offline)
+            chunks, res = collect_chunks(src, log, versions, known_urls, offline=offline,
+                                        cached=cached_sources.get(src.id))
             report.sources.append(res)
             if res.error:
                 log(f"  {src.id}: 跳过 —— {res.error}")
