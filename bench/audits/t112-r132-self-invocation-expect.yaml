@@ -1,0 +1,9 @@
+# R132：在修改 term_map 前声明的固定观测集差分（CR-107）。
+# 键的匹配谓词是 tokenize.matched_terms 的子串命中或组成词全出现。
+expect:
+  - q: "同一个类里的方法互相调用时 @Transactional 为什么不生效"
+    added:
+      - "AOP proxy"
+      - "proxy"
+      - "self-invocation"
+    removed: []

@@ -1,0 +1,36 @@
+{
+ "since_resolved": "5af6f7f912f52014263d0c81db8106fd8f76c59d",
+ "changed_keys": {
+  "同一个类里的方法互相调用": {
+   "old": null,
+   "new": [
+    "self-invocation",
+    "proxy",
+    "AOP proxy"
+   ]
+  }
+ },
+ "affected": {
+  "同一个类里的方法互相调用时 @Transactional 为什么不生效": {
+   "added": [
+    "AOP proxy",
+    "proxy",
+    "self-invocation"
+   ],
+   "removed": []
+  }
+ },
+ "key_witnesses": {
+  "同一个类里的方法互相调用": [
+   "同一个类里的方法互相调用时 @Transactional 为什么不生效"
+  ]
+ },
+ "unwitnessed_keys": [],
+ "expect_file": "bench/audits/t112-r132-self-invocation-expect.yaml",
+ "expect_problems": [],
+ "negatives": [
+  "同一个类里实现的工具方法怎样复用",
+  "类里的方法彼此调用如何避免重复日志"
+ ],
+ "negatives_affected": {}
+}
