@@ -1,0 +1,280 @@
+{
+  "schema": "t112-candidate-audit/v1",
+  "kind": "probe",
+  "provenance": {
+    "command": ".venv/bin/python packages/evaltools/t112_candidates.py --output-dir bench/audits --prefix t112-r111-distance-863ec7c",
+    "implementation": {
+      "git_commit": "863ec7c7151779249a073c455884b43838004dc3",
+      "files": {
+        "services/retrieval/search.py": "7a7694895d635a7b266fadbb276fce02a34fbfc3ff4579251dfd065477fc8215",
+        "packages/evaltools/probe_ranking.py": "eb055bdbfc33d9d3bad61830664fb8ca5a9d3226dc1b42ec6922218c01c426ce",
+        "packages/evaltools/probe_validation.py": "baf38550b28946df70c7e8de3faa1bcbe0960bfd7475382d508c927c98d386cd",
+        "packages/evaltools/t112_candidates.py": "a87856659eb4ae1251ef4ae84d06603038846e06bf9e5adf98ae9cb9bdc885a1"
+      }
+    },
+    "index": {
+      "path": "data/index/current.db",
+      "sha256": "7646daf76583988369366f52c89fb9d768bf0c503b97f77af9c56eb9e62bfbd0",
+      "chunk_count": 15309,
+      "meta": {
+        "chunk_count": "15309",
+        "dictionary_version": "eba42d53742f",
+        "embedding_dim": "1024",
+        "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+        "sources": "{\"spring-boot\": \"6fdf67ea1552\", \"kafka\": \"26b251a451ce\", \"kubernetes\": \"1de955ebabe7\", \"postgresql\": \"61636c17b391\", \"spring-data-redis\": \"2ab177e10e08\", \"spring-kafka\": \"755a68f64a40\", \"debezium\": \"02810e25b19c\", \"scenario-cards\": \"8573f0003506\", \"spring-framework\": \"82a6b40b9366\"}"
+      }
+    },
+    "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+    "datasets": {
+      "knowledge/eval/ranking_probe.yaml": "a3a552c17187a6e9829a6bb2fdf459cd90a9c790422aa23c249ffa95ee059b0a",
+      "knowledge/eval/ranking_validation.yaml": "af0c2a5fa134e1af129924a5cec52b87d76285b63ad64c8f5f4b13bb72d6a6ae"
+    }
+  },
+  "candidate": {
+    "name": "single-path-credit",
+    "candidates": 30,
+    "experiment": {
+      "name": "single-path-credit",
+      "imputed_keyword_rank": 31,
+      "imputed_vector_rank": 31,
+      "keyword_candidate_depth": null,
+      "keyword_score_depth": null,
+      "vector_candidate_depth": null,
+      "vector_score_depth": null,
+      "keyword_rescue_depth": null,
+      "vector_rescue_max_rank": null,
+      "rescue_credit_rank": null,
+      "vector_distance_max": null,
+      "vector_distance_credit": null
+    },
+    "rationale": "任一单路候选为缺席的另一路补假定第 31 名 RRF 信号"
+  },
+  "results": [
+    {
+      "q": "PostgreSQL 索引失效",
+      "gold": "Indices › Indexes › Examining Index Usage",
+      "rank": 1,
+      "passed": true,
+      "top": [
+        "postgresql | Indices › Indexes › Examining Index Usage",
+        "postgresql | Custom Rmgr › Custom WAL Resource Managers",
+        "postgresql | Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+        "postgresql | Lobj › Large Objects › Client Interfaces › Truncating a Large Object",
+        "postgresql | Indices › Indexes › Examining Index Usage"
+      ],
+      "fts_query": "\"索引\" OR \"失效\" OR \"索引失效\" OR \"index\" OR \"usage\" OR \"index usage\" OR \"examining\" OR \"examining index usage\" OR \"forcing\" OR \"forcing index usage\" OR \"sequential\" OR \"scan\" OR \"sequential scan\" OR \"enable_seqscan\" OR \"planner\" OR \"cost\" OR \"estimate\" OR \"cost estimate\" OR \"explain\" OR \"analyze\" OR \"explain analyze\""
+    },
+    {
+      "q": "PostgreSQL 的 B-tree 索引什么时候会失效",
+      "gold": "Indices › Indexes › Examining Index Usage",
+      "rank": 1,
+      "passed": true,
+      "top": [
+        "postgresql | Indices › Indexes › Examining Index Usage",
+        "postgresql | Btree › B-Tree Indexes › Implementation",
+        "postgresql | Perform › Performance Tips › Using EXPLAIN › EXPLAIN ANALYZE",
+        "postgresql | Mvcc › Concurrency Control › Locking and Indexes",
+        "postgresql | Indices › Indexes › Examining Index Usage"
+      ],
+      "fts_query": "\"的\" OR \"b\" OR \"tree\" OR \"索引\" OR \"什么\" OR \"时候\" OR \"会\" OR \"失效\" OR \"index\" OR \"usage\" OR \"index usage\" OR \"examining\" OR \"examining index usage\" OR \"forcing\" OR \"forcing index usage\" OR \"sequential\" OR \"scan\" OR \"sequential scan\" OR \"enable_seqscan\" OR \"planner\" OR \"cost\" OR \"estimate\" OR \"cost estimate\" OR \"explain\" OR \"analyze\" OR \"explain analyze\""
+    },
+    {
+      "q": "Spring Boot 配置优先级是怎样的",
+      "gold": "External Config › Externalized Configuration",
+      "rank": 1,
+      "passed": true,
+      "top": [
+        "spring-boot | External Config › Externalized Configuration",
+        "spring-boot | Reactive › Reactive Web Applications › The \"`Spring WebFlux Framework`\" › Welcome Page",
+        "spring-boot | External Config › Externalized Configuration › Type-safe Configuration Properties › Relaxed Binding › Caching",
+        "spring-boot | Servlet › Servlet Web Applications › The \"`Spring Web MVC Framework`\" › Welcome Page",
+        "spring-boot | External Config › Externalized Configuration › JSON Application Properties"
+      ],
+      "fts_query": "\"boot\" OR \"配置\" OR \"优先\" OR \"优先级\" OR \"配置优先级\" OR \"是\" OR \"怎样\" OR \"的\" OR \"externalized\" OR \"configuration\" OR \"externalized configuration\" OR \"property\" OR \"source\" OR \"order\" OR \"property source order\" OR \"precedence\" OR \"configuration precedence\""
+    },
+    {
+      "q": "Kafka 消费者重复消费怎么排查",
+      "gold": "Design › Message Delivery Semantics",
+      "rank": 7,
+      "passed": false,
+      "top": [
+        "kafka | Design › The Consumer › Static Membership",
+        "kafka | Quick Start › Step 6: Import/export your data as streams of events with Kafka Connect",
+        "kafka | Kafka Streams Groups Tool › What the Streams Groups tool does",
+        "kafka | Design › The Consumer",
+        "kafka | Configuring a Streams Application › Configuration parameter reference › Optional configuration parameters › rocksdb.config.setter"
+      ],
+      "fts_query": "\"消费\" OR \"消费者\" OR \"重复\" OR \"重复消费\" OR \"怎么\" OR \"排查\" OR \"consumer\" OR \"duplicate\" OR \"consumption\" OR \"duplicate consumption\" OR \"at-least-once\" OR \"reprocessing\""
+    },
+    {
+      "q": "Kafka 分区副本的同步机制是什么",
+      "gold": "Design › Replication",
+      "rank": 1,
+      "passed": true,
+      "top": [
+        "kafka | Design › Replication › Unclean leader election: What if they all die?",
+        "kafka | Use Cases › Commit Log",
+        "kafka | Design › Replication",
+        "kafka | Basic Kafka Operations › Limiting bandwidth usage during data migration",
+        "kafka | Design › Replication › Availability and Durability Guarantees"
+      ],
+      "fts_query": "\"分区\" OR \"副本\" OR \"的\" OR \"同步\" OR \"机制\" OR \"同步机\" OR \"同步机制\" OR \"是\" OR \"什么\" OR \"partition\" OR \"partitioning\" OR \"in-sync\" OR \"replica\" OR \"in-sync replica\" OR \"isr\" OR \"replication\" OR \"leader\" OR \"follower\" OR \"leader follower\" OR \"protocol\" OR \"replication protocol\""
+    },
+    {
+      "q": "Kubernetes liveness probe 配置参数有哪些",
+      "gold": "Liveness, Readiness, and Startup Probes › Configuration fields",
+      "rank": 16,
+      "passed": false,
+      "top": [
+        "kubernetes | Pod Lifecycle › Container probes › Liveness probe",
+        "kubernetes | Liveness, Readiness, and Startup Probes › Types of probe › Startup probe",
+        "kubernetes | Configure Liveness, Readiness and Startup Probes › Define a TCP liveness probe",
+        "kubernetes | Liveness, Readiness, and Startup Probes › Types of probe",
+        "kubernetes | Liveness, Readiness, and Startup Probes › When to use each probe › When should you use a liveness probe?"
+      ],
+      "fts_query": "\"liveness\" OR \"probe\" OR \"配置\" OR \"参数\" OR \"有\" OR \"哪些\""
+    },
+    {
+      "q": "Debezium Outbox 表要包含哪些字段才能保证事件和业务数据一致",
+      "gold": "Outbox Event Router › Basic outbox table",
+      "rank": 4,
+      "passed": true,
+      "top": [
+        "debezium | Applying Transformations Selectively › Defining SMT predicates",
+        "debezium | Outbox Event Router › Payload serialization format › Using JSON as the payload format › Expanding escaped JSON String as JSON",
+        "debezium | Outbox Event Router › Example outbox message",
+        "debezium | Outbox Event Router › Basic outbox table",
+        "debezium | Outbox Event Router"
+      ],
+      "fts_query": "\"outbox\" OR \"表要\" OR \"包含\" OR \"哪些\" OR \"字\" OR \"段\" OR \"才能\" OR \"保证\" OR \"事件\" OR \"和\" OR \"业务\" OR \"数据\" OR \"一致\""
+    },
+    {
+      "q": "Spring Kafka 消费失败怎么配置重试和死信队列",
+      "gold": "Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+      "rank": 3,
+      "passed": true,
+      "top": [
+        "spring-kafka | Streams › Apache Kafka Streams Support › Dead Letter Queue Topic Name Property",
+        "spring-kafka | Kafka consumer retry and dead-letter topics in Spring Kafka › Retrying is not always the right response to an exception",
+        "spring-kafka | Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+        "spring-kafka | Whats New › What's new? › What's New in 4.1 Since 4.0 › Kafka Streams Native DLQ Support",
+        "spring-kafka | Kafka consumer retry and dead-letter topics in Spring Kafka › Non-blocking retries move the wait off the partition's consumer thread"
+      ],
+      "fts_query": "\"消费\" OR \"失败\" OR \"怎么\" OR \"配置\" OR \"重试\" OR \"和\" OR \"队列\" OR \"死信队列\" OR \"dead\" OR \"letter\" OR \"queue\" OR \"dead letter queue\" OR \"retry\" OR \"retries\" OR \"backoff\""
+    },
+    {
+      "q": "Kafka 消费失败怎么配置重试和死信队列",
+      "gold": "Retry Config › Configuration › Using the `@RetryableTopic` annotation",
+      "rank": 10,
+      "passed": false,
+      "top": [
+        "spring-kafka | Streams › Apache Kafka Streams Support › Dead Letter Queue Topic Name Property",
+        "spring-kafka | Kafka consumer retry and dead-letter topics in Spring Kafka › Retrying is not always the right response to an exception",
+        "spring-kafka | How The Pattern Works",
+        "spring-kafka | Annotation Error Handling › Handling Exceptions › Batch Listener Error Handling with Dead Letter Topics › Configuring Dead Letter Topics for Batch Listeners",
+        "spring-kafka | Annotation Error Handling › Handling Exceptions › Delivery Attempts Header for batch listener"
+      ],
+      "fts_query": "\"消费\" OR \"失败\" OR \"怎么\" OR \"配置\" OR \"重试\" OR \"和\" OR \"队列\" OR \"死信队列\" OR \"dead\" OR \"letter\" OR \"queue\" OR \"dead letter queue\" OR \"retry\" OR \"retries\" OR \"backoff\""
+    },
+    {
+      "q": "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快",
+      "gold": "Indices › Indexes › Index-Only Scans and Covering Indexes",
+      "rank": 3,
+      "passed": true,
+      "top": [
+        "postgresql | Diagnosing a slow SQL query on a production PostgreSQL server › A covering index only avoids heap access while the visibility map says those pages are all-visible",
+        "postgresql | Custom Rmgr › Custom WAL Resource Managers",
+        "postgresql | Indices › Indexes › Index-Only Scans and Covering Indexes",
+        "kafka | Basic Kafka Operations › Limiting bandwidth usage during data migration › Safe usage of throttled replication",
+        "postgresql | Maintenance › Routine Database Maintenance Tasks › Routine Vacuuming › Updating the Visibility Map"
+      ],
+      "fts_query": "\"已经\" OR \"建了\" OR \"包含\" OR \"查询\" OR \"所有\" OR \"列\" OR \"的\" OR \"覆盖\" OR \"索引\" OR \"覆盖索引\" OR \"什么\" OR \"为什么\" OR \"执行\" OR \"时\" OR \"还是\" OR \"要\" OR \"回表\" OR \"访问\" OR \"堆\" OR \"没有\" OR \"变\" OR \"快\" OR \"heap\" OR \"fetch\" OR \"heap fetch\" OR \"fetches\" OR \"heap fetches\" OR \"visibility\" OR \"map\" OR \"visibility map\" OR \"index-only\" OR \"scan\" OR \"index-only scan\" OR \"table's\" OR \"table's heap\" OR \"covering\" OR \"index\" OR \"covering index\" OR \"include\" OR \"secondary\" OR \"secondary index\""
+    },
+    {
+      "q": "Spring 事务里抛了受检异常为什么没有回滚",
+      "gold": "Rolling Back › Rolling Back a Declarative Transaction",
+      "rank": 1,
+      "passed": true,
+      "top": [
+        "spring-framework | Rolling Back › Rolling Back a Declarative Transaction",
+        "spring-boot | Spring Boot Applications › Testing Spring Boot Applications › Auto-configured Spring MVC Tests",
+        "spring-framework | Annotations › Using `@Transactional` › `@Transactional` Settings",
+        "spring-boot | Spring Boot Applications › Testing Spring Boot Applications › Detecting Test Configuration",
+        "spring-framework | Annotations › Using `@Transactional` › `@Transactional` Settings"
+      ],
+      "fts_query": "\"事务\" OR \"里\" OR \"抛\" OR \"了\" OR \"受检\" OR \"异常\" OR \"什么\" OR \"为什么\" OR \"没有\" OR \"回滚\" OR \"transaction\" OR \"transactional\" OR \"rollback\" OR \"rollbackfor\""
+    },
+    {
+      "q": "同一个类里的方法互相调用时 @Transactional 为什么不生效",
+      "gold": "Annotations › Using `@Transactional`",
+      "rank": 20,
+      "passed": false,
+      "top": [
+        "spring-framework | Programmatic › Programmatic Transaction Management › Using the `TransactionalOperator`",
+        "spring-framework | Annotations › Using `@Transactional` › Multiple Transaction Managers with `@Transactional`",
+        "spring-framework | Annotations › Using `@Transactional` › Custom Composed Annotations",
+        "spring-framework | Annotations › Using `@Transactional` › `@Transactional` Settings",
+        "spring-framework | Annotations › Using `@Transactional`"
+      ],
+      "fts_query": "\"同一\" OR \"一个\" OR \"同一个\" OR \"类里\" OR \"的\" OR \"方法\" OR \"互相\" OR \"调用\" OR \"时\" OR \"transactional\" OR \"什么\" OR \"为什么\" OR \"不\" OR \"生效\""
+    },
+    {
+      "q": "Spring 事务传播行为 REQUIRES_NEW 和 REQUIRED 有什么区别",
+      "gold": "Tx Propagation › Transaction Propagation › Understanding `PROPAGATION_REQUIRES_NEW`",
+      "rank": 1,
+      "passed": true,
+      "top": [
+        "spring-framework | Tx Propagation › Transaction Propagation › Understanding `PROPAGATION_REQUIRES_NEW`",
+        "spring-framework | Annotations › Using `@Transactional` › `@Transactional` Settings",
+        "spring-framework | Annotations › Using `@Transactional` › `@Transactional` Settings",
+        "spring-boot | Cloud Native Buildpacks",
+        "spring-framework | Annotations › Using `@Transactional` › `@Transactional` Settings"
+      ],
+      "fts_query": "\"事务\" OR \"传播\" OR \"行为\" OR \"requires\" OR \"_\" OR \"new\" OR \"和\" OR \"required\" OR \"有\" OR \"什么\" OR \"区别\" OR \"transaction\" OR \"transactional\""
+    }
+  ],
+  "comparison_to_baseline": {
+    "regression_count": 1,
+    "regressions": [
+      {
+        "q": "Kubernetes liveness probe 配置参数有哪些",
+        "baseline_rank": 12,
+        "candidate_rank": 16
+      }
+    ],
+    "improvement_count": 4,
+    "improvements": [
+      {
+        "q": "Spring Kafka 消费失败怎么配置重试和死信队列",
+        "baseline_rank": 7,
+        "candidate_rank": 3
+      },
+      {
+        "q": "Kafka 消费失败怎么配置重试和死信队列",
+        "baseline_rank": 14,
+        "candidate_rank": 10
+      },
+      {
+        "q": "Spring 事务里抛了受检异常为什么没有回滚",
+        "baseline_rank": 2,
+        "candidate_rank": 1
+      },
+      {
+        "q": "同一个类里的方法互相调用时 @Transactional 为什么不生效",
+        "baseline_rank": null,
+        "candidate_rank": 20
+      }
+    ],
+    "unchanged_count": 8,
+    "unchanged": [
+      "PostgreSQL 索引失效",
+      "PostgreSQL 的 B-tree 索引什么时候会失效",
+      "Spring Boot 配置优先级是怎样的",
+      "Kafka 消费者重复消费怎么排查",
+      "Kafka 分区副本的同步机制是什么",
+      "Debezium Outbox 表要包含哪些字段才能保证事件和业务数据一致",
+      "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快",
+      "Spring 事务传播行为 REQUIRES_NEW 和 REQUIRED 有什么区别"
+    ]
+  }
+}
