@@ -56,6 +56,7 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
         "vector-distance-credit-0.75-0.10", "vector-distance-credit-0.75-0.20",
         "relative-vector-credit-0.002", "relative-vector-credit-0.005",
         "weak-corroboration-cap-5", "weak-corroboration-cap-10",
+        "source-url-page-fusion",
     }
     assert by_name["single-path-credit"].experiment.imputed_keyword_rank == 31
     assert by_name["single-path-credit"].experiment.imputed_vector_rank == 31
@@ -89,6 +90,7 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
         "weak-corroboration-cap-5": 5,
         "weak-corroboration-cap-10": 10,
     }
+    assert by_name["source-url-page-fusion"].experiment.source_url_page_fusion is True
 
 
 def test_audit_embeds_provenance_candidate_and_computed_comparison():
@@ -379,6 +381,56 @@ def test_weak_corroboration_cap_rejects_invalid_values_before_search(monkeypatch
         search_mod.hybrid_search(
             object(), "q", [0.0],
             experiment=search_mod.FusionExperiment("bad", weak_corroboration_rank_max=invalid),
+        )
+
+    assert called == []
+
+
+def test_source_url_page_fusion_joins_real_route_signals_from_sibling_chunks(monkeypatch):
+    """同页两块分别命中两路时，页面融合返回语义最近的向量块而非伪造单块名次。"""
+    from services.retrieval import search as search_mod
+
+    rows = {
+        1: {"id": 1, "text": "keyword sibling", "title_path": "keyword", "source_url": "same-url",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+        2: {"id": 2, "text": "vector representative", "title_path": "vector", "source_url": "same-url",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+        3: {"id": 3, "text": "two-route competitor", "title_path": "competitor", "source_url": "other-url",
+            "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+            "technology": "t", "content_type": "prose", "token_estimate": 1},
+    }
+
+    class Store:
+        def execute(self, sql, params=()):
+            return [rows[rid] for rid in params]
+
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: [(1, -1.0), (3, -0.9)])
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.1), (3, 0.2)])
+
+    baseline = search_mod.hybrid_search(Store(), "q", [0.0], limit=3)
+    grouped = search_mod.hybrid_search(
+        Store(), "q", [0.0], limit=3,
+        experiment=search_mod.FusionExperiment("page", source_url_page_fusion=True),
+    )
+
+    assert [hit.rowid for hit in baseline] == [3, 1, 2]
+    assert [hit.rowid for hit in grouped] == [2, 3]
+    assert grouped[0].keyword_rank is None and grouped[0].vector_rank == 1
+
+
+def test_source_url_page_fusion_rejects_nonboolean_flag_before_search(monkeypatch):
+    from services.retrieval import search as search_mod
+
+    called = []
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: called.append("keyword"))
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: called.append("vector"))
+
+    with pytest.raises(ValueError, match="页面级融合"):
+        search_mod.hybrid_search(
+            object(), "q", [0.0],
+            experiment=search_mod.FusionExperiment("bad", source_url_page_fusion=1),
         )
 
     assert called == []

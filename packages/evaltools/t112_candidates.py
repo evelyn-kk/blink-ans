@@ -129,6 +129,11 @@ CANDIDATES = (
         experiment=FusionExperiment("weak-corroboration-cap-10", weak_corroboration_rank_max=10),
         rationale="与 cap-5 同一弱双路佐证抑制规则，但把“强佐证”预登记为前 10；用于检验规则边界而非重调 RRF_K",
     ),
+    Candidate(
+        "source-url-page-fusion",
+        experiment=FusionExperiment("source-url-page-fusion", source_url_page_fusion=True),
+        rationale="同一官方 URL 的关键词与向量最佳实际 RRF 信号按页面聚合，返回该页向量最接近的代表块；检验切块是否把同页佐证分散到不同块，而不补单块缺席名次",
+    ),
 )
 
 

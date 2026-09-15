@@ -187,6 +187,7 @@ class FusionExperiment:
     vector_distance_credit: float | None = None
     relative_vector_credit: float | None = None
     weak_corroboration_rank_max: int | None = None
+    source_url_page_fusion: bool = False
 
 
 def _pack(vec: Sequence[float]) -> bytes:
@@ -384,9 +385,13 @@ def hybrid_search(
         or experiment.weak_corroboration_rank_max <= 0
     ):
         raise ValueError("弱双路佐证名次上限必须是正整数")
+    if experiment and not isinstance(experiment.source_url_page_fusion, bool):
+        raise ValueError("页面级融合开关必须是布尔值")
 
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
+    page_keyword_scores: dict[int, float] = {}
+    page_vector_scores: dict[int, float] = {}
     for tech, tech_weight in techs:
         keyword_limit = max(candidates, experiment.keyword_candidate_depth) if experiment and experiment.keyword_candidate_depth else candidates
         keyword_score_depth = experiment.keyword_score_depth if experiment and experiment.keyword_score_depth else candidates
@@ -409,6 +414,15 @@ def hybrid_search(
         # 且满足向量强相关条件时带着它自己的真实 rank 加入。
         _rrf_accumulate(scores, kw[:keyword_score_depth], KEYWORD_WEIGHT * tech_weight, RRF_K, 1)
         _rrf_accumulate(scores, vec[:vector_score_depth], VECTOR_WEIGHT * tech_weight, RRF_K, 2)
+        if experiment and experiment.source_url_page_fusion:
+            for rank, (rid, _) in enumerate(kw[:keyword_score_depth], 1):
+                page_keyword_scores[rid] = page_keyword_scores.get(rid, 0.0) + (
+                    KEYWORD_WEIGHT * tech_weight / (RRF_K + rank)
+                )
+            for rank, (rid, _) in enumerate(vec[:vector_score_depth], 1):
+                page_vector_scores[rid] = page_vector_scores.get(rid, 0.0) + (
+                    VECTOR_WEIGHT * tech_weight / (RRF_K + rank)
+                )
         if not experiment:
             continue
 
@@ -492,6 +506,30 @@ def hybrid_search(
             f"SELECT * FROM chunks WHERE id IN ({','.join('?' * len(ids))})", ids
         )
     }
+    if experiment and experiment.source_url_page_fusion:
+        # 同一官方 URL 被切成多个块时，关键词命中和语义命中可能落在不同块；
+        # 按 URL 各取两路的最佳**实际** RRF 信号再融合，并只返回向量最接近
+        # （无向量时关键词最靠前）的一个代表块。它不把某块未出现的路伪造成
+        # 它自己的名次，而是明确把页面作为证据单位。
+        pages: dict[str, list] = {}
+        for rid, (score, keyword_rank, vector_rank) in fused.items():
+            row = rows.get(rid)
+            if row is None:
+                continue
+            page = pages.setdefault(row["source_url"], [0.0, 0.0, None, None])
+            page[0] = max(page[0], page_keyword_scores.get(rid, 0.0))
+            page[1] = max(page[1], page_vector_scores.get(rid, 0.0))
+            vector_key = page_vector_scores.get(rid, 0.0)
+            keyword_key = page_keyword_scores.get(rid, 0.0)
+            representative_key = (vector_key > 0, vector_key, keyword_key, score, -rid)
+            if page[2] is None or representative_key > page[3]:
+                page[2] = rid
+                page[3] = representative_key
+        ordered = [
+            (rid, (keyword_score + vector_score, fused[rid][1], fused[rid][2]))
+            for keyword_score, vector_score, rid, _ in pages.values()
+        ]
+        ordered.sort(key=lambda item: -item[1][0])
 
     hits: list[Hit] = []
     used = 0
