@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -160,6 +161,35 @@ def test_offline_sync_passes_preflight_identity_to_collect_once(monkeypatch, tmp
     pl.sync(offline=True, log=lambda *_: None)
     assert calls == [src]
     assert received == [identity]
+
+
+def test_real_offline_sync_uses_two_local_git_queries_per_source(monkeypatch, tmp_path):
+    """CR-135：完整 sync 必须实际经过 fetch，而非替换 collect_chunks。"""
+    from services.sync import fetch as fetch_mod
+    from services.sync import pipeline as pl
+
+    src = _offline_source()
+    root = tmp_path / src.slug
+    root.mkdir()
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True)
+    (root / "LICENSE").write_text("MIT License\nPermission is hereby granted, free of charge", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "a.md").write_text("# Cached\n\nOffline cache evidence.", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "cache"], cwd=root, check=True, capture_output=True)
+    monkeypatch.setattr(fetch_mod, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(store_mod, "INDEX_DIR", tmp_path / "index")
+    monkeypatch.setattr(pl, "_resolve_sources", lambda *_args: [src])
+    monkeypatch.setattr(pl, "Embedder", lambda: _StubEmbedder())
+    monkeypatch.setattr(pl, "run_regression", lambda *_args: (True, [], []))
+    calls = []
+    original = fetch_mod._git
+    monkeypatch.setattr(fetch_mod, "_git", lambda *args, **kwargs: calls.append(args) or original(*args, **kwargs))
+    rep = pl.sync(offline=True, activate=False, log=lambda *_: None)
+    assert rep.sources[0].commit
+    assert calls == [("rev-parse", "--is-inside-work-tree"), ("rev-parse", "HEAD")]
 
 
 # ---------- 合并更新：搬运底座 ----------
