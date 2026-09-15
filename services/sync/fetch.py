@@ -67,12 +67,16 @@ def _git(*args: str, cwd: Path | None = None) -> str:
 
 
 def validate_cached_source(src: Source, root: Path | None = None) -> Path:
+    root, _ = cached_source_head(src, root)
+    return root
+
+
+def cached_source_head(src: Source, root: Path | None = None) -> tuple[Path, str]:
     root = (root or DATA_ROOT) / src.slug
     if not (root / ".git").exists():
         raise FetchError(f"{src.id}: 离线同步需要已有 Git 缓存: {root}")
     _git("rev-parse", "--is-inside-work-tree", cwd=root)
-    _git("rev-parse", "HEAD", cwd=root)
-    return root
+    return root, _git("rev-parse", "HEAD", cwd=root)[:12]
 
 
 def clone_or_update(src: Source, root: Path | None = None, *, offline: bool = False) -> Path:
@@ -180,6 +184,10 @@ def collect_files(src: Source, root: Path) -> list[Path]:
 
 def fetch(src: Source, root: Path | None = None, *, offline: bool = False) -> Fetched:
     """完整拉取流程：克隆 → 校验许可 → 返回工作树信息。"""
-    work = clone_or_update(src, root, offline=offline)
+    if offline:
+        work, commit = cached_source_head(src, root)
+    else:
+        work = clone_or_update(src, root)
+        commit = head_commit(work)
     spdx = verify_license(src, work)
-    return Fetched(source=src, root=work, commit=head_commit(work), license_verified=spdx)
+    return Fetched(source=src, root=work, commit=commit, license_verified=spdx)

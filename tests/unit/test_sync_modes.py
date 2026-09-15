@@ -22,7 +22,7 @@ from services.retrieval.store import ChunkStore, IndexBuilder, IndexError_  # no
 from services.sync.pipeline import EMBED_BATCH, _add_with_cache, _resolve_sources, run_regression  # noqa: E402
 from services.sync import version as transform_version_mod  # noqa: E402
 from services.sync.version import content_transform_version  # noqa: E402
-from services.sync.fetch import FetchError, clone_or_update  # noqa: E402
+from services.sync.fetch import FetchError, clone_or_update, fetch  # noqa: E402
 from services.sync.registry import Source  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -103,6 +103,18 @@ def test_default_cached_source_keeps_fetch_behavior(monkeypatch, tmp_path):
     monkeypatch.setattr("services.sync.fetch._git", lambda *args, **kwargs: calls.append(args) or "")
     assert clone_or_update(_offline_source(), tmp_path) == root
     assert calls[0][:2] == ("fetch", "--depth")
+
+
+def test_complete_offline_fetch_uses_only_two_local_git_commands(monkeypatch, tmp_path):
+    root = tmp_path / "cached"
+    (root / ".git").mkdir(parents=True)
+    (root / "LICENSE").write_text("MIT License\nPermission is hereby granted, free of charge", encoding="utf-8")
+    (root / "docs").mkdir()
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr("services.sync.fetch._git", lambda *args, **kwargs: calls.append(args) or "abc123456789")
+    got = fetch(_offline_source(), tmp_path, offline=True)
+    assert got.commit == "abc123456789"
+    assert calls == [("rev-parse", "--is-inside-work-tree"), ("rev-parse", "HEAD")]
 
 
 def test_offline_preflight_fails_before_builder_or_network_work(monkeypatch):
