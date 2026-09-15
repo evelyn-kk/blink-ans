@@ -75,3 +75,24 @@ def test_timeout_does_not_overwrite_a_prior_summary(tmp_path):
 
     assert result["status"] == "timeout"
     assert json.loads(output.read_text(encoding="utf-8")) == {"previous": "success"}
+
+
+def test_exit_zero_nested_private_field_fails_closed_without_overwriting_sentinel(tmp_path):
+    """行为回归：换名私有字段藏在 sample，exit 0 也绝不能发布。"""
+    output = tmp_path / "existing.json"
+    output.write_text('{"previous": "success"}\n', encoding="utf-8")
+
+    def exit_zero_with_renamed_private_text(command, **_kwargs):
+        candidate = Path(command[command.index("--public-summary") + 1])
+        payload = _public_payload("clip", False, 1)
+        payload["results"][0]["samples"][0]["private_note"] = "renamed transcript"
+        candidate.write_text(json.dumps(payload), encoding="utf-8")
+        return type("Result", (), {"returncode": 0})()
+
+    result = run_asr_controlled.run_case(
+        manifest=tmp_path / "private.yaml", clip_id="clip", glossary=False, runs=1, timeout_s=1,
+        output_path=output, subprocess_run=exit_zero_with_renamed_private_text,
+    )
+
+    assert result["status"] == "incomplete_public_summary"
+    assert json.loads(output.read_text(encoding="utf-8")) == {"previous": "success"}

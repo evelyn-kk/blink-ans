@@ -19,7 +19,12 @@ from typing import Any, Callable
 from bench_asr import duration_s, load_real_manifest
 
 BENCH_ASR = Path(__file__).with_name("bench_asr.py")
-SENSITIVE_KEYS = {"reference_text", "transcribed_text", "transcription_samples", "initial_prompt"}
+TOP_LEVEL_KEYS = {"model", "runtime", "language", "input_kind", "initial_prompt_tokens", "results"}
+RESULT_KEYS = {
+    "clip", "language", "input_kind", "audio_seconds", "reference_sha256", "initial_prompt_tokens",
+    "glossary_biased", "runs", "cold", "median", "samples",
+}
+SAMPLE_KEYS = {"transcribe_s", "rtf", "word_error_rate"}
 
 
 def default_timeout_s(audio_seconds: float, runs: int) -> int:
@@ -29,18 +34,63 @@ def default_timeout_s(audio_seconds: float, runs: int) -> int:
 
 def _assert_public_summary(path: Path, clip_id: str, glossary: bool, runs: int) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if set(payload) != {"model", "runtime", "language", "input_kind", "initial_prompt_tokens", "results"}:
-        raise ValueError("公开摘要顶层字段不完整或含未登记字段")
-    if len(payload["results"]) != 1:
+    _exact_object(payload, TOP_LEVEL_KEYS, "顶层")
+    for key in ("model", "runtime", "language", "input_kind"):
+        _string(payload[key], f"顶层.{key}")
+    _nonnegative_int(payload["initial_prompt_tokens"], "顶层.initial_prompt_tokens")
+    if not isinstance(payload["results"], list) or len(payload["results"]) != 1:
         raise ValueError("公开摘要必须恰好包含一个 clip")
     result = payload["results"][0]
-    if result.get("clip") != clip_id or result.get("glossary_biased") is not glossary:
+    _exact_object(result, RESULT_KEYS, "result")
+    for key in ("clip", "language", "input_kind", "reference_sha256"):
+        _string(result[key], f"result.{key}")
+    for key in ("audio_seconds",):
+        _nonnegative_number(result[key], f"result.{key}")
+    _nonnegative_int(result["initial_prompt_tokens"], "result.initial_prompt_tokens")
+    if type(result["glossary_biased"]) is not bool:
+        raise ValueError("result.glossary_biased 必须为 bool")
+    _positive_int(result["runs"], "result.runs")
+    for key in ("cold", "median"):
+        _sample(result[key], f"result.{key}")
+    if not isinstance(result["samples"], list):
+        raise ValueError("result.samples 必须为 list")
+    for index, sample in enumerate(result["samples"]):
+        _sample(sample, f"result.samples[{index}]")
+    if result["clip"] != clip_id or result["glossary_biased"] is not glossary:
         raise ValueError("公开摘要的 clip 或 arm 与请求不一致")
-    if result.get("runs") != runs or len(result.get("samples", [])) != runs:
+    if result["runs"] != runs or len(result["samples"]) != runs:
         raise ValueError("公开摘要没有完整记录请求次数")
-    encoded = json.dumps(payload, ensure_ascii=False)
-    if any(f'"{key}"' in encoded for key in SENSITIVE_KEYS):
-        raise ValueError("公开摘要泄露了私有文本字段")
+
+
+def _exact_object(value: Any, allowed: set[str], where: str) -> None:
+    if not isinstance(value, dict) or set(value) != allowed:
+        raise ValueError(f"{where} 字段不完整或含未登记字段")
+
+
+def _string(value: Any, where: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{where} 必须为非空字符串")
+
+
+def _nonnegative_number(value: Any, where: str) -> None:
+    if type(value) not in (int, float) or value < 0:
+        raise ValueError(f"{where} 必须为非负数")
+
+
+def _nonnegative_int(value: Any, where: str) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{where} 必须为非负整数")
+
+
+def _positive_int(value: Any, where: str) -> None:
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{where} 必须为正整数")
+
+
+def _sample(value: Any, where: str) -> None:
+    _exact_object(value, SAMPLE_KEYS, where)
+    for key in SAMPLE_KEYS:
+        _nonnegative_number(value[key], f"{where}.{key}")
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
