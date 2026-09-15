@@ -259,26 +259,35 @@ def test_embedding_writes_are_bounded_to_embed_batch():
     assert builder.batch_sizes == [EMBED_BATCH, EMBED_BATCH, 1]
 
 
-def test_embedding_progress_counts_actual_persisted_chunks_not_duplicate_inputs():
-    """CR-140：SQLite 去重的 batch 不能被状态写成“已嵌入”。"""
-    class DuplicateBuilder:
-        def add(self, chunks, vectors):
-            assert len(chunks) == len(vectors) == EMBED_BATCH
-            return 0  # 模拟 SQLite 唯一约束将整批重复块跳过
+def test_sync_status_counts_real_sqlite_duplicate_rewrites_as_zero(monkeypatch, tmp_path):
+    """CR-141：完整 sync 重写相同 (source_url, checksum) 时 status 必须为 0。"""
+    from services.sync import pipeline as pl
 
-    class Embedder:
-        def encode(self, texts):
-            return [[0.0] * DIM for _ in texts]
+    source = Source(
+        id="duplicate", project="duplicate", technology="java", format="markdown", locale="en",
+        paths=("docs",), repo="https://example.invalid/duplicate.git", ref="main", license="MIT",
+        license_file="LICENSE", base_url="https://example.invalid",
+    )
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    monkeypatch.setattr(pl, "_resolve_sources", lambda *_args: [source])
+    chunks = [_chunk(source.project, source.technology, i, f"duplicate chunk {i}")
+              for i in range(EMBED_BATCH)]
+    builder = IndexBuilder("duplicate")
+    assert builder.add(chunks, [_vec(i) for i in range(EMBED_BATCH)]) == EMBED_BATCH
+    monkeypatch.setattr(pl, "IndexBuilder", lambda: builder)
 
-    class Cache:
-        def get(self, _checksum):
-            return None
+    def collect(src, *_args, **_kwargs):
+        assert src == source
+        return chunks, pl.SourceResult(source_id=source.id, commit="aaa")
 
-    progress: list[int] = []
-    chunks = [_chunk("duplicate", "java", i, "same duplicate text") for i in range(EMBED_BATCH)]
-    assert _add_with_cache(DuplicateBuilder(), chunks, Embedder(), Cache(), progress.append) == 0
-    assert progress == [0]
-
+    monkeypatch.setattr(pl, "collect_chunks", collect)
+    report = pl.sync(activate=False, reuse_embeddings=False, log=lambda *_: None)
+    status = json.loads(report.diagnostics_path.read_text(encoding="utf-8"))
+    assert report.total_chunks == 0
+    assert report.sources[0].chunks == 0
+    assert status["stage"] == "completed_not_activated"
+    assert status["source_chunks"] == EMBED_BATCH
+    assert status["source_chunks_embedded"] == 0
 
 @pytest.fixture
 def base_index(tmp_path, monkeypatch) -> Path:
