@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
 
@@ -92,6 +94,28 @@ def test_exit_zero_nested_private_field_fails_closed_without_overwriting_sentine
     result = run_asr_controlled.run_case(
         manifest=tmp_path / "private.yaml", clip_id="clip", glossary=False, runs=1, timeout_s=1,
         output_path=output, subprocess_run=exit_zero_with_renamed_private_text,
+    )
+
+    assert result["status"] == "incomplete_public_summary"
+    assert json.loads(output.read_text(encoding="utf-8")) == {"previous": "success"}
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_exit_zero_nonfinite_sample_values_fail_closed_without_overwriting_sentinel(tmp_path, non_finite):
+    """行为回归：JSON 宽松解析的三种非有限数均不能被公开发布。"""
+    output = tmp_path / "existing.json"
+    output.write_text('{"previous": "success"}\n', encoding="utf-8")
+
+    def exit_zero_with_nonfinite_number(command, **_kwargs):
+        candidate = Path(command[command.index("--public-summary") + 1])
+        payload = _public_payload("clip", False, 1)
+        payload["results"][0]["samples"][0]["transcribe_s"] = non_finite
+        candidate.write_text(json.dumps(payload), encoding="utf-8")
+        return type("Result", (), {"returncode": 0})()
+
+    result = run_asr_controlled.run_case(
+        manifest=tmp_path / "private.yaml", clip_id="clip", glossary=False, runs=1, timeout_s=1,
+        output_path=output, subprocess_run=exit_zero_with_nonfinite_number,
     )
 
     assert result["status"] == "incomplete_public_summary"

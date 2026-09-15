@@ -73,8 +73,8 @@ def _string(value: Any, where: str) -> None:
 
 
 def _nonnegative_number(value: Any, where: str) -> None:
-    if type(value) not in (int, float) or value < 0:
-        raise ValueError(f"{where} 必须为非负数")
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{where} 必须为有限非负数")
 
 
 def _nonnegative_int(value: Any, where: str) -> None:
