@@ -276,11 +276,16 @@ def test_vector_distance_credit_uses_actual_distance_without_imputing_a_missing_
     ("vector_distance_credit", float("nan")),
     ("vector_distance_credit", float("inf")),
     ("vector_distance_credit", float("-inf")),
+    ("relative_vector_credit", float("nan")),
+    ("relative_vector_credit", float("inf")),
+    ("relative_vector_credit", float("-inf")),
     ("vector_distance_max", 0.0),
     ("vector_distance_credit", -0.10),
+    ("relative_vector_credit", 0.0),
+    ("relative_vector_credit", -0.10),
 ])
-def test_vector_distance_credit_rejects_nonfinite_parameters_before_search(monkeypatch, field, invalid):
-    """CR-127：非有限距离参数不能进入候选查询或产生不可排序融合分。"""
+def test_experiment_credits_reject_invalid_parameters_before_search(monkeypatch, field, invalid):
+    """CR-127/129：所有距离信用参数均须在候选查询前失败关闭。"""
     from services.retrieval import search as search_mod
 
     called = []
@@ -289,7 +294,7 @@ def test_vector_distance_credit_rejects_nonfinite_parameters_before_search(monke
     params = {"vector_distance_max": 0.75, "vector_distance_credit": 0.10}
     params[field] = invalid
 
-    with pytest.raises(ValueError, match="向量距离"):
+    with pytest.raises(ValueError, match="向量"):
         search_mod.hybrid_search(
             object(), "q", [0.0], experiment=search_mod.FusionExperiment("bad", **params),
         )
