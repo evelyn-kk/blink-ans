@@ -43,7 +43,7 @@ def cmd_sync(args) -> int:
         report = sync(
             only, mode=args.mode,
             activate=not args.no_activate, allow_partial=args.allow_partial,
-            reuse_embeddings=not args.no_reuse,
+            reuse_embeddings=not args.no_reuse, offline=args.offline,
         )
     except ValueError as exc:
         print(f"参数错误: {exc}", file=sys.stderr)
@@ -208,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-partial", action="store_true",
                    help="有来源同步失败时仍然激活（默认拒绝，避免静默丢掉整个来源）")
     p.add_argument("--no-reuse", action="store_true", help="不复用已有向量，全部重新嵌入")
+    p.add_argument("--offline", action="store_true", help="只用已验证的本地 Git 缓存，绝不 fetch/clone")
     p.set_defaults(fn=cmd_sync)
 
     p = sub.add_parser("search", help="检索")

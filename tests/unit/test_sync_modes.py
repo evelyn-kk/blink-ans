@@ -22,6 +22,8 @@ from services.retrieval.store import ChunkStore, IndexBuilder, IndexError_  # no
 from services.sync.pipeline import EMBED_BATCH, _add_with_cache, _resolve_sources, run_regression  # noqa: E402
 from services.sync import version as transform_version_mod  # noqa: E402
 from services.sync.version import content_transform_version  # noqa: E402
+from services.sync.fetch import FetchError, clone_or_update  # noqa: E402
+from services.sync.registry import Source  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,6 +63,46 @@ def test_link_only_source_cannot_be_synced():
 def test_unknown_mode_rejected():
     with pytest.raises(ValueError, match="未知同步模式"):
         _resolve_sources(None, "incremental")
+
+
+def _offline_source() -> Source:
+    return Source(
+        id="cached", project="cached", technology="java", format="markdown", locale="en",
+        paths=("docs",), repo="https://example.invalid/cached.git", ref="main",
+        license="MIT", license_file="LICENSE", base_url="https://example.invalid",
+    )
+
+
+def test_offline_cached_source_never_fetches(monkeypatch, tmp_path):
+    root = tmp_path / "cached"
+    (root / ".git").mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+
+    def local_git(*args, cwd=None):
+        calls.append(args)
+        assert cwd == root
+        return "true" if args[-1] == "--is-inside-work-tree" else "abc123"
+
+    monkeypatch.setattr("services.sync.fetch._git", local_git)
+    assert clone_or_update(_offline_source(), tmp_path, offline=True) == root
+    assert calls == [("rev-parse", "--is-inside-work-tree"), ("rev-parse", "HEAD")]
+
+
+def test_offline_missing_cache_fails_before_any_git_network_command(monkeypatch, tmp_path):
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr("services.sync.fetch._git", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(FetchError, match="离线同步需要已有 Git 缓存"):
+        clone_or_update(_offline_source(), tmp_path, offline=True)
+    assert not calls
+
+
+def test_default_cached_source_keeps_fetch_behavior(monkeypatch, tmp_path):
+    root = tmp_path / "cached"
+    (root / ".git").mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr("services.sync.fetch._git", lambda *args, **kwargs: calls.append(args) or "")
+    assert clone_or_update(_offline_source(), tmp_path) == root
+    assert calls[0][:2] == ("fetch", "--depth")
 
 
 # ---------- 合并更新：搬运底座 ----------
@@ -531,7 +573,7 @@ def _fake_sync_env(monkeypatch, tmp_path, failing: set[str], rejected: set[str] 
     monkeypatch.setattr(pl, "_embed_with_cache",
                         lambda chunks, *a: [_vec(i % DIM) for i in range(len(chunks))])
 
-    def fake_collect(src, log, versions=None, known_urls=None):
+    def fake_collect(src, log, versions=None, known_urls=None, offline=False):
         res = pl.SourceResult(source_id=src.id)
         if src.id in failing:
             res.error = "FetchError: 登记路径不存在于仓库中"

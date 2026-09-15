@@ -103,6 +103,7 @@ def collect_chunks(
     log: Callable[[str], None],
     versions: dict[str, str] | None = None,
     known_urls: dict[str, set[str]] | None = None,
+    offline: bool = False,
 ) -> tuple[list[Chunk], SourceResult]:
     if src.format == "authored":
         # 场景卡片没有上游仓库，完全不走下面的 fetch/许可校验/通用解析——
@@ -111,7 +112,7 @@ def collect_chunks(
 
     res = SourceResult(source_id=src.id)
     try:
-        fetched = fetch(src)
+        fetched = fetch(src, offline=offline)
     except LicenseError as exc:
         res.error = f"许可校验失败: {exc}"
         return [], res
@@ -315,6 +316,7 @@ def sync(
     activate: bool = True,
     allow_partial: bool = False,
     reuse_embeddings: bool = True,
+    offline: bool = False,
     log: Callable[[str], None] = print,
 ) -> SyncReport:
     """三种模式（CR-004）：
@@ -336,6 +338,7 @@ def sync(
         builder.staging.with_suffix(".status.json"), mode=mode, sources=sources, activate=activate,
     )
     report.diagnostics_path = status.path
+    status.update("started", offline=offline)
     versions: dict[str, str] = {}
     # 只在本次同步内有效，不写入索引 meta——供 authored 来源的 URL 归属
     # 校验用（CR-045），键与 versions 一样按来源 id。
@@ -378,7 +381,7 @@ def sync(
             status.update("source_collecting", active_source=src.id)
             # authored 来源（场景卡片）用它们把引用解析成"本轮/当前索引里
             # 该来源的真实版本/真实块地址"；拉取式来源忽略这两个参数。
-            chunks, res = collect_chunks(src, log, versions, known_urls)
+            chunks, res = collect_chunks(src, log, versions, known_urls, offline=offline)
             report.sources.append(res)
             if res.error:
                 log(f"  {src.id}: 跳过 —— {res.error}")
