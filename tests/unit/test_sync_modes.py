@@ -772,6 +772,46 @@ def test_sync_exception_persists_failure_phase_and_reason(monkeypatch, tmp_path)
     )
 
 
+def test_status_resets_embedding_progress_for_first_batch_failure_of_next_source(monkeypatch, tmp_path):
+    """CR-138：B 的首批 encode 失败不得显示 A 的已嵌入块数。"""
+    from services.sync import pipeline as pl
+
+    source_a = Source(
+        id="source-a", project="source-a", technology="java", format="markdown", locale="en",
+        paths=("docs",), repo="https://example.invalid/a.git", ref="main", license="MIT",
+        license_file="LICENSE", base_url="https://example.invalid",
+    )
+    source_b = Source(
+        id="source-b", project="source-b", technology="java", format="markdown", locale="en",
+        paths=("docs",), repo="https://example.invalid/b.git", ref="main", license="MIT",
+        license_file="LICENSE", base_url="https://example.invalid",
+    )
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    monkeypatch.setattr(pl, "_resolve_sources", lambda *_args: [source_a, source_b])
+
+    def fail_first_batch_of_b(chunks, *_args):
+        if chunks[0].source_project == source_b.project:
+            raise RuntimeError("source-b first encode failed")
+        return [_vec(i % DIM) for i in range(len(chunks))]
+
+    monkeypatch.setattr(pl, "_embed_with_cache", fail_first_batch_of_b)
+    with pytest.raises(RuntimeError, match="source-b first encode failed"):
+        pl.sync(log=lambda *_: None)
+
+    status = json.loads((tmp_path / "current.building.status.json").read_text(encoding="utf-8"))
+    assert status["stage"] == "failed"
+    assert status["active_source"] == source_b.id
+    assert status["source_chunks"] == 1
+    assert status["source_chunks_embedded"] == 0
+    # 已完成的来源仍只在 sources 这个累计记录中，不能被 B 的局部归零抹掉。
+    assert status["sources"] == [{
+        "id": source_a.id, "stage": "source_complete", "files": 0,
+        "chunks": 1, "rejected": 0, "error": None,
+    }]
+    assert not (tmp_path / "current.building.db").exists()
+    assert not (tmp_path / "current.db").exists()
+
+
 @pytest.mark.parametrize("factory_name, message", [
     ("Embedder", "embedder startup broke"),
     ("EmbeddingCache", "embedding cache startup broke"),

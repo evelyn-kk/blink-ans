@@ -387,7 +387,12 @@ def sync(
             status.update("carry_over_complete", carried_chunks=moved)
 
         for src in sources:
-            status.update("source_collecting", active_source=src.id)
+            # source_chunks* 是 active_source 的局部计数，不能让下一来源在
+            # collect 或首次 encode 抛错时继承前一来源的进度（CR-138）。
+            status.update(
+                "source_collecting", active_source=src.id,
+                source_chunks=0, source_chunks_embedded=0,
+            )
             # authored 来源（场景卡片）用它们把引用解析成"本轮/当前索引里
             # 该来源的真实版本/真实块地址"；拉取式来源忽略这两个参数。
             chunks, res = collect_chunks(src, log, versions, known_urls, offline=offline,
@@ -402,7 +407,10 @@ def sync(
 
             # 以 add() 的实际写入数为准：重复的块会被跳过，
             # 用 len(chunks) 会让同一条命令打印出两个不一致的总数。
-            status.update("source_embedding", active_source=src.id, source_chunks=len(chunks))
+            status.update(
+                "source_embedding", active_source=src.id,
+                source_chunks=len(chunks), source_chunks_embedded=0,
+            )
             res.chunks = _add_with_cache(
                 builder, chunks, embedder, cache,
                 lambda processed: status.update(
