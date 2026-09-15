@@ -54,6 +54,7 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
         "baseline", "single-path-credit", "vector-only-credit",
         "keyword-tail", "vector-keyword-rescue",
         "vector-distance-credit-0.75-0.10", "vector-distance-credit-0.75-0.20",
+        "relative-vector-credit-0.002", "relative-vector-credit-0.005",
     }
     assert by_name["single-path-credit"].experiment.imputed_keyword_rank == 31
     assert by_name["single-path-credit"].experiment.imputed_vector_rank == 31
@@ -72,6 +73,13 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
     } == {
         "vector-distance-credit-0.75-0.10": (0.75, 0.10),
         "vector-distance-credit-0.75-0.20": (0.75, 0.20),
+    }
+    assert {
+        name: by_name[name].experiment.relative_vector_credit
+        for name in ("relative-vector-credit-0.002", "relative-vector-credit-0.005")
+    } == {
+        "relative-vector-credit-0.002": 0.002,
+        "relative-vector-credit-0.005": 0.005,
     }
 
 
@@ -287,3 +295,31 @@ def test_vector_distance_credit_rejects_nonfinite_parameters_before_search(monke
         )
 
     assert called == []
+
+
+def test_relative_vector_credit_uses_within_query_distance_range(monkeypatch):
+    """相对信用只由同一 query 的向量距离范围计算，不引用绝对距离阈值。"""
+    from services.retrieval import search as search_mod
+
+    rows = {
+        rid: {"id": rid, "text": str(rid), "title_path": str(rid), "source_url": f"u{rid}",
+              "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+              "technology": "t", "content_type": "prose", "token_estimate": 1}
+        for rid in (1, 2, 3)
+    }
+
+    class Store:
+        def execute(self, sql, params=()):
+            return [rows[rid] for rid in params]
+
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: [(1, -1.0)])
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.60), (3, 0.80)])
+    relative = search_mod.FusionExperiment("relative", relative_vector_credit=0.01)
+    baseline = search_mod.hybrid_search(Store(), "q", [0.0], limit=3)
+    boosted = search_mod.hybrid_search(Store(), "q", [0.0], limit=3, experiment=relative)
+    assert [hit.rowid for hit in baseline] == [1, 2, 3]
+    assert [hit.rowid for hit in boosted] == [2, 1, 3]
+
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.80), (3, 0.80)])
+    no_spread = search_mod.hybrid_search(Store(), "q", [0.0], limit=3, experiment=relative)
+    assert [hit.rowid for hit in no_spread] == [1, 2, 3]

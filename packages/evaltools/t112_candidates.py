@@ -109,6 +109,16 @@ CANDIDATES = (
         ),
         rationale="与 0.10 候选同一实际距离规则，仅将连续信用系数增至 0.20，用来观察强度是否越过排序稳定区间",
     ),
+    Candidate(
+        "relative-vector-credit-0.002",
+        experiment=FusionExperiment("relative-vector-credit-0.002", relative_vector_credit=0.002),
+        rationale="关键词候选外的向量块按本 query 的 (worst_distance-distance)/(worst-best) 连续加 0.002 信用；不用跨 query 的绝对距离、假名次或尾部候选",
+    ),
+    Candidate(
+        "relative-vector-credit-0.005",
+        experiment=FusionExperiment("relative-vector-credit-0.005", relative_vector_credit=0.005),
+        rationale="与 0.002 候选同一 query 内相对向量规则，仅扩大连续信用以验证是否越过稳定区间",
+    ),
 )
 
 

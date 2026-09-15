@@ -185,6 +185,7 @@ class FusionExperiment:
     rescue_credit_rank: str | None = None
     vector_distance_max: float | None = None
     vector_distance_credit: float | None = None
+    relative_vector_credit: float | None = None
 
 
 def _pack(vec: Sequence[float]) -> bytes:
@@ -372,6 +373,10 @@ def hybrid_search(
         not math.isfinite(experiment.vector_distance_credit) or experiment.vector_distance_credit <= 0
     ):
         raise ValueError("向量距离信用系数必须为正数")
+    if experiment and experiment.relative_vector_credit is not None and (
+        not math.isfinite(experiment.relative_vector_credit) or experiment.relative_vector_credit <= 0
+    ):
+        raise ValueError("相对向量信用系数必须为正数")
 
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
@@ -437,6 +442,20 @@ def hybrid_search(
                     (experiment.vector_distance_max - distance)
                     * experiment.vector_distance_credit * tech_weight
                 )
+        if experiment.relative_vector_credit is not None and len(vec) > 1:
+            # T-112 候选：不同问题的绝对 L2 距离没有可比性，故只看本次向量候选
+            # 内的相对位置。最小距离记为 1、末位为 0；仅 keyword-only 缺席的块获得
+            # 连续信用，既不伪造另一条路，也不改变候选集合。
+            best_distance, worst_distance = vec[0][1], vec[-1][1]
+            spread = worst_distance - best_distance
+            if spread > 0:
+                for rid, distance in vec[:vector_score_depth]:
+                    if rid in keyword_ids:
+                        continue
+                    scores[rid][0] += (
+                        (worst_distance - distance) / spread
+                        * experiment.relative_vector_credit * tech_weight
+                    )
 
     fused = {rid: tuple(v) for rid, v in scores.items()}
     if not fused:
