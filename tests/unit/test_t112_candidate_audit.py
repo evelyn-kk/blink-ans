@@ -55,6 +55,7 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
         "keyword-tail", "vector-keyword-rescue",
         "vector-distance-credit-0.75-0.10", "vector-distance-credit-0.75-0.20",
         "relative-vector-credit-0.002", "relative-vector-credit-0.005",
+        "weak-corroboration-cap-5", "weak-corroboration-cap-10",
     }
     assert by_name["single-path-credit"].experiment.imputed_keyword_rank == 31
     assert by_name["single-path-credit"].experiment.imputed_vector_rank == 31
@@ -80,6 +81,13 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
     } == {
         "relative-vector-credit-0.002": 0.002,
         "relative-vector-credit-0.005": 0.005,
+    }
+    assert {
+        name: by_name[name].experiment.weak_corroboration_rank_max
+        for name in ("weak-corroboration-cap-5", "weak-corroboration-cap-10")
+    } == {
+        "weak-corroboration-cap-5": 5,
+        "weak-corroboration-cap-10": 10,
     }
 
 
@@ -328,3 +336,49 @@ def test_relative_vector_credit_uses_within_query_distance_range(monkeypatch):
     monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.80), (3, 0.80)])
     no_spread = search_mod.hybrid_search(Store(), "q", [0.0], limit=3, experiment=relative)
     assert [hit.rowid for hit in no_spread] == [1, 2, 3]
+
+
+def test_weak_corroboration_keeps_one_actual_signal_for_two_weak_ranks(monkeypatch):
+    """弱双路抑制只移除较弱的真实 RRF 分，不虚构或扩大任一路名次。"""
+    from services.retrieval import search as search_mod
+
+    rows = {
+        rid: {"id": rid, "text": str(rid), "title_path": str(rid), "source_url": f"u{rid}",
+              "source_project": "p", "version_or_commit": "v", "retrieved_at": "2026-01-01",
+              "technology": "t", "content_type": "prose", "token_estimate": 1}
+        for rid in (1, 2, 3)
+    }
+
+    class Store:
+        def execute(self, sql, params=()):
+            return [rows[rid] for rid in params]
+
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: [(1, -1.0), (2, -0.9)])
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(3, 0.1), (2, 0.2)])
+
+    baseline = search_mod.hybrid_search(Store(), "q", [0.0], limit=3)
+    suppressed = search_mod.hybrid_search(
+        Store(), "q", [0.0], limit=3,
+        experiment=search_mod.FusionExperiment("weak", weak_corroboration_rank_max=1),
+    )
+
+    assert [hit.rowid for hit in baseline] == [2, 1, 3]
+    assert [hit.rowid for hit in suppressed] == [1, 3, 2]
+    assert suppressed[2].keyword_rank == suppressed[2].vector_rank == 2
+
+
+@pytest.mark.parametrize("invalid", [0, -1, 1.5, True])
+def test_weak_corroboration_cap_rejects_invalid_values_before_search(monkeypatch, invalid):
+    from services.retrieval import search as search_mod
+
+    called = []
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: called.append("keyword"))
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: called.append("vector"))
+
+    with pytest.raises(ValueError, match="弱双路佐证"):
+        search_mod.hybrid_search(
+            object(), "q", [0.0],
+            experiment=search_mod.FusionExperiment("bad", weak_corroboration_rank_max=invalid),
+        )
+
+    assert called == []

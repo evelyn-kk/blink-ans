@@ -186,6 +186,7 @@ class FusionExperiment:
     vector_distance_max: float | None = None
     vector_distance_credit: float | None = None
     relative_vector_credit: float | None = None
+    weak_corroboration_rank_max: int | None = None
 
 
 def _pack(vec: Sequence[float]) -> bytes:
@@ -377,6 +378,12 @@ def hybrid_search(
         not math.isfinite(experiment.relative_vector_credit) or experiment.relative_vector_credit <= 0
     ):
         raise ValueError("相对向量信用系数必须为正数")
+    if experiment and experiment.weak_corroboration_rank_max is not None and (
+        isinstance(experiment.weak_corroboration_rank_max, bool)
+        or not isinstance(experiment.weak_corroboration_rank_max, int)
+        or experiment.weak_corroboration_rank_max <= 0
+    ):
+        raise ValueError("弱双路佐证名次上限必须是正整数")
 
     scores: dict[int, list] = {}
     distances: dict[int, float] = {}
@@ -407,6 +414,23 @@ def hybrid_search(
 
         keyword_ids = {rid for rid, _ in kw[:keyword_score_depth]}
         vector_ids = {rid for rid, _ in vec[:vector_score_depth]}
+        if experiment.weak_corroboration_rank_max is not None:
+            # T-112 候选：两路都只给出较弱名次时，不把两个偶然命中当成两份
+            # 独立佐证。保留较强那一路的真实 RRF 分，而非伪造缺席名次、扩大
+            # 候选池或根据向量距离加分；只要任一路在阈值内，原本的两路累加不变。
+            keyword_ranks = {rid: rank for rank, (rid, _) in enumerate(kw[:keyword_score_depth], 1)}
+            vector_ranks = {rid: rank for rank, (rid, _) in enumerate(vec[:vector_score_depth], 1)}
+            for rid in keyword_ids & vector_ids:
+                keyword_rank = keyword_ranks[rid]
+                vector_rank = vector_ranks[rid]
+                if (
+                    keyword_rank > experiment.weak_corroboration_rank_max
+                    and vector_rank > experiment.weak_corroboration_rank_max
+                ):
+                    scores[rid][0] -= min(
+                        KEYWORD_WEIGHT * tech_weight / (RRF_K + keyword_rank),
+                        VECTOR_WEIGHT * tech_weight / (RRF_K + vector_rank),
+                    )
         if experiment.imputed_keyword_rank:
             for rid in vector_ids - keyword_ids:
                 _rrf_add_at_rank(

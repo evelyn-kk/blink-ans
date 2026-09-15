@@ -119,6 +119,16 @@ CANDIDATES = (
         experiment=FusionExperiment("relative-vector-credit-0.005", relative_vector_credit=0.005),
         rationale="与 0.002 候选同一 query 内相对向量规则，仅扩大连续信用以验证是否越过稳定区间",
     ),
+    Candidate(
+        "weak-corroboration-cap-5",
+        experiment=FusionExperiment("weak-corroboration-cap-5", weak_corroboration_rank_max=5),
+        rationale="仅当同一块的关键词与向量真实名次都在前 5 外时，撤销较弱一路 RRF 分；前 5 内的双路佐证保持原样，不补缺席名次、不扩候选、不用距离",
+    ),
+    Candidate(
+        "weak-corroboration-cap-10",
+        experiment=FusionExperiment("weak-corroboration-cap-10", weak_corroboration_rank_max=10),
+        rationale="与 cap-5 同一弱双路佐证抑制规则，但把“强佐证”预登记为前 10；用于检验规则边界而非重调 RRF_K",
+    ),
 )
 
 
