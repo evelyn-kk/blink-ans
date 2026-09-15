@@ -26,7 +26,7 @@ from services.retrieval.store import CURRENT, ChunkStore, EmbeddingCache, IndexB
 
 from . import cards  # noqa: E402
 from .chunk import sections_to_chunks  # noqa: E402
-from .fetch import LicenseError, collect_files, fetch, head_commit  # noqa: E402
+from .fetch import LicenseError, collect_files, fetch, head_commit, validate_cached_source  # noqa: E402
 from .models import SourceResult, SyncReport  # noqa: E402
 from .parse import parse_file  # noqa: E402
 from .registry import Source, ingestible, load_registry  # noqa: E402
@@ -329,8 +329,15 @@ def sync(
       跑全量回归后激活。用于单个来源的增量更新。
     """
     sources = _resolve_sources(only, mode)
-    report = SyncReport(mode=mode)
+    report = SyncReport(mode=mode, offline=offline)
     projects = {s.project for s in sources}
+
+    # CR-131: 缺缓存不是“一个来源本轮没拉全”，而是 offline 调用的入口前提。
+    # 在任何 builder/model/status 创建前检查所有远程来源，避免空 staging 或模型加载。
+    if offline:
+        for src in sources:
+            if src.format != "authored":
+                validate_cached_source(src)
 
     log(f"同步模式 {mode}，{len(sources)} 个来源" + (f": {', '.join(s.id for s in sources)}" if only else ""))
     builder = IndexBuilder()
@@ -338,7 +345,7 @@ def sync(
         builder.staging.with_suffix(".status.json"), mode=mode, sources=sources, activate=activate,
     )
     report.diagnostics_path = status.path
-    status.update("started", offline=offline)
+    status.update("started", offline=report.offline)
     versions: dict[str, str] = {}
     # 只在本次同步内有效，不写入索引 meta——供 authored 来源的 URL 归属
     # 校验用（CR-045），键与 versions 一样按来源 id。

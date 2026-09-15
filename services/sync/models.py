@@ -26,6 +26,7 @@ class SourceResult:
 class SyncReport:
     sources: list[SourceResult] = field(default_factory=list)
     mode: str = "full"
+    offline: bool = False
     total_chunks: int = 0        # 本次同步实际写入的块（不含合并时搬运的）
     index_chunks: int = 0        # 暂存索引内的总块数
     carried_chunks: int = 0      # 合并更新时从当前索引搬运的块

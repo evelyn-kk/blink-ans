@@ -105,6 +105,27 @@ def test_default_cached_source_keeps_fetch_behavior(monkeypatch, tmp_path):
     assert calls[0][:2] == ("fetch", "--depth")
 
 
+def test_offline_preflight_fails_before_builder_or_network_work(monkeypatch):
+    from services.sync import pipeline as pl
+
+    src = _offline_source()
+    monkeypatch.setattr(pl, "_resolve_sources", lambda *_args: [src])
+    monkeypatch.setattr(pl, "validate_cached_source", lambda _src: (_ for _ in ()).throw(
+        FetchError("cached: 离线同步需要已有 Git 缓存")))
+    monkeypatch.setattr(pl, "IndexBuilder", lambda: pytest.fail("不得创建 staging builder"))
+    with pytest.raises(FetchError, match="离线同步需要已有 Git 缓存"):
+        pl.sync(offline=True, log=lambda *_: None)
+
+
+def test_sync_report_and_status_record_offline_mode(monkeypatch, tmp_path):
+    pl = _fake_sync_env(monkeypatch, tmp_path, failing=set())
+    monkeypatch.setattr(pl, "validate_cached_source", lambda _src: None)
+    rep = pl.sync(offline=True, log=lambda *_: None)
+    assert rep.offline is True
+    status = json.loads(rep.diagnostics_path.read_text(encoding="utf-8"))
+    assert status["offline"] is True
+
+
 # ---------- 合并更新：搬运底座 ----------
 
 def _chunk(proj: str, tech: str, n: int, text: str, source_path: str | None = None) -> Chunk:

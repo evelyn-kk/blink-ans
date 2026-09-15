@@ -66,18 +66,22 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return r.stdout.strip()
 
 
+def validate_cached_source(src: Source, root: Path | None = None) -> Path:
+    root = (root or DATA_ROOT) / src.slug
+    if not (root / ".git").exists():
+        raise FetchError(f"{src.id}: 离线同步需要已有 Git 缓存: {root}")
+    _git("rev-parse", "--is-inside-work-tree", cwd=root)
+    _git("rev-parse", "HEAD", cwd=root)
+    return root
+
+
 def clone_or_update(src: Source, root: Path | None = None, *, offline: bool = False) -> Path:
     """稀疏拉取来源仓库到本地缓存目录，返回工作树根。"""
     root = (root or DATA_ROOT) / src.slug
     sparse = [*src.paths, src.license_file]
 
     if offline:
-        if not (root / ".git").exists():
-            raise FetchError(f"{src.id}: 离线同步需要已有 Git 缓存: {root}")
-        # 不以目录名或遗留 .git 文件冒充缓存；HEAD 必须可由 git 本地解析。
-        _git("rev-parse", "--is-inside-work-tree", cwd=root)
-        _git("rev-parse", "HEAD", cwd=root)
-        return root
+        return validate_cached_source(src, root.parent)
 
     if (root / ".git").exists():
         try:

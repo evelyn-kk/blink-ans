@@ -52,6 +52,7 @@ def cmd_sync(args) -> int:
     elapsed = time.perf_counter() - t0
     if report.diagnostics_path:
         print(f"同步诊断: {report.diagnostics_path}")
+    print(f"同步来源模式: {'离线缓存' if report.offline else '允许更新来源'}")
     if report.mode == "merge":
         print(f"\n新写入 {report.total_chunks} 块 + 搬运 {report.carried_chunks} 块 "
               f"= 索引共 {report.index_chunks} 块，耗时 {elapsed:.1f}s")
