@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import struct
 from dataclasses import dataclass
@@ -363,9 +364,13 @@ def hybrid_search(
         raise ValueError("向量计分深度必须同时给出向量候选深度")
     if experiment and ((experiment.vector_distance_max is None) != (experiment.vector_distance_credit is None)):
         raise ValueError("向量距离信用必须同时给出距离上限与信用系数")
-    if experiment and experiment.vector_distance_max is not None and experiment.vector_distance_max <= 0:
+    if experiment and experiment.vector_distance_max is not None and (
+        not math.isfinite(experiment.vector_distance_max) or experiment.vector_distance_max <= 0
+    ):
         raise ValueError("向量距离上限必须为正数")
-    if experiment and experiment.vector_distance_credit is not None and experiment.vector_distance_credit <= 0:
+    if experiment and experiment.vector_distance_credit is not None and (
+        not math.isfinite(experiment.vector_distance_credit) or experiment.vector_distance_credit <= 0
+    ):
         raise ValueError("向量距离信用系数必须为正数")
 
     scores: dict[int, list] = {}

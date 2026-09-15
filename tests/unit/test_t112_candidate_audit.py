@@ -66,8 +66,13 @@ def test_candidates_declare_all_temporary_rules_in_data_not_monkeypatches():
     assert (rescue.vector_candidate_depth, rescue.vector_score_depth) == (150, 30)
     assert (rescue.keyword_rescue_depth, rescue.vector_rescue_max_rank) == (150, 15)
     assert rescue.rescue_credit_rank == "vector_zero"
-    distance = by_name["vector-distance-credit-0.75-0.10"].experiment
-    assert (distance.vector_distance_max, distance.vector_distance_credit) == (0.75, 0.10)
+    assert {
+        name: (by_name[name].experiment.vector_distance_max, by_name[name].experiment.vector_distance_credit)
+        for name in ("vector-distance-credit-0.75-0.10", "vector-distance-credit-0.75-0.20")
+    } == {
+        "vector-distance-credit-0.75-0.10": (0.75, 0.10),
+        "vector-distance-credit-0.75-0.20": (0.75, 0.20),
+    }
 
 
 def test_audit_embeds_provenance_candidate_and_computed_comparison():
@@ -254,3 +259,31 @@ def test_vector_distance_credit_uses_actual_distance_without_imputing_a_missing_
     monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: [(2, 0.80)])
     threshold_miss = search_mod.hybrid_search(Store(), "q", [0.0], limit=2, experiment=credit)
     assert [hit.rowid for hit in threshold_miss] == [1, 2]
+
+
+@pytest.mark.parametrize("field, invalid", [
+    ("vector_distance_max", float("nan")),
+    ("vector_distance_max", float("inf")),
+    ("vector_distance_max", float("-inf")),
+    ("vector_distance_credit", float("nan")),
+    ("vector_distance_credit", float("inf")),
+    ("vector_distance_credit", float("-inf")),
+    ("vector_distance_max", 0.0),
+    ("vector_distance_credit", -0.10),
+])
+def test_vector_distance_credit_rejects_nonfinite_parameters_before_search(monkeypatch, field, invalid):
+    """CR-127：非有限距离参数不能进入候选查询或产生不可排序融合分。"""
+    from services.retrieval import search as search_mod
+
+    called = []
+    monkeypatch.setattr(search_mod, "keyword_search", lambda *args, **kwargs: called.append("keyword"))
+    monkeypatch.setattr(search_mod, "vector_search", lambda *args, **kwargs: called.append("vector"))
+    params = {"vector_distance_max": 0.75, "vector_distance_credit": 0.10}
+    params[field] = invalid
+
+    with pytest.raises(ValueError, match="向量距离"):
+        search_mod.hybrid_search(
+            object(), "q", [0.0], experiment=search_mod.FusionExperiment("bad", **params),
+        )
+
+    assert called == []
