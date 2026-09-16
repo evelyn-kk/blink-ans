@@ -11,6 +11,8 @@ I4 会补上 transcript 事件。
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import os
 import sys
 import uuid
@@ -37,6 +39,7 @@ from services.orchestrator.answering import (  # noqa: E402
 from services.orchestrator.session import (  # noqa: E402
     ResolvedTurn, SessionState, build_request_for_turn, stream_and_record,
 )
+from services.asr.stream import TranscriptSession, mlx_whisper_transcriber  # noqa: E402
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 
@@ -94,6 +97,19 @@ _MAX_SESSIONS = 64
 # session.turn_seq 快照（CR-030：乱序完成时不让旧轮次的写回盖掉新轮次的状态）。
 _pending_turns: dict[str, tuple[str, AnswerRequest, ResolvedTurn, str, int, int]] = {}
 _MAX_PENDING_TURNS = 64
+
+# T-008：一段正在说的话只存在内存中。`_pending_transcript_events` 是已转写文本
+# 的一次性 SSE 交接，不存 PCM；达到容量上限时必须先 cancel 被淘汰的会话释放音频。
+_transcripts: dict[str, TranscriptSession] = {}
+_pending_transcript_events: dict[str, tuple[str, dict]] = {}
+_MAX_TRANSCRIPTS = 16
+_MAX_PENDING_TRANSCRIPT_EVENTS = 64
+
+
+def _new_transcript_session(language: Language) -> TranscriptSession:
+    # 不在 lifespan 预加载 whisper：它与生成/嵌入模型会竞争 16 GB 内存，且没有
+    # 活跃录音时不该占用。实际 adapter 仍为纯本地 mlx-whisper。
+    return TranscriptSession(language, mlx_whisper_transcriber)
 
 
 @asynccontextmanager
@@ -265,6 +281,92 @@ class AskBody(BaseModel):
     language: Language | None = Field(
         default=None, description="回答语言，不传则用服务端默认语言"
     )
+
+
+# ---------------------------------------------------------------------------
+# T-008：浏览器 Web Audio 上传 16 kHz / mono / signed PCM。音频不落盘；每一块
+# 转写完成后由一次性 SSE 端点交给 UI，SSE 里只有 transcript 文本元数据。
+# ---------------------------------------------------------------------------
+
+class TranscriptCreateBody(BaseModel):
+    language: Language
+
+
+class TranscriptChunkBody(BaseModel):
+    # 30 s PCM 的 base64 上限：ceil(960000 / 3) * 4。先在 HTTP 边界拒绝，
+    # 不把两倍的字符串临时解码进内存后才由 session 拒绝。
+    pcm_s16le_b64: str = Field(min_length=1, max_length=1_280_000)
+    final: bool = False
+
+
+@app.post("/v1/transcriptions", status_code=201)
+async def create_transcription(body: TranscriptCreateBody):
+    if len(_transcripts) >= _MAX_TRANSCRIPTS:
+        for old_id in list(_transcripts)[:len(_transcripts) - _MAX_TRANSCRIPTS + 1]:
+            _transcripts.pop(old_id).cancel()
+    tid = uuid.uuid4().hex[:16]
+    _transcripts[tid] = _new_transcript_session(body.language)
+    return {"transcript_id": tid}
+
+
+@app.post("/v1/transcriptions/{transcript_id}/chunks", status_code=201)
+async def append_transcript_chunk(transcript_id: str, body: TranscriptChunkBody):
+    session = _transcripts.get(transcript_id)
+    if session is None:
+        raise HTTPException(404, "转写会话不存在或已结束")
+    try:
+        pcm = base64.b64decode(body.pcm_s16le_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(422, "pcm_s16le_b64 不是有效 Base64") from exc
+    try:
+        event = await asyncio.to_thread(session.append, pcm, final=body.final)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if len(_pending_transcript_events) >= _MAX_PENDING_TRANSCRIPT_EVENTS:
+        for old_id in list(_pending_transcript_events)[:len(_pending_transcript_events) - _MAX_PENDING_TRANSCRIPT_EVENTS + 1]:
+            _pending_transcript_events.pop(old_id, None)
+    event_id = uuid.uuid4().hex[:16]
+    _pending_transcript_events[event_id] = (transcript_id, event.as_sse_event())
+    return {
+        "event_id": event_id,
+        "stream_url": f"/v1/transcriptions/{transcript_id}/events/{event_id}/stream",
+    }
+
+
+@app.get("/v1/transcriptions/{transcript_id}/events/{event_id}/stream")
+async def stream_transcript_event(transcript_id: str, event_id: str):
+    # event 同时绑定到 transcript_id；不能只检查两者各自存在，否则一个 event ID
+    # 被猜中后可跨会话读取。一次消费防止代理/重试重复展示旧 partial。
+    if transcript_id not in _transcripts:
+        raise HTTPException(404, "转写会话不存在或已结束")
+    pending = _pending_transcript_events.get(event_id)
+    if pending is None or pending[0] != transcript_id:
+        raise HTTPException(404, "转写事件不存在或已被消费")
+    _, event = _pending_transcript_events.pop(event_id)
+    if event["final"]:
+        # final 音频已在 TranscriptSession 清空；SSE 交付后连同会话对象也释放，
+        # 不让一连串已完成发言挤占有限的会话槽位。
+        _transcripts.pop(transcript_id, None)
+    return StreamingResponse(
+        sse_stream(iter([event]), stage="asr"),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.delete("/v1/transcriptions/{transcript_id}", status_code=204)
+async def cancel_transcription(transcript_id: str):
+    session = _transcripts.pop(transcript_id, None)
+    if session is None:
+        raise HTTPException(404, "转写会话不存在或已结束")
+    await asyncio.to_thread(session.cancel)
+    # 取消的语义包含放弃尚未读取的 partial 文本，不能把它留在一次性 event
+    # 字典里直到容量淘汰。
+    for event_id, (owner, _event) in list(_pending_transcript_events.items()):
+        if owner == transcript_id:
+            _pending_transcript_events.pop(event_id, None)
 
 
 @app.post("/v1/answers", status_code=201)

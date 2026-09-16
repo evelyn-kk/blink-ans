@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 from pathlib import Path
@@ -43,6 +44,25 @@ def test_non_ascii_is_not_escaped():
         return [c async for c in sse_stream(iter([{"type": "status", "message": "已选取 5 条证据"}]))]
 
     assert "已选取 5 条证据" in asyncio.run(run())[0]
+
+
+def test_transcript_event_contains_only_textual_metadata():
+    async def run():
+        event = {"type": "transcript", "text": "Kafka", "final": False, "sequence": 1}
+        return [chunk async for chunk in sse_stream(iter([event]))]
+
+    chunk = asyncio.run(run())[0]
+    assert json.loads(chunk.split("data: ", 1)[1])["text"] == "Kafka"
+
+
+def test_transcript_event_rejects_raw_audio_or_incomplete_shape():
+    async def run():
+        bad = {"type": "transcript", "text": "Kafka", "final": True, "sequence": 1, "pcm": "AA=="}
+        return [chunk async for chunk in sse_stream(iter([bad]))]
+
+    out = asyncio.run(run())
+    assert "event: error" in out[-1]
+    assert "invalid transcript event" in out[-1]
 
 
 def test_producer_exception_becomes_an_error_event():

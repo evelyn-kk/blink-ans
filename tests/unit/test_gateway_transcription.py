@@ -1,0 +1,80 @@
+"""T-008 转写 API：真实路由控制流，但永不加载 mlx-whisper。"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import sys
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import apps.gateway.main as gw  # noqa: E402
+from services.asr.stream import TranscriptSession  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+async def _drain(response):
+    return [chunk async for chunk in response.body_iterator]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_transcripts(monkeypatch):
+    monkeypatch.setattr(gw, "_transcripts", {})
+    monkeypatch.setattr(gw, "_pending_transcript_events", {})
+    seen: list[TranscriptSession] = []
+
+    def create(language):
+        session = TranscriptSession(language, lambda wave, *, language: f"{language}:{len(wave)}")
+        seen.append(session)
+        return session
+
+    monkeypatch.setattr(gw, "_new_transcript_session", create)
+    return seen
+
+
+def test_chunk_routes_in_memory_transcript_through_one_time_sse(_isolated_transcripts):
+    created = _run(gw.create_transcription(gw.TranscriptCreateBody(language="zh")))
+    tid = created["transcript_id"]
+    pcm = base64.b64encode(b"\0\0\x00@").decode()
+    written = _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=pcm)))
+
+    response = _run(gw.stream_transcript_event(tid, written["event_id"]))
+    chunks = _run(_drain(response))
+    assert 'event: transcript' in chunks[0]
+    assert '"text": "zh:2"' in chunks[0]
+    assert "pcm" not in chunks[0]
+    assert _isolated_transcripts[0].buffered_pcm_bytes == 4
+
+    with pytest.raises(HTTPException) as exc:
+        _run(gw.stream_transcript_event(tid, written["event_id"]))
+    assert exc.value.status_code == 404
+
+
+def test_final_and_cancel_release_audio_and_reject_later_chunks(_isolated_transcripts):
+    tid = _run(gw.create_transcription(gw.TranscriptCreateBody(language="en")))["transcript_id"]
+    pcm = base64.b64encode(b"\0\0").decode()
+    final = _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=pcm, final=True)))
+    assert _isolated_transcripts[0].buffered_pcm_bytes == 0
+
+    with pytest.raises(HTTPException) as exc:
+        _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=pcm)))
+    assert exc.value.status_code == 409
+    _run(_drain(_run(gw.stream_transcript_event(tid, final["event_id"]))))
+    assert tid not in gw._transcripts
+
+    tid2 = _run(gw.create_transcription(gw.TranscriptCreateBody(language="en")))["transcript_id"]
+    partial = _run(gw.append_transcript_chunk(tid2, gw.TranscriptChunkBody(pcm_s16le_b64=pcm)))
+    _run(gw.cancel_transcription(tid2))
+    assert _isolated_transcripts[1].buffered_pcm_bytes == 0
+    with pytest.raises(HTTPException) as missing:
+        _run(gw.append_transcript_chunk(tid2, gw.TranscriptChunkBody(pcm_s16le_b64=pcm)))
+    assert missing.value.status_code == 404
+    with pytest.raises(HTTPException) as abandoned:
+        _run(gw.stream_transcript_event(tid2, partial["event_id"]))
+    assert abandoned.value.status_code == 404

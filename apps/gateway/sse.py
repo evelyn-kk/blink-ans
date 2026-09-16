@@ -29,7 +29,18 @@ STREAM_SLOTS = 256
 STOP_POLL_S = 0.2
 
 
+def validate_event(ev: dict) -> None:
+    # T-008：audio bytes 不得进入 SSE；transcript 只承载已转写的文本和该片段
+    # 的终态。已有事件维持原样，未来新增 event 也不应被这里的窄校验误拒。
+    if ev.get("type") == "transcript":
+        required = {"type", "text", "final", "sequence"}
+        if set(ev) != required or not isinstance(ev["text"], str) or not isinstance(ev["final"], bool) \
+                or not isinstance(ev["sequence"], int) or ev["sequence"] < 1:
+            raise ValueError("invalid transcript event")
+
+
 def format_event(ev: dict) -> str:
+    validate_event(ev)
     return f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
 
@@ -68,6 +79,9 @@ async def sse_stream(
     def produce() -> None:
         try:
             for ev in events:
+                # 在生产线程验证，让异常走已有的 error-event 路径；不能等消费
+                # 协程 format 时才抛，否则坏 transcript 会直接把 SSE 响应打断。
+                validate_event(ev)
                 if not emit(ev):
                     break
         except Exception as exc:
