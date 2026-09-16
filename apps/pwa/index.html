@@ -36,6 +36,11 @@
 <h1>blink-ans <small>Java / Spring 云原生问答</small></h1>
 
 <form id="f">
+  <label for="language">语言</label>
+  <select id="language" aria-label="回答与转写语言">
+    <option value="zh">中文</option>
+    <option value="en">English</option>
+  </select>
   <input id="q" placeholder="例如：Kafka 消费者重复消费怎么排查" autocomplete="off" autofocus>
   <button id="go">提问</button>
   <button id="mic" type="button">语音输入</button>
@@ -51,7 +56,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const statusEl = $('#status'), answerEl = $('#answer'), srcEl = $('#sources'), metaEl = $('#meta');
-const transcriptEl = $('#transcript'), micEl = $('#mic');
+const transcriptEl = $('#transcript'), micEl = $('#mic'), languageEl = $('#language');
 
 // 证据充分性直接影响用户该多信任这个回答，必须显式呈现而不是藏起来。
 const SUFFICIENCY = {
@@ -72,7 +77,7 @@ $('#f').addEventListener('submit', async e => {
   try {
     const r = await fetch('/v1/answers', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, language: languageEl.value }),
     });
     if (!r.ok) throw new Error(`创建会话失败 (${r.status})`);
     const { stream_url } = await r.json();
@@ -110,6 +115,7 @@ function releaseRecorderHardware(r) {
 }
 function resetRecorderUI(error) {
   micEl.textContent = '语音输入'; micEl.disabled = false;
+  languageEl.disabled = false;
   if (error) { statusEl.className='err'; statusEl.textContent=error.message || String(error); }
 }
 function cancelRecorder(error, r = recorder) {
@@ -137,10 +143,12 @@ micEl.addEventListener('click', async () => {
     stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
     ctx = new AudioContext(); const source = ctx.createMediaStreamSource(stream);
     node = ctx.createScriptProcessor(8192, 1, 1);
-    const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language:'zh'})});
+    const language = languageEl.value;
+    const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language})});
     if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
     ({transcript_id:id} = await created.json());
     recorder = {stream, ctx, node, id, held:null, queue:Promise.resolve()};
+    languageEl.disabled = true;
     node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false)); };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {

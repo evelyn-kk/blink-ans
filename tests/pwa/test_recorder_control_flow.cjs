@@ -28,7 +28,7 @@ function deferred() {
 
 function boot({fetch, getUserMedia, context}) {
   const elements = new Map();
-  for (const id of ['f', 'q', 'go', 'mic', 'transcript', 'status', 'answer', 'sources', 'meta']) {
+  for (const id of ['f', 'language', 'q', 'go', 'mic', 'transcript', 'status', 'answer', 'sources', 'meta']) {
     elements.set(`#${id}`, {
       disabled: false, textContent: '', innerHTML: '', className: '', value: '',
       handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; },
@@ -46,7 +46,12 @@ function boot({fetch, getUserMedia, context}) {
   };
   vm.createContext(sandbox);
   vm.runInContext(script, sandbox, {filename: 'apps/pwa/index.html'});
-  return {click: () => elements.get('#mic').handlers.click(), mic: elements.get('#mic')};
+  elements.get('#language').value = 'zh';
+  return {
+    click: () => elements.get('#mic').handlers.click(),
+    submit: () => elements.get('#f').handlers.submit({preventDefault() {}}),
+    element: id => elements.get(`#${id}`),
+  };
 }
 
 async function initializationFailureReleasesEverything() {
@@ -140,9 +145,41 @@ async function stoppingClosesCallbackBeforeAwaitingQueue() {
   assert.equal(chunks.filter(chunk => chunk.final).length, 1, 'final must be unique');
 }
 
+async function chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording() {
+  const track = {stop() {}};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {sampleRate: 16000, destination: {}, close() {}, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const calls = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      calls.push([url, options.method || 'GET', options.body]);
+      if (url === '/v1/answers') return response({stream_url: '/answer-stream'});
+      if (url === '/v1/transcriptions') return response({transcript_id: 'language-id'});
+      if (url === '/answer-stream' || url === '/v1/transcriptions/language-id') return streamResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  app.element('language').value = 'en';
+  app.element('q').value = 'How do I stop Spring Boot?';
+  await app.submit();
+  assert.deepEqual(JSON.parse(calls[0][2]), {question: 'How do I stop Spring Boot?', language: 'en'});
+  await app.click();
+  assert.deepEqual(JSON.parse(calls[2][2]), {language: 'en'});
+  assert.equal(app.element('language').disabled, true, 'language cannot change while a transcript is active');
+  await app.click(); await tick(); await tick();
+  assert.equal(app.element('language').disabled, false, 'language unlocks after the recording finishes');
+}
+
 (async () => {
   await initializationFailureReleasesEverything();
   await audioContextFailureReleasesGrantedMicrophone();
   await stoppingClosesCallbackBeforeAwaitingQueue();
+  await chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
