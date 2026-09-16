@@ -25,7 +25,9 @@ class _FakeOrchestrator:
     def answer_events(self, request):
         self.requests.append(request)
         yield {"type": "retrieval", "sufficiency": "sufficient"}
-        yield {"type": "sources", "items": [{"url": "https://example.test", "citation": self.citation}]}
+        yield {"type": "sources", "items": [{
+            "index": 1, "chunk_id": 101, "url": "https://example.test", "citation": self.citation,
+        }]}
         yield {"type": "answer_delta", "text": self.answer_text}
         yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
                "prompt_tokens": 10, "evidence_count": 1, "served_by": "local"}
@@ -68,6 +70,23 @@ def test_source_assertion_rejects_the_wrong_cited_project():
     )
     assert case.sources_missed == ["kafka"]
     assert any("缺少期望来源" in failure for failure in case.failures)
+
+
+def test_case_marks_a_sources_event_without_chunk_identity_as_incomplete():
+    class MissingChunkIdOrchestrator:
+        def answer(self, _request):
+            yield {"type": "retrieval", "sufficiency": "sufficient"}
+            yield {"type": "sources", "items": [{
+                "index": 1, "url": "https://example.test", "citation": "kafka 4.0 · test",
+            }]}
+            yield {"type": "answer_delta", "text": "The producer is idempotent. [1]"}
+            yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
+                   "prompt_tokens": 10, "evidence_count": 1, "served_by": "local"}
+
+    case = basic.run_case(MissingChunkIdOrchestrator(), _SPEC, "en")
+
+    assert case.selected_evidence == []
+    assert "来源事件缺少审计字段 'chunk_id'" in case.failures
 
 
 def test_language_summary_keeps_results_separate():
@@ -146,9 +165,14 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
 
         def answer(self, _request):
             yield {"type": "retrieval", "sufficiency": "sufficient"}
-            yield {"type": "sources", "items": [{
-                "url": "https://example.test", "citation": "kafka 4.0 · test",
-            }]}
+            # URL 刻意按非字母序排列，两个 rowid 共享同 URL；报告须逐项保留
+            # event 原顺序、引用编号、rowid 与完整 citation，不能只从 URL 复建。
+            yield {"type": "sources", "items": [
+                {"index": 1, "chunk_id": 73, "url": "https://z.example.test/page",
+                 "citation": "kafka 4.0 · first selected chunk"},
+                {"index": 2, "chunk_id": 72, "url": "https://z.example.test/page",
+                 "citation": "kafka 4.0 · second selected chunk"},
+            ]}
             yield {"type": "answer_delta", "text": "The producer is idempotent. [1]"}
             yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
                    "prompt_tokens": 10, "evidence_count": 1, "served_by": "local"}
@@ -196,6 +220,12 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
     assert (group["en"]["keypoints_hit"], group["en"]["keypoints_total"]) == (1, 1)
     assert group["en"]["sources_missed"] == 0
     assert group["en"]["cases"][0]["question"] == _SPEC["q_en"]
+    assert group["en"]["cases"][0]["selected_evidence"] == [
+        {"index": 1, "chunk_id": 73, "url": "https://z.example.test/page",
+         "citation": "kafka 4.0 · first selected chunk"},
+        {"index": 2, "chunk_id": 72, "url": "https://z.example.test/page",
+         "citation": "kafka 4.0 · second selected chunk"},
+    ]
 
 
 def test_main_fails_closed_before_model_load_when_runtime_git_identity_is_not_a_full_commit(

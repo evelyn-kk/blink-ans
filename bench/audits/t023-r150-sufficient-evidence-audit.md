@@ -3,7 +3,9 @@
 ## 可复现身份与边界
 
 - 报告：`bench/reports/eval-basic-20260916T062018Z.json`（该报告被忽略；本审计只读取它）。
-- 报告运行期实现：`5b828106f2dde13e0e490aabbef7b408db35531c`；当前 `HEAD` 同值。
+- 报告运行期实现：`5b828106f2dde13e0e490aabbef7b408db35531c`。审计产物提交
+  `3b7ff6d3a775fea0be46f1fb566d25b988d2bb29` 是该实现的后代（可用
+  `git merge-base --is-ancestor 5b82810 3b7ff6d` 复核），**不是同一 HEAD**；没有倒填旧报告。
 - 报告/index 身份：`index_chunks=17080`、`dictionary_version=eba42d53742f`、
   `template_version=b89dcecf0dcd`、`offline_mode=true`、`served_by={local:47, policy:3}`。
 - DB：`data/index/current.db`。只读 SQL：

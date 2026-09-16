@@ -76,6 +76,10 @@ class Case:
     cost_usd: float = 0.0          # --offline 模式下应恒为 0，见 main() 里的隐含正确性检查
     urls: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
+    # 评测报告必须保留实际进入 prompt 的来源身份；只留 URL 时，同一页被切成多块会
+    # 无法在事后审计到底选了哪一块（CR-145）。顺序是 sources 事件的原始顺序，
+    # `index` 是生成 prompt 使用的引用编号，二者都不能从 URL 或 DB 重算代替。
+    selected_evidence: list[dict[str, int | str]] = field(default_factory=list)
     keypoints_hit: list[str] = field(default_factory=list)
     keypoints_missed: list[str] = field(default_factory=list)
     sources_missed: list[str] = field(default_factory=list)
@@ -151,9 +155,24 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
         elif t == "answer_delta":
             answer += ev["text"]
         elif t == "sources":
-            c.sources = len(ev["items"])
-            c.urls = [i["url"] for i in ev["items"]]
-            c.projects = [_project_of(i["citation"]) for i in ev["items"]]
+            items = ev["items"]
+            c.sources = len(items)
+            c.urls = [i["url"] for i in items]
+            c.projects = [_project_of(i["citation"]) for i in items]
+            try:
+                c.selected_evidence = [
+                    {
+                        "index": i["index"],
+                        "chunk_id": i["chunk_id"],
+                        "citation": i["citation"],
+                        "url": i["url"],
+                    }
+                    for i in items
+                ]
+            except KeyError as exc:
+                # 不能让未来报告再次“有来源却没有证据身份”；保留事件数量以使旧的
+                # 来源判据仍可诊断，但明确把评测 case 判为不完整，而非猜 rowid。
+                c.failures.append(f"来源事件缺少审计字段 {exc.args[0]!r}")
         elif t == "done":
             c.cited = len(ev["cited_evidence"])
             c.ttft_s, c.total_s = ev["ttft_s"], ev["total_s"]
