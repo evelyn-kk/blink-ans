@@ -20,6 +20,7 @@ import argparse
 import json
 import re
 import statistics
+import subprocess
 import sys
 import time
 import urllib.error
@@ -48,6 +49,7 @@ from services.retrieval.store import ChunkStore  # noqa: E402
 
 QUESTIONS = ROOT / "knowledge" / "eval" / "basic_questions.yaml"
 REPORTS = ROOT / "bench" / "reports"
+_FULL_GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass
@@ -99,6 +101,22 @@ def check_url(url: str, timeout: float = 10.0) -> bool:
         return e.code == 405   # 少数站点拒绝 HEAD，不算链接失效
     except Exception:
         return False
+
+
+def runtime_git_commit() -> str:
+    """在评测启动时钉住实现身份，不能等报告写盘时再读取漂移的 HEAD。"""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"无法在评测启动时读取 Git commit: {exc}") from exc
+    commit = result.stdout.strip()
+    if result.returncode or not _FULL_GIT_COMMIT.fullmatch(commit):
+        detail = result.stderr.strip() or repr(commit)
+        raise RuntimeError(f"无法验证评测启动时的完整 Git commit: {detail}")
+    return commit
 
 
 def _question_for(spec: dict, language: str) -> str:
@@ -266,6 +284,12 @@ def main() -> int:
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
 
+    try:
+        implementation_commit = runtime_git_commit()
+    except RuntimeError as exc:
+        print(f"评测身份验证失败: {exc}", file=sys.stderr)
+        return 2
+
     specs = yaml.safe_load(QUESTIONS.read_text(encoding="utf-8"))["questions"]
     try:
         validate_specs(specs)
@@ -380,6 +404,7 @@ def main() -> int:
     by_language = summarize_by_language(cases)
     path.write_text(json.dumps({
         "schema_version": 2,
+        "implementation_commit": implementation_commit,
         "template_version": template_version(),
         "language": args.language,
         "by_language": by_language,

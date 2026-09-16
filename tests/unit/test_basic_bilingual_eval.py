@@ -120,7 +120,8 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
             self.status = SimpleNamespace(loaded=True, error=None)
 
         def load(self, _prompt):
-            pass
+            # 模拟评测开始后工作树 HEAD 前移；报告仍必须保留启动时已钉住的身份。
+            head["current"] = late_commit
 
     class FakeEmbedder:
         def load(self):
@@ -164,6 +165,16 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
     monkeypatch.setattr(basic, "load_dotenv", lambda _path: None)
     monkeypatch.setattr(basic, "system_prompt", lambda language: f"prompt-{language}")
     monkeypatch.setattr(basic, "template_version", lambda: "test-template")
+    start_commit = "1" * 40
+    late_commit = "2" * 40
+    head = {"current": start_commit}
+    git_calls = []
+
+    def fake_git_run(args, **kwargs):
+        git_calls.append((args, kwargs.get("cwd"), head["current"]))
+        return SimpleNamespace(returncode=0, stdout=f"{head['current']}\n", stderr="")
+
+    monkeypatch.setattr(basic.subprocess, "run", fake_git_run)
     monkeypatch.setattr(sys, "argv", ["run_basic.py", "--offline", "--language", "en"])
 
     assert basic.main() == 0
@@ -174,9 +185,39 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
     group = report["by_language"]
     assert set(group) == {"en"}
     assert report["schema_version"] == 2
+    # 这同时锁住“运行开始时取一次”而非写盘时重读：FakeEngine.load 后 HEAD 已变为 late。
+    assert report["implementation_commit"] == start_commit
+    assert git_calls == [
+        (["git", "rev-parse", "--verify", "HEAD^{commit}"], basic.ROOT, start_commit),
+    ]
     assert report["language"] == "en"
     assert (report["passed"], report["total"]) == (1, 1)
     assert (group["en"]["passed"], group["en"]["total"]) == (1, 1)
     assert (group["en"]["keypoints_hit"], group["en"]["keypoints_total"]) == (1, 1)
     assert group["en"]["sources_missed"] == 0
     assert group["en"]["cases"][0]["question"] == _SPEC["q_en"]
+
+
+def test_main_fails_closed_before_model_load_when_runtime_git_identity_is_not_a_full_commit(
+    monkeypatch, tmp_path, capsys,
+):
+    """无可审计运行期身份时不构造模型、更不得写出无 commit 的报告。"""
+    model_started = False
+
+    class UnexpectedEngine:
+        def __init__(self, _model):
+            nonlocal model_started
+            model_started = True
+
+    monkeypatch.setattr(basic, "InferenceEngine", UnexpectedEngine)
+    monkeypatch.setattr(
+        basic.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="short\n", stderr=""),
+    )
+    monkeypatch.setattr(basic, "REPORTS", tmp_path / "reports")
+    monkeypatch.setattr(sys, "argv", ["run_basic.py", "--offline"])
+
+    assert basic.main() == 2
+    assert not model_started
+    assert not (tmp_path / "reports").exists()
+    assert "评测身份验证失败" in capsys.readouterr().err
