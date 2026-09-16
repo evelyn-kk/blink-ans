@@ -101,8 +101,8 @@ async function postChunk(id, pcm_s16le_b64, final) {
   const {stream_url} = await r.json();
   await consume(stream_url);
 }
-function stopRecorder(error) {
-  const r = recorder; if (!r) return; recorder = null;
+function stopRecorder(error, r = recorder) {
+  if (!r) return; if (recorder === r) recorder = null;
   r.node.disconnect(); r.stream.getTracks().forEach(t => t.stop()); r.ctx.close();
   if (r.id) fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
   micEl.textContent = '语音输入'; micEl.disabled = false;
@@ -110,22 +110,35 @@ function stopRecorder(error) {
 }
 micEl.addEventListener('click', async () => {
   if (recorder) { // stop: serialize behind earlier chunks, then final held chunk
-    const r = recorder; micEl.disabled = true;
-    try { await r.queue; if (r.held) await postChunk(r.id, r.held, true); }
-    catch (e) { stopRecorder(e); return; }
-    stopRecorder(); return;
+    const r = recorder; recorder = null; micEl.disabled = true;
+    // 封闭 callback 后才等队列：停止期间不得再追加 partial 或替换 held。
+    r.node.onaudioprocess = null; r.node.disconnect();
+    const queue = r.queue, held = r.held;
+    try { await queue; if (held) await postChunk(r.id, held, true); }
+    catch (e) { stopRecorder(e, r); return; }
+    stopRecorder(null, r); return;
   }
+  let stream, ctx, node, id;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
-    const ctx = new AudioContext(); const source = ctx.createMediaStreamSource(stream);
-    const node = ctx.createScriptProcessor(8192, 1, 1);
+    stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
+    ctx = new AudioContext(); const source = ctx.createMediaStreamSource(stream);
+    node = ctx.createScriptProcessor(8192, 1, 1);
     const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language:'zh'})});
     if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
-    const {transcript_id:id} = await created.json();
+    ({transcript_id:id} = await created.json());
     recorder = {stream, ctx, node, id, held:null, queue:Promise.resolve()};
     node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false)); };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
-  } catch (e) { stopRecorder(e); }
+  } catch (e) {
+    // `recorder` 发布后，资源所有权已交给 stopRecorder；不能再按局部变量二次 DELETE。
+    if (recorder) { stopRecorder(e); return; }
+    // recorder 尚未发布时也拥有局部资源；不能等 stopRecorder 发现 null 才清理。
+    if (node) { node.onaudioprocess = null; node.disconnect(); }
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ctx) ctx.close();
+    if (id) fetch(`/v1/transcriptions/${id}`, {method:'DELETE'}).catch(() => {});
+    stopRecorder(e);
+  }
 });
 
 // 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，
