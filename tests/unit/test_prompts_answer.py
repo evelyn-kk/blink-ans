@@ -75,6 +75,12 @@ def test_system_prompt_still_requires_citations(language):
     assert "[1]" in text  # 提示词自带的引用格式示例
 
 
+def test_system_prompts_require_evidence_terms_without_forcing_every_evidence_word():
+    """R158：通用术语保真，不按题目/正则硬编码，也不要求逐块摘词。"""
+    assert "专有术语、枚举值或配置键" in ap.system_prompt("zh")
+    assert "specific technical term, enum value, or configuration key" in ap.system_prompt("en")
+
+
 def test_system_prompt_zh_does_not_force_six_fixed_section_headers():
     """旧模板把这六个词当**固定分节标题**（后接全角冒号，如"适用前提："），
     新提示词允许在正文里自然提到"失败模式"这类概念（例如作为风险的举例），

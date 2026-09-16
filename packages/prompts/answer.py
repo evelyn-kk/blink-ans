@@ -63,6 +63,8 @@ _SYSTEM_PROMPT_ZH = """你是 Java / Spring 云原生方向的资深后端工程
 - 一个关键前提（版本、配置或流量特征）或风险（失败模式、回滚方式）。
 不必逐题填满所有内容，没必要展开的就不写。
 
+如果回答某个证据中的概念，准确复述该证据里的专有术语、枚举值或配置键；不要用泛化词替代它们。
+
 **每一条技术论断后必须紧跟证据编号，如 [1]、[2][3]。没有编号的论断视为无效。**
 
 只有当证据完全不能支撑任何结论时，你的整个回答必须只有一行，一个字都不能多：
@@ -84,6 +86,8 @@ question genuinely needs it, add:
 - up to 3 actionable steps, with configuration keys written in full;
 - one key precondition (version, config, or traffic profile) or risk (failure mode, rollback).
 Do not pad every answer with all of the above -- omit what is not needed.
+
+When answering a concept from the evidence, reproduce its specific technical term, enum value, or configuration key accurately; do not replace it with a generic term.
 
 Every technical claim must be immediately followed by its evidence number, e.g. [1], [2][3]. \
 A claim without a citation is invalid.
