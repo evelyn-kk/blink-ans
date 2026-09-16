@@ -78,3 +78,31 @@ def test_final_and_cancel_release_audio_and_reject_later_chunks(_isolated_transc
     with pytest.raises(HTTPException) as abandoned:
         _run(gw.stream_transcript_event(tid2, partial["event_id"]))
     assert abandoned.value.status_code == 404
+
+
+def test_final_transcriber_failure_is_503_and_discards_pcm_and_session(monkeypatch):
+    """CR-151：final 模型失败不能伪装客户端状态冲突，更不能留住 PCM。"""
+    sessions: list[TranscriptSession] = []
+    monkeypatch.setattr(gw, "_transcripts", {})
+    monkeypatch.setattr(gw, "_pending_transcript_events", {})
+
+    def create(language):
+        def fail(_waveform, *, language):
+            raise RuntimeError(f"{language} model unavailable")
+
+        session = TranscriptSession(language, fail)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(gw, "_new_transcript_session", create)
+    tid = _run(gw.create_transcription(gw.TranscriptCreateBody(language="zh")))["transcript_id"]
+    pcm = base64.b64encode(b"\0\0").decode()
+
+    with pytest.raises(HTTPException) as exc:
+        _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=pcm, final=True)))
+
+    assert exc.value.status_code == 503
+    assert sessions[0].buffered_pcm_bytes == 0
+    assert sessions[0].finished is True
+    assert tid not in gw._transcripts
+    assert not gw._pending_transcript_events

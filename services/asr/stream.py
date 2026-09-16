@@ -26,6 +26,10 @@ class Transcriber(Protocol):
     def __call__(self, waveform: np.ndarray, *, language: str) -> str: ...
 
 
+class TranscriptionFailed(RuntimeError):
+    """本地转写器已被调用但未产生文本；不是客户端 PCM 格式错误。"""
+
+
 @dataclass(frozen=True)
 class TranscriptEvent:
     text: str
@@ -88,12 +92,19 @@ class TranscriptSession:
             # 不会共享可变内存。
             waveform = np.frombuffer(bytes(self._pcm), dtype="<i2").astype(np.float32)
             waveform /= 32768.0
-            text = self._transcribe(waveform, language=self.language).strip()
+            # final 是语音段的不可重试边界：即使本地模型加载/推理失败，也不能
+            # 留住用户原始 PCM 等客户端再 append。partial 的异常则保留缓冲，允许
+            # 网络抖动或临时模型故障后由客户端重试同一段。
+            try:
+                text = self._transcribe(waveform, language=self.language).strip()
+            except Exception as exc:
+                raise TranscriptionFailed("local transcription failed") from exc
+            finally:
+                if final:
+                    self._pcm.clear()
+                    self._finished = True
             self._sequence += 1
             event = TranscriptEvent(text=text, final=final, sequence=self._sequence)
-            if final:
-                self._pcm.clear()
-                self._finished = True
             return event
 
     def cancel(self) -> None:

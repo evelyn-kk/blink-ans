@@ -39,7 +39,9 @@ from services.orchestrator.answering import (  # noqa: E402
 from services.orchestrator.session import (  # noqa: E402
     ResolvedTurn, SessionState, build_request_for_turn, stream_and_record,
 )
-from services.asr.stream import TranscriptSession, mlx_whisper_transcriber  # noqa: E402
+from services.asr.stream import (  # noqa: E402
+    TranscriptSession, TranscriptionFailed, mlx_whisper_transcriber,
+)
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
 
@@ -110,6 +112,14 @@ def _new_transcript_session(language: Language) -> TranscriptSession:
     # 不在 lifespan 预加载 whisper：它与生成/嵌入模型会竞争 16 GB 内存，且没有
     # 活跃录音时不该占用。实际 adapter 仍为纯本地 mlx-whisper。
     return TranscriptSession(language, mlx_whisper_transcriber)
+
+
+def _discard_transcription(transcript_id: str) -> None:
+    """结束会话并删除其尚未取走的 transcript 文本。"""
+    _transcripts.pop(transcript_id, None)
+    for event_id, (owner, _event) in list(_pending_transcript_events.items()):
+        if owner == transcript_id:
+            _pending_transcript_events.pop(event_id, None)
 
 
 @asynccontextmanager
@@ -322,6 +332,12 @@ async def append_transcript_chunk(transcript_id: str, body: TranscriptChunkBody)
         event = await asyncio.to_thread(session.append, pcm, final=body.final)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    except TranscriptionFailed as exc:
+        if body.final:
+            # final 失败已经由 session finally 清掉 PCM/关闭；网关随即删除 session
+            # 与任何未读 partial，不能把一个结束过的对象留到容量淘汰。
+            _discard_transcription(transcript_id)
+        raise HTTPException(503, "本地转写暂不可用，请重新开始录音") from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if len(_pending_transcript_events) >= _MAX_PENDING_TRANSCRIPT_EVENTS:
@@ -358,15 +374,13 @@ async def stream_transcript_event(transcript_id: str, event_id: str):
 
 @app.delete("/v1/transcriptions/{transcript_id}", status_code=204)
 async def cancel_transcription(transcript_id: str):
-    session = _transcripts.pop(transcript_id, None)
+    session = _transcripts.get(transcript_id)
     if session is None:
         raise HTTPException(404, "转写会话不存在或已结束")
     await asyncio.to_thread(session.cancel)
     # 取消的语义包含放弃尚未读取的 partial 文本，不能把它留在一次性 event
     # 字典里直到容量淘汰。
-    for event_id, (owner, _event) in list(_pending_transcript_events.items()):
-        if owner == transcript_id:
-            _pending_transcript_events.pop(event_id, None)
+    _discard_transcription(transcript_id)
 
 
 @app.post("/v1/answers", status_code=201)

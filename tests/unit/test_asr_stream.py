@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.asr.stream import (  # noqa: E402
     MAX_PCM_BYTES,
+    TranscriptionFailed,
     TranscriptSession,
 )
 
@@ -73,7 +74,23 @@ def test_rejects_odd_pcm_and_overflow_before_transcribing():
     with pytest.raises(ValueError, match="whole 16-bit"):
         session.append(b"x")
     assert calls == 0
-
     with pytest.raises(ValueError, match="exceeds"):
         session.append(b"\0" * (MAX_PCM_BYTES + 2))
     assert calls == 0
+
+
+def test_final_failure_releases_pcm_and_closes_but_partial_failure_can_retry():
+    def fail(_waveform, *, language):
+        raise RuntimeError(f"{language} model unavailable")
+
+    final = TranscriptSession("zh", fail)
+    with pytest.raises(TranscriptionFailed, match="local transcription failed"):
+        final.append(_pcm([1]), final=True)
+    assert final.buffered_pcm_bytes == 0
+    assert final.finished is True
+
+    partial = TranscriptSession("en", fail)
+    with pytest.raises(TranscriptionFailed):
+        partial.append(_pcm([1]), final=False)
+    assert partial.buffered_pcm_bytes == 2
+    assert partial.finished is False
