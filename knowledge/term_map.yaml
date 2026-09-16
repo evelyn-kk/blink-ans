@@ -104,7 +104,6 @@ terms:
   启动失败: [failure analyzer, startup failure, application failed to start]
   自动配置: [auto-configuration, autoconfigure, conditional]
   声明式事务: [declarative transaction, Transactional]
-  同一个类里的方法互相调用: [self-invocation, proxy, AOP proxy]
   自调用: [self-invocation, proxy, AOP proxy]
   回滚: [rollback, rollbackFor]
   熔断: [circuit breaker, resilience]
