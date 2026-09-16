@@ -350,6 +350,52 @@ def test_declined_ignores_translated_prose():
     assert declined("The evidence is insufficient to support a conclusion.") is False
 
 
+@pytest.mark.parametrize("question, model_output", [
+    ("推荐几部值得看的科幻电影", "推荐 A、B 两部电影 [1]。\nNO_EVIDENCE"),
+    ("怎么用 Rust 写一个词法分析器", "可用 nom 实现词法器 [1]。"),
+])
+def test_limited_explicitly_out_of_scope_never_streams_model_advice_or_sources(
+    monkeypatch, question, model_output,
+):
+    """R145：外域问题落入 limited 时，模型违约文本不能决定是否安全拒答。"""
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit(dist=0.74)]
+    )
+
+    class AdviceEngine(FakeEngine):
+        def stream(self, *_args, **_kwargs):
+            yield {"type": "delta", "text": model_output}
+            yield {"type": "done", "ttft_s": 0.1, "prompt_tokens": 10,
+                   "prefilled_tokens": 10, "prefix_reused": True, "decode_tps": 20.0}
+
+    class RecordingRouter(FakeRouter):
+        called = False
+
+        def generate(self, *args, **kwargs):
+            self.called = True
+            yield from super().generate(*args, **kwargs)
+
+    router = RecordingRouter(AdviceEngine())
+    events = list(Orchestrator(None, FakeEmbedder(), router).answer(AnswerRequest(question)))
+
+    assert router.called is False
+    assert "".join(e["text"] for e in events if e["type"] == "answer_delta") == "NO_EVIDENCE"
+    assert next(e for e in events if e["type"] == "done")["served_by"] == "policy"
+    assert next(e for e in events if e["type"] == "sources")["items"] == []
+
+
+def test_limited_in_scope_request_keeps_the_existing_cautious_answer_path(monkeypatch):
+    """R145 不把所有 limited 都改拒答：显式项目范围的边缘问题仍可作答。"""
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit(dist=0.74)]
+    )
+    events = list(Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine())).answer(
+        AnswerRequest("边缘问题", technology="kafka")
+    ))
+    assert next(e for e in events if e["type"] == "done")["served_by"] == "local"
+    assert next(e for e in events if e["type"] == "sources")["items"]
+
+
 # ---------- T-022：双语请求的语言选择 ----------
 
 def test_answer_rejects_unsupported_language(monkeypatch):

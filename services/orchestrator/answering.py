@@ -47,6 +47,13 @@ from services.retrieval.tokenize import detect_technology  # noqa: E402
 
 _CITATION = re.compile(r"\[(\d{1,2})\]")
 
+# 这些是产品范围已明确排除的领域词。它们只在检索落入 LIMITED 的模糊带时
+# 参与失败关闭：不能把“没有命中项目名”的一般技术提问一律拒掉（例如用户显式
+# 选择项目后的边缘问题），也不能靠模型是否把 NO_EVIDENCE 放在正确位置来决定安全性。
+_OUT_OF_SCOPE = re.compile(
+    r"(?:\brust\b|swiftui|\breact\b|天气|科幻.{0,8}电影|年终奖)", re.IGNORECASE
+)
+
 
 def declined(answer: str) -> bool:
     """模型是否用固定标记表明证据不支撑作答。
@@ -59,6 +66,21 @@ def declined(answer: str) -> bool:
     界面上一边写着"没有依据"，一边列出五条链接，读者会以为那些就是依据。
     """
     return answer.strip().startswith(DECLINE_TOKEN)
+
+
+def must_refuse_limited_out_of_scope(request: AnswerRequest, verdict: "Assessment") -> bool:
+    """只收紧“明确外域 + limited”的错误证据形态。
+
+    LIMITED 仍是有效边缘技术问题可带不确定性作答的既定档位。这里额外要求问题
+    没有显式/可识别的本产品技术域，且含范围外领域词；命中后跳过模型，避免它把
+    建议正文与尾部 NO_EVIDENCE 混在一起并把不相关证据展示为来源。
+    """
+    return (
+        verdict.level is Sufficiency.LIMITED
+        and request.technology is None
+        and detect_technology(request.question) is None
+        and bool(_OUT_OF_SCOPE.search(request.question))
+    )
 
 
 def citation_coverage(answer: str, evidence_count: int) -> list[int]:
@@ -486,6 +508,25 @@ class Orchestrator:
             "reason": verdict.reason,
             "elapsed_ms": retrieval_ms,
         }
+
+        if must_refuse_limited_out_of_scope(req, verdict):
+            # 明确外域却刚好落在距离的 LIMITED 带时，不把偶然召回的资料送给
+            # 模型。否则模型即使最后吐 NO_EVIDENCE，也可能已经给出编造建议；
+            # startswith 判据无法撤回已流出的正文。该拒答是确定性策略，不是后端。
+            yield {"type": "status", "message": "本地知识库不覆盖该问题，未采纳不相关资料"}
+            yield {"type": "answer_delta", "text": DECLINE_TOKEN}
+            yield {
+                "type": "done", "served_by": "policy",
+                "sufficiency": Sufficiency.INSUFFICIENT.value,
+                "template_version": template_version(),
+                "ttft_s": 0.0, "ttft_over_budget": False,
+                "prompt_tokens": 0, "prefilled_tokens": 0, "prefix_reused": False,
+                "cache_read_tokens": None, "cache_write_tokens": None, "cost_usd": 0.0,
+                "decode_tps": 0.0, "cited_evidence": [], "evidence_count": 0,
+                "total_s": round(time.perf_counter() - t0, 3), "policy_refusal": True,
+            }
+            yield {"type": "sources", "items": []}
+            return
 
         if verdict.level is Sufficiency.INSUFFICIENT:
             yield {"type": "status", "message": "本地知识库未覆盖该问题"}
