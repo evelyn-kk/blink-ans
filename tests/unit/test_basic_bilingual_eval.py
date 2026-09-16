@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +47,8 @@ _SPEC = {
     "expect_sources": ["kafka"],
 }
 
+_HPA_KEYPOINT = r"(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)"
+
 
 def _legacy_structural_failures(answer: str, citation: str) -> list[str]:
     """T-022 旧行为的最小复现：有来源、有引用便会放行，不检查事实。"""
@@ -71,6 +74,31 @@ def test_source_assertion_rejects_the_wrong_cited_project():
     )
     assert case.sources_missed == ["kafka"]
     assert any("缺少期望来源" in failure for failure in case.failures)
+
+
+def test_keypoint_scoring_treats_markdown_newlines_as_single_spaces():
+    """CR-148：R153 等价的“指标 … 利用率目标”不应因 Markdown 换行漏判。"""
+    answer = "HPA 使用 CPU 或内存指标来扩缩容。\n\n- CPU 利用率目标（如 80%）作为触发条件。"
+
+    # 固定 2f83ce9 的旧判据直接对 raw text 做 regex，`.` 不跨换行，行为应失败。
+    legacy_hit = [p for p in [_HPA_KEYPOINT] if re.search(p, answer)]
+    assert legacy_hit == []
+
+    hit, missed = basic._score_keypoints(answer, [_HPA_KEYPOINT])
+
+    assert hit == [_HPA_KEYPOINT]
+    assert missed == []
+    assert answer == "HPA 使用 CPU 或内存指标来扩缩容。\n\n- CPU 利用率目标（如 80%）作为触发条件。"
+
+
+def test_keypoint_scoring_keeps_already_inline_match_and_rejects_missing_target():
+    inline_hit, inline_missed = basic._score_keypoints("metric 的 target 是 80%", [_HPA_KEYPOINT])
+    missing_hit, missing_missed = basic._score_keypoints("HPA 指标如下：\n\n- 仅记录当前 CPU 使用率。", [_HPA_KEYPOINT])
+
+    assert inline_hit == [_HPA_KEYPOINT]
+    assert inline_missed == []
+    assert missing_hit == []
+    assert missing_missed == [_HPA_KEYPOINT]
 
 
 def test_case_marks_a_sources_event_without_chunk_identity_as_incomplete():

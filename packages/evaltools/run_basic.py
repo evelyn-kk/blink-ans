@@ -132,8 +132,14 @@ def _question_for(spec: dict, language: str) -> str:
 
 
 def _score_keypoints(answer: str, patterns: list[str]) -> tuple[list[str], list[str]]:
-    """事实断言：每个登记正则都必须在非拒答回答中出现。"""
-    hit = [pattern for pattern in patterns if re.search(pattern, answer)]
+    """事实断言：每个登记正则都必须在非拒答回答中出现。
+
+    Markdown 流的换行只表示排版，不能让 ``.`` 的有限距离窗口把同一事实误判
+    为断开。仅将一个或多个换行及其相邻水平空白折为一个普通空格；不折叠正文
+    内的词、不删除字符。原始 ``answer_text`` 仍原样写入报告供人工审计。
+    """
+    normalized = re.sub(r"[^\S\r\n]*[\r\n]+[^\S\r\n]*", " ", answer)
+    hit = [pattern for pattern in patterns if re.search(pattern, normalized)]
     missed = [pattern for pattern in patterns if pattern not in hit]
     return hit, missed
 
