@@ -101,22 +101,36 @@ async function postChunk(id, pcm_s16le_b64, final) {
   const {stream_url} = await r.json();
   await consume(stream_url);
 }
-function stopRecorder(error, r = recorder) {
-  if (!r) return; if (recorder === r) recorder = null;
-  r.node.disconnect(); r.stream.getTracks().forEach(t => t.stop()); r.ctx.close();
-  if (r.id) fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
+function releaseRecorderHardware(r) {
+  if (!r || r.hardwareReleased) return;
+  r.hardwareReleased = true;
+  if (r.node) { r.node.onaudioprocess = null; r.node.disconnect(); }
+  if (r.stream) r.stream.getTracks().forEach(t => t.stop());
+  if (r.ctx) r.ctx.close();
+}
+function resetRecorderUI(error) {
   micEl.textContent = '语音输入'; micEl.disabled = false;
   if (error) { statusEl.className='err'; statusEl.textContent=error.message || String(error); }
+}
+function cancelRecorder(error, r = recorder) {
+  if (recorder === r) recorder = null;
+  releaseRecorderHardware(r);
+  if (r && r.id) fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
+  resetRecorderUI(error);
+}
+async function finishStoppedRecorder(r, queue, held) {
+  try { await queue; if (held) await postChunk(r.id, held, true); }
+  catch (e) { cancelRecorder(e, r); return; }
+  // A delivered final closes the server session; do not cancel it while it is being drained.
+  resetRecorderUI();
 }
 micEl.addEventListener('click', async () => {
   if (recorder) { // stop: serialize behind earlier chunks, then final held chunk
     const r = recorder; recorder = null; micEl.disabled = true;
-    // 封闭 callback 后才等队列：停止期间不得再追加 partial 或替换 held。
-    r.node.onaudioprocess = null; r.node.disconnect();
+    // 先冻结上传，再立即释放隐私敏感硬件；网络 drain 不得继续占用麦克风。
     const queue = r.queue, held = r.held;
-    try { await queue; if (held) await postChunk(r.id, held, true); }
-    catch (e) { stopRecorder(e, r); return; }
-    stopRecorder(null, r); return;
+    releaseRecorderHardware(r);
+    void finishStoppedRecorder(r, queue, held); return;
   }
   let stream, ctx, node, id;
   try {
@@ -131,13 +145,11 @@ micEl.addEventListener('click', async () => {
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {
     // `recorder` 发布后，资源所有权已交给 stopRecorder；不能再按局部变量二次 DELETE。
-    if (recorder) { stopRecorder(e); return; }
+    if (recorder) { cancelRecorder(e); return; }
     // recorder 尚未发布时也拥有局部资源；不能等 stopRecorder 发现 null 才清理。
-    if (node) { node.onaudioprocess = null; node.disconnect(); }
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    if (ctx) ctx.close();
+    releaseRecorderHardware({node, stream, ctx});
     if (id) fetch(`/v1/transcriptions/${id}`, {method:'DELETE'}).catch(() => {});
-    stopRecorder(e);
+    resetRecorderUI(e);
   }
 });
 

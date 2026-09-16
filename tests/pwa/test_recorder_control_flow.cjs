@@ -95,10 +95,10 @@ async function audioContextFailureReleasesGrantedMicrophone() {
 }
 
 async function stoppingClosesCallbackBeforeAwaitingQueue() {
-  const track = {stop() {}};
+  const track = {stopped: false, stop() { this.stopped = true; }};
   const stream = {getTracks: () => [track]};
   let node;
-  const ctx = {sampleRate: 16000, destination: {}, close() {}, createMediaStreamSource: () => ({connect() {}}),
+  const ctx = {closed: false, sampleRate: 16000, destination: {}, close() { this.closed = true; }, createMediaStreamSource: () => ({connect() {}}),
     createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
   class FakeAudioContext { constructor() { return ctx; } }
   ctx.constructor = FakeAudioContext;
@@ -127,11 +127,14 @@ async function stoppingClosesCallbackBeforeAwaitingQueue() {
   assert.equal(chunks[0].final, false);
   const stopping = app.click();
   assert.equal(node.onaudioprocess, null, 'stop must close callback synchronously before awaiting');
+  assert.equal(track.stopped, true, 'stop must release microphone tracks before a pending upload resolves');
+  assert.equal(ctx.closed, true, 'stop must close AudioContext before a pending upload resolves');
+  assert.equal(chunks.length, 1, 'stop must drain, not cancel, an already-started partial');
   const frozen = chunks.length;
   if (node.onaudioprocess) node.onaudioprocess(audio(0.3));
   assert.equal(chunks.length, frozen, 'post-stop callback must not append a partial');
   partial.resolve();
-  await stopping;
+  await stopping; await tick(); await tick();
   assert.equal(chunks.length, 2, 'only the held final follows the earlier partial');
   assert.equal(chunks[1].final, true);
   assert.equal(chunks.filter(chunk => chunk.final).length, 1, 'final must be unique');
