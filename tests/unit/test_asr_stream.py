@@ -79,7 +79,7 @@ def test_rejects_odd_pcm_and_overflow_before_transcribing():
     assert calls == 0
 
 
-def test_final_failure_releases_pcm_and_closes_but_partial_failure_can_retry():
+def test_final_failure_releases_pcm_and_closes_but_partial_failure_rolls_back_chunk():
     def fail(_waveform, *, language):
         raise RuntimeError(f"{language} model unavailable")
 
@@ -92,5 +92,5 @@ def test_final_failure_releases_pcm_and_closes_but_partial_failure_can_retry():
     partial = TranscriptSession("en", fail)
     with pytest.raises(TranscriptionFailed):
         partial.append(_pcm([1]), final=False)
-    assert partial.buffered_pcm_bytes == 2
+    assert partial.buffered_pcm_bytes == 0
     assert partial.finished is False

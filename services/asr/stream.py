@@ -87,6 +87,7 @@ class TranscriptSession:
                 raise ValueError(
                     f"PCM segment exceeds {MAX_SEGMENT_SECONDS}s / {MAX_PCM_BYTES} bytes"
                 )
+            prior_size = len(self._pcm)
             self._pcm.extend(pcm_s16le)
             # copy() 让 numpy 不再引用 bytearray；最终 clear 后模型调用结果与输入
             # 不会共享可变内存。
@@ -98,6 +99,11 @@ class TranscriptSession:
             try:
                 text = self._transcribe(waveform, language=self.language).strip()
             except Exception as exc:
+                if not final:
+                    # chunk POST 的安全重试契约：失败的本次 bytes 从累计波形撤回，
+                    # 成功转写过的前缀与 sequence 不变；客户端重送同一 chunk 时
+                    # 看到的正是第一次尝试的波形，而不是重复音频。
+                    del self._pcm[prior_size:]
                 raise TranscriptionFailed("local transcription failed") from exc
             finally:
                 if final:

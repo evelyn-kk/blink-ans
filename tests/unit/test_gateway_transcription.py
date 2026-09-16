@@ -106,3 +106,43 @@ def test_final_transcriber_failure_is_503_and_discards_pcm_and_session(monkeypat
     assert sessions[0].finished is True
     assert tid not in gw._transcripts
     assert not gw._pending_transcript_events
+
+
+def test_partial_failure_rolls_back_only_failed_chunk_for_safe_resend(monkeypatch):
+    """CR-152：真实路由的同一 chunk 重送不得把波形/内存/sequence 加倍。"""
+    sessions: list[TranscriptSession] = []
+    waveforms: list[list[float]] = []
+    attempts = {"n": 0}
+    monkeypatch.setattr(gw, "_transcripts", {})
+    monkeypatch.setattr(gw, "_pending_transcript_events", {})
+
+    def create(language):
+        def flaky(waveform, *, language):
+            waveforms.append(waveform.tolist())
+            attempts["n"] += 1
+            if attempts["n"] == 2:
+                raise RuntimeError("temporary local model error")
+            return language
+
+        session = TranscriptSession(language, flaky)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(gw, "_new_transcript_session", create)
+    tid = _run(gw.create_transcription(gw.TranscriptCreateBody(language="zh")))["transcript_id"]
+    first = base64.b64encode(b"\x00@\x00 ").decode()  # two samples: 0.5, 0.25
+    retry = base64.b64encode(b"\0\x40").decode()  # one sample: 0.5
+
+    _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=first)))
+    with pytest.raises(HTTPException) as failed:
+        _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=retry)))
+    assert failed.value.status_code == 503
+    assert sessions[0].buffered_pcm_bytes == 4
+    assert sessions[0].finished is False
+
+    resent = _run(gw.append_transcript_chunk(tid, gw.TranscriptChunkBody(pcm_s16le_b64=retry)))
+    # 失败尝试和安全重送都只看见“成功前缀 + 一个 retry chunk”，没有第三份 sample。
+    assert waveforms[1] == pytest.approx([0.5, 0.25, 0.5])
+    assert waveforms[2] == pytest.approx([0.5, 0.25, 0.5])
+    assert sessions[0].buffered_pcm_bytes == 6
+    assert gw._pending_transcript_events[resent["event_id"]][1]["sequence"] == 2
