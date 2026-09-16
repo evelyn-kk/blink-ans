@@ -1,0 +1,9 @@
+# R138：候选修改前声明的固定观测集完整差分（CR-107）。
+# 匹配谓词：tokenize.matched_terms 的子串命中或组成词全出现。
+expect:
+  - q: "同一个类里的方法互相调用时 @Transactional 为什么不生效"
+    added:
+      - "AOP proxy"
+      - "proxy"
+      - "self-invocation"
+    removed: []
