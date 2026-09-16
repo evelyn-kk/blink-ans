@@ -34,8 +34,25 @@ import term_scope as TS  # noqa: E402
 TS._terms_at_orig = TS._terms_at   # 供上面那条"完整举证"用例构造新词典
 
 R85_SHA = "2cbe470"          # R85 改 term_map 之前的那个提交（固定 SHA，CR-093）
+# R85 改动后的精确历史词典。R85 的回归不能从当前工作树取“新态”，否则后来
+# 的候选会改变这组历史输入本身（CR-142）。
+R85_NEW_SHA = "500b57e"
 R85_Q = "已经建了包含查询所有列的覆盖索引，为什么执行时还是要回表访问堆，没有变快"
 EXPECT_FILE = ROOT / "bench/audits/term-map-r85-expect.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _r85_historical_new_dictionary(monkeypatch):
+    """让所有 R85 完整流程测试使用固定的两端历史词典。
+
+    `None` 是 term_scope 对当前工作树的约定；R85 的“新态”不是当前词典，
+    而是 R85 合入后的 `500b57e`。测试内需要构造不同新态时仍可覆盖该替身。
+    """
+    monkeypatch.setattr(
+        TS,
+        "_terms_at",
+        lambda sha: TS._terms_at_orig(R85_NEW_SHA if sha is None else sha),
+    )
 
 
 # ---------- CR-108：--since 必须是固定 SHA ----------
@@ -200,6 +217,9 @@ def test_a_key_without_witness_blocks_the_pass(monkeypatch, capsys):
     assert TS.main() == 1
     out = capsys.readouterr().out
     assert "没有正向见证" in out
+    assert "同一个类里的方法互相调用" not in out, (
+        "R85 的固定历史新态不得被当前自调用候选污染"
+    )
     for key in ("仅索引扫描", "可见性映射", "索引只扫描"):
         assert key in out
 
