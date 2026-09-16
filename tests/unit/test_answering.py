@@ -353,6 +353,8 @@ def test_declined_ignores_translated_prose():
 @pytest.mark.parametrize("question, model_output", [
     ("推荐几部值得看的科幻电影", "推荐 A、B 两部电影 [1]。\nNO_EVIDENCE"),
     ("怎么用 Rust 写一个词法分析器", "可用 nom 实现词法器 [1]。"),
+    ("怎么用Rust写一个词法分析器", "可用 nom 实现词法器 [1]。"),
+    ("Rust语言如何写词法分析器", "可用 nom 实现词法器 [1]。"),
 ])
 def test_limited_explicitly_out_of_scope_never_streams_model_advice_or_sources(
     monkeypatch, question, model_output,
@@ -384,13 +386,21 @@ def test_limited_explicitly_out_of_scope_never_streams_model_advice_or_sources(
     assert next(e for e in events if e["type"] == "sources")["items"] == []
 
 
-def test_limited_in_scope_request_keeps_the_existing_cautious_answer_path(monkeypatch):
+@pytest.mark.parametrize("question, technology", [
+    ("边缘问题", "kafka"),
+    ("Rust写Kafka client", None),
+    ("crust 配方怎么做", None),
+    ("trust 模型怎么训练", None),
+])
+def test_limited_in_scope_or_non_rust_word_keeps_the_existing_cautious_answer_path(
+    monkeypatch, question, technology,
+):
     """R145 不把所有 limited 都改拒答：显式项目范围的边缘问题仍可作答。"""
     monkeypatch.setattr(
         "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [hit(dist=0.74)]
     )
     events = list(Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine())).answer(
-        AnswerRequest("边缘问题", technology="kafka")
+        AnswerRequest(question, technology=technology)
     ))
     assert next(e for e in events if e["type"] == "done")["served_by"] == "local"
     assert next(e for e in events if e["type"] == "sources")["items"]

@@ -51,7 +51,10 @@ _CITATION = re.compile(r"\[(\d{1,2})\]")
 # 参与失败关闭：不能把“没有命中项目名”的一般技术提问一律拒掉（例如用户显式
 # 选择项目后的边缘问题），也不能靠模型是否把 NO_EVIDENCE 放在正确位置来决定安全性。
 _OUT_OF_SCOPE = re.compile(
-    r"(?:\brust\b|swiftui|\breact\b|天气|科幻.{0,8}电影|年终奖)", re.IGNORECASE
+    # Rust 常与中文连写；只排除 ASCII 字母相邻，既能识别 `用Rust写`/`Rust语言`，
+    # 又不把 crust/trust 等英文单词的内部片段误判为语言名（CR-143）。
+    r"(?:(?<![A-Za-z])rust(?![A-Za-z])|swiftui|\breact\b|天气|科幻.{0,8}电影|年终奖)",
+    re.IGNORECASE,
 )
 
 
