@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -308,6 +309,9 @@ def main() -> int:
     ap.add_argument("--language", choices=SUPPORTED_LANGUAGES, default="zh",
                      help="评测题面与回答语言；分别运行 zh/en 会生成各自 language 分组。")
     args = ap.parse_args()
+    run_id = os.environ.get("BLINK_EVAL_RUN_ID")
+    started_at = os.environ.get("BLINK_EVAL_STARTED_AT") or datetime.now(timezone.utc).isoformat()
+    startup_pid = os.getpid()
     load_dotenv(ROOT / ".env")
 
     try:
@@ -431,6 +435,13 @@ def main() -> int:
     path.write_text(json.dumps({
         "schema_version": 2,
         "implementation_commit": implementation_commit,
+        "run_id": run_id,
+        "startup_pid": startup_pid,
+        "started_at_utc": started_at,
+        # This child can attest only that its JSON was written.  The outer
+        # runner records the authoritative post-exit terminal state.
+        "completion_state": "report_written",
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
         "template_version": template_version(),
         "language": args.language,
         "by_language": by_language,
