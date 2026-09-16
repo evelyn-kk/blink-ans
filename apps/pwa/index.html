@@ -38,7 +38,10 @@
 <form id="f">
   <input id="q" placeholder="例如：Kafka 消费者重复消费怎么排查" autocomplete="off" autofocus>
   <button id="go">提问</button>
+  <button id="mic" type="button">语音输入</button>
 </form>
+
+<p id="transcript"></p>
 
 <p id="status"></p>
 <div id="answer"></div>
@@ -48,6 +51,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const statusEl = $('#status'), answerEl = $('#answer'), srcEl = $('#sources'), metaEl = $('#meta');
+const transcriptEl = $('#transcript'), micEl = $('#mic');
 
 // 证据充分性直接影响用户该多信任这个回答，必须显式呈现而不是藏起来。
 const SUFFICIENCY = {
@@ -81,6 +85,49 @@ $('#f').addEventListener('submit', async e => {
   }
 });
 
+// T-008：浏览器只上传 16 kHz 单声道 s16le PCM。单个 held chunk 留到下一块/停止时
+// 才发送，使最后一块可以带 final=true，服务端无需用重复 PCM 触发最终转写。
+let recorder = null;
+function pcm16(samples, inputRate) {
+  const ratio = inputRate / 16000, n = Math.floor(samples.length / ratio), out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = Math.max(-1, Math.min(1, samples[Math.floor(i * ratio)])); out[i] = x * 32767;
+  }
+  return btoa(String.fromCharCode(...new Uint8Array(out.buffer)));
+}
+async function postChunk(id, pcm_s16le_b64, final) {
+  const r = await fetch(`/v1/transcriptions/${id}/chunks`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pcm_s16le_b64, final})});
+  if (!r.ok) throw new Error(`转写失败 (${r.status})`);
+  const {stream_url} = await r.json();
+  await consume(stream_url);
+}
+function stopRecorder(error) {
+  const r = recorder; if (!r) return; recorder = null;
+  r.node.disconnect(); r.stream.getTracks().forEach(t => t.stop()); r.ctx.close();
+  if (r.id) fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
+  micEl.textContent = '语音输入'; micEl.disabled = false;
+  if (error) { statusEl.className='err'; statusEl.textContent=error.message || String(error); }
+}
+micEl.addEventListener('click', async () => {
+  if (recorder) { // stop: serialize behind earlier chunks, then final held chunk
+    const r = recorder; micEl.disabled = true;
+    try { await r.queue; if (r.held) await postChunk(r.id, r.held, true); }
+    catch (e) { stopRecorder(e); return; }
+    stopRecorder(); return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
+    const ctx = new AudioContext(); const source = ctx.createMediaStreamSource(stream);
+    const node = ctx.createScriptProcessor(8192, 1, 1);
+    const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language:'zh'})});
+    if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
+    const {transcript_id:id} = await created.json();
+    recorder = {stream, ctx, node, id, held:null, queue:Promise.resolve()};
+    node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false)); };
+    source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
+  } catch (e) { stopRecorder(e); }
+});
+
 // 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，
 // 后续 I4 的音频分片上传需要 POST，统一走 fetch 便于复用同一套解析。
 async function consume(url) {
@@ -106,6 +153,9 @@ async function consume(url) {
 
 function handle(ev) {
   switch (ev.type) {
+    case 'transcript':
+      transcriptEl.textContent = ev.text;
+      break;
     case 'retrieval': {
       const [cls, note] = SUFFICIENCY[ev.sufficiency] || ['', ''];
       statusEl.className = cls;
