@@ -27,6 +27,7 @@ class _FakeOrchestrator:
         yield {"type": "retrieval", "sufficiency": "sufficient"}
         yield {"type": "sources", "items": [{
             "index": 1, "chunk_id": 101, "url": "https://example.test", "citation": self.citation,
+            "text_sha256": hashlib.sha256(b"fake source evidence").hexdigest(),
         }]}
         yield {"type": "answer_delta", "text": self.answer_text}
         yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
@@ -78,6 +79,7 @@ def test_case_marks_a_sources_event_without_chunk_identity_as_incomplete():
             yield {"type": "retrieval", "sufficiency": "sufficient"}
             yield {"type": "sources", "items": [{
                 "index": 1, "url": "https://example.test", "citation": "kafka 4.0 · test",
+                "text_sha256": hashlib.sha256(b"fake source evidence").hexdigest(),
             }]}
             yield {"type": "answer_delta", "text": "The producer is idempotent. [1]"}
             yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
@@ -87,6 +89,24 @@ def test_case_marks_a_sources_event_without_chunk_identity_as_incomplete():
 
     assert case.selected_evidence == []
     assert "来源事件缺少审计字段 'chunk_id'" in case.failures
+
+
+def test_case_marks_a_sources_event_without_text_checksum_as_incomplete():
+    class MissingChecksumOrchestrator:
+        def answer(self, _request):
+            yield {"type": "retrieval", "sufficiency": "sufficient"}
+            yield {"type": "sources", "items": [{
+                "index": 1, "chunk_id": 101, "url": "https://example.test",
+                "citation": "kafka 4.0 · test",
+            }]}
+            yield {"type": "answer_delta", "text": "The producer is idempotent. [1]"}
+            yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
+                   "prompt_tokens": 10, "evidence_count": 1, "served_by": "local"}
+
+    case = basic.run_case(MissingChecksumOrchestrator(), _SPEC, "en")
+
+    assert case.selected_evidence == []
+    assert "来源事件缺少审计字段 'text_sha256'" in case.failures
 
 
 def test_language_summary_keeps_results_separate():
@@ -169,9 +189,16 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
             # event 原顺序、引用编号、rowid 与完整 citation，不能只从 URL 复建。
             yield {"type": "sources", "items": [
                 {"index": 1, "chunk_id": 73, "url": "https://z.example.test/page",
-                 "citation": "kafka 4.0 · first selected chunk"},
+                 "citation": "kafka 4.0 · first selected chunk",
+                 "text_sha256": hashlib.sha256(b"first selected body").hexdigest()},
                 {"index": 2, "chunk_id": 72, "url": "https://z.example.test/page",
-                 "citation": "kafka 4.0 · second selected chunk"},
+                 "citation": "kafka 4.0 · second selected chunk",
+                 "text_sha256": hashlib.sha256(b"second selected body").hexdigest()},
+                # 合成同 rowid/URL 的重建漂移：报告必须记录运行时正文身份，不能
+                # 在写盘后从当前 store 反查并把同一 rowid 误作同一正文。
+                {"index": 3, "chunk_id": 73, "url": "https://z.example.test/page",
+                 "citation": "kafka 4.0 · changed body at same identity",
+                 "text_sha256": hashlib.sha256(b"changed body at same identity").hexdigest()},
             ]}
             yield {"type": "answer_delta", "text": "The producer is idempotent. [1]"}
             yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
@@ -222,9 +249,14 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
     assert group["en"]["cases"][0]["question"] == _SPEC["q_en"]
     assert group["en"]["cases"][0]["selected_evidence"] == [
         {"index": 1, "chunk_id": 73, "url": "https://z.example.test/page",
-         "citation": "kafka 4.0 · first selected chunk"},
+         "citation": "kafka 4.0 · first selected chunk",
+         "text_sha256": hashlib.sha256(b"first selected body").hexdigest()},
         {"index": 2, "chunk_id": 72, "url": "https://z.example.test/page",
-         "citation": "kafka 4.0 · second selected chunk"},
+         "citation": "kafka 4.0 · second selected chunk",
+         "text_sha256": hashlib.sha256(b"second selected body").hexdigest()},
+        {"index": 3, "chunk_id": 73, "url": "https://z.example.test/page",
+         "citation": "kafka 4.0 · changed body at same identity",
+         "text_sha256": hashlib.sha256(b"changed body at same identity").hexdigest()},
     ]
 
 

@@ -166,6 +166,7 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
                         "chunk_id": i["chunk_id"],
                         "citation": i["citation"],
                         "url": i["url"],
+                        "text_sha256": i["text_sha256"],
                     }
                     for i in items
                 ]

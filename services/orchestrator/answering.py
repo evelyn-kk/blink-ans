@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -592,7 +593,12 @@ class Orchestrator:
                 # chunk_id 是 T-104 新加字段（additive，兼容既有客户端）：
                 # 会话层用它记录"这次答案实际引用到哪些块"，供下一轮追问按 rowid
                 # 精确取回（见 services/orchestrator/session.py）。
-                {"index": e.index, "citation": e.citation, "url": e.source_url, "chunk_id": e.rowid}
+                # CR-147：rowid/URL 会随重建而复用或漂移；正文的运行期 SHA-256
+                # 使评测报告无需落盘正文也能检测“同一身份、不同内容”。不能由
+                # 后续审计读取当前 DB 再填充，否则会把当前文本冒充为当时 prompt。
+                {"index": e.index, "citation": e.citation, "url": e.source_url,
+                 "chunk_id": e.rowid,
+                 "text_sha256": hashlib.sha256(e.text.encode("utf-8")).hexdigest()}
                 for e in evidence
             ],
         }

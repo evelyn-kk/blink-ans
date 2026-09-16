@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -225,6 +226,23 @@ def test_answering_forwards_project_boundary_to_both_retrieval_paths(monkeypatch
     assert {k: captured[k] for k in ("project_id", "module", "symbol")} == {
         "project_id": "orders", "module": "checkout", "symbol": "reserve_stock",
     }
+
+
+def test_sources_event_records_the_runtime_evidence_text_checksum(monkeypatch):
+    """CR-147：留正文身份而非正文；不得靠未来 DB 回填当时 prompt。"""
+    selected = hit(i=73)
+    monkeypatch.setattr(
+        "services.orchestrator.answering.hybrid_search", lambda *a, **kw: [selected]
+    )
+
+    events = list(Orchestrator(None, FakeEmbedder(), FakeRouter(FakeEngine())).answer(
+        AnswerRequest("怎么预留库存")
+    ))
+    item = next(e for e in events if e["type"] == "sources")["items"][0]
+
+    assert item["chunk_id"] == 73
+    assert item["text_sha256"] == hashlib.sha256(selected.text.encode("utf-8")).hexdigest()
+    assert "text" not in item
 
 
 def test_answering_forwards_served_by_into_done_event(monkeypatch):
