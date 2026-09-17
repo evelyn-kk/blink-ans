@@ -137,7 +137,15 @@ function cancelRecorder(error, r = recorder) {
   resetRecorderUI(error);
 }
 async function finishStoppedRecorder(r, queue, held) {
-  try { await queue; if (held) await postChunk(r, held, true); }
+  // A session with no callback has no PCM that can carry final=true.  It must be
+  // explicitly cancelled; otherwise the server retains its in-memory session.
+  if (!held) {
+    r.cancelled = true;
+    fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
+    resetRecorderUI();
+    return;
+  }
+  try { await queue; await postChunk(r, held, true); }
   catch (e) { cancelRecorder(e, r); return; }
   // A delivered final closes the server session; do not cancel it while it is being drained.
   resetRecorderUI();

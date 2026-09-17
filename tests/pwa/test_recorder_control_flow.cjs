@@ -156,6 +156,38 @@ async function stoppingClosesCallbackBeforeAwaitingQueue() {
   assert.equal(chunks.filter(chunk => chunk.final).length, 1, 'final must be unique');
 }
 
+async function stoppingBeforeFirstAudioCallbackCancelsServerSession() {
+  const track = {stopped: false, stop() { this.stopped = true; }};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {closed: false, sampleRate: 16000, destination: {}, close() { this.closed = true; }, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const calls = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      calls.push([url, options.method || 'GET']);
+      if (url === '/v1/transcriptions') return response({transcript_id: 'empty'});
+      if (url === '/v1/transcriptions/empty') return response({});
+      if (url === '/v1/transcriptions/empty/chunks') throw new Error('an empty recording must not upload a chunk');
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  await app.click();
+  await app.click();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(track.stopped, true, 'zero-PCM stop must still release microphone hardware');
+  assert.equal(ctx.closed, true, 'zero-PCM stop must still close AudioContext');
+  assert.equal(node.onaudioprocess, null, 'zero-PCM stop must close the audio callback');
+  assert.deepEqual(calls, [
+    ['/v1/transcriptions', 'POST'],
+    ['/v1/transcriptions/empty', 'DELETE'],
+  ], 'a session without a final chunk must be explicitly deleted');
+}
+
 async function chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording() {
   const track = {stop() {}};
   const stream = {getTracks: () => [track]};
@@ -372,6 +404,7 @@ async function vadStopsOnlyAfterSpeechAndAccumulatedSilence() {
   await initializationFailureReleasesEverything();
   await audioContextFailureReleasesGrantedMicrophone();
   await stoppingClosesCallbackBeforeAwaitingQueue();
+  await stoppingBeforeFirstAudioCallbackCancelsServerSession();
   await chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording();
   await failedCreationUnlocksLanguage();
   await finalTranscriptStartsOneLanguageBoundAnswer();
