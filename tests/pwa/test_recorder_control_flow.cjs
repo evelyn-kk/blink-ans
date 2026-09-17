@@ -51,6 +51,10 @@ function boot({fetch, getUserMedia, context}) {
     click: () => elements.get('#mic').handlers.click(),
     submit: () => elements.get('#f').handlers.submit({preventDefault() {}}),
     element: id => elements.get(`#${id}`),
+    chooseLanguage: value => {
+      const select = elements.get('#language');
+      if (!select.disabled) select.value = value;
+    },
   };
 }
 
@@ -153,14 +157,14 @@ async function chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording(
     createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
   class FakeAudioContext { constructor() { return ctx; } }
   ctx.constructor = FakeAudioContext;
-  const calls = [];
+  const calls = [], creation = deferred();
   const app = boot({
     getUserMedia: async () => stream,
     context: ctx,
     fetch: async (url, options = {}) => {
       calls.push([url, options.method || 'GET', options.body]);
       if (url === '/v1/answers') return response({stream_url: '/answer-stream'});
-      if (url === '/v1/transcriptions') return response({transcript_id: 'language-id'});
+      if (url === '/v1/transcriptions') return creation.promise;
       if (url === '/answer-stream' || url === '/v1/transcriptions/language-id') return streamResponse();
       throw new Error(`unexpected fetch ${url}`);
     },
@@ -169,11 +173,32 @@ async function chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording(
   app.element('q').value = 'How do I stop Spring Boot?';
   await app.submit();
   assert.deepEqual(JSON.parse(calls[0][2]), {question: 'How do I stop Spring Boot?', language: 'en'});
-  await app.click();
+  const starting = app.click(); await tick();
   assert.deepEqual(JSON.parse(calls[2][2]), {language: 'en'});
-  assert.equal(app.element('language').disabled, true, 'language cannot change while a transcript is active');
+  assert.equal(app.element('language').disabled, true, 'language locks before the creation response returns');
+  app.chooseLanguage('zh');
+  assert.equal(app.element('language').value, 'en', 'a user cannot change the visible language while creation is pending');
+  creation.resolve(response({transcript_id: 'language-id'}));
+  await starting;
+  assert.equal(app.element('language').value, 'en', 'created ASR language and visible selection stay aligned');
   await app.click(); await tick(); await tick();
   assert.equal(app.element('language').disabled, false, 'language unlocks after the recording finishes');
+}
+
+async function failedCreationUnlocksLanguage() {
+  const track = {stop() {}};
+  const stream = {getTracks: () => [track]};
+  const ctx = {close() {}, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => ({onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async () => ({ok: false, status: 503}),
+  });
+  await app.click();
+  assert.equal(app.element('language').disabled, false, 'failed creation must restore language selection');
 }
 
 (async () => {
@@ -181,5 +206,6 @@ async function chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording(
   await audioContextFailureReleasesGrantedMicrophone();
   await stoppingClosesCallbackBeforeAwaitingQueue();
   await chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording();
+  await failedCreationUnlocksLanguage();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

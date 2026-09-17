@@ -144,11 +144,12 @@ micEl.addEventListener('click', async () => {
     ctx = new AudioContext(); const source = ctx.createMediaStreamSource(stream);
     node = ctx.createScriptProcessor(8192, 1, 1);
     const language = languageEl.value;
+    // 会话语言在请求发出前锁定；不能让创建请求在飞行时被下一次 UI 选择改写语义。
+    languageEl.disabled = true;
     const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language})});
     if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
     ({transcript_id:id} = await created.json());
     recorder = {stream, ctx, node, id, held:null, queue:Promise.resolve()};
-    languageEl.disabled = true;
     node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false)); };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {
