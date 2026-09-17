@@ -608,6 +608,43 @@ async function inflightPartialReturningDuringSilenceDoesNotChainAnother() {
   assert.equal(decodePcm(sent[1].pcm_s16le_b64).length, 3 * N, 'the queued speech and silence ride together');
 }
 
+async function silentRecordingIsCancelledInsteadOfTranscribed() {
+  const chunks = [];
+  const {app, ctx, calls} = recorderHarness(async payload => {
+    chunks.push(payload);
+    return response({stream_url: '/empty-stream'});
+  });
+  await app.click();
+  const block = level => ({inputBuffer: {getChannelData: () => new Float32Array(1600).fill(level)}});
+  for (let i = 0; i < 10; i++) ctx.node.onaudioprocess(block(0.002));  // below the digital-silence floor
+  await app.click();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(chunks, [], 'a recording with no sound at all must not be transcribed');
+  assert.deepEqual(calls.at(-1), ['/v1/transcriptions/backlog', 'DELETE'],
+    'the server session must be released instead');
+  assert.equal(app.element('status').textContent, '没有听到声音，这次录音已取消');
+  assert.equal(app.element('status').className, 'warn');
+  assert.equal(app.element('mic').disabled, false, 'the microphone button must be usable again');
+}
+
+async function quietAudioAboveTheFloorStillFinalizes() {
+  // 0.01 是"低于 VAD 语音阈值 0.015、但高于数字静音线 0.005"的小声说话：必须照常发 final，
+  // 否则这条优化会在阈值没校准的情况下吃掉真实语音。
+  const chunks = [];
+  const {app, ctx} = recorderHarness(async payload => {
+    chunks.push(payload);
+    return response({stream_url: '/empty-stream'});
+  });
+  await app.click();
+  const block = level => ({inputBuffer: {getChannelData: () => new Float32Array(1600).fill(level)}});
+  for (let i = 0; i < 10; i++) ctx.node.onaudioprocess(block(0.01));
+  await app.click();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(chunks.length, 1, 'quiet audio must still produce exactly one upload');
+  assert.equal(chunks[0].final, true, 'and that upload must be the final chunk');
+  assert.notEqual(app.element('status').textContent, '没有听到声音，这次录音已取消');
+}
+
 const tests = {
   initializationFailureReleasesEverything,
   audioContextFailureReleasesGrantedMicrophone,
@@ -624,6 +661,8 @@ const tests = {
   failedPartialStopsLaterUploadsAndCancelsOnStop,
   partialsPauseWhileNotSpeaking,
   inflightPartialReturningDuringSilenceDoesNotChainAnother,
+  silentRecordingIsCancelledInsteadOfTranscribed,
+  quietAudioAboveTheFloorStillFinalizes,
 };
 
 // PWA_ONLY=<name> runs one regression, e.g. to check it alone against an older revision.

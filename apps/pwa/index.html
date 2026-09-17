@@ -106,6 +106,11 @@ let recorder = null;
 // 这是待真机校准的起点，而不是跨设备的音量或时延结论。静音以样本时长累计，
 // 不以 callback 次数累计，避免不同浏览器的 buffer 大小时长改变 VAD 语义。
 const VAD_SPEECH_RMS = 0.015;
+// R183：整段都没有任何声音时不发 final。M4 实测 whisper 转写纯静音要 3.4~6.5 s，
+// 还会吐出几个字符的幻觉文本并据此发起一次问答。这条线**不复用未校准的 VAD_SPEECH_RMS**：
+// 实测语音块 RMS 普遍 ≥0.02，真实录音的安静块在 0.001~0.008，因此 0.005 远低于任何观测到的
+// 语音，只用来判"这段录音几乎等于数字静音"，不用来判"有没有在说话"。
+const SILENT_RECORDING_PEAK_RMS = 0.005;
 const VAD_SILENCE_MS = 1200;
 function pcm16(samples, inputRate) {
   const ratio = inputRate / 16000, n = Math.floor(samples.length / ratio), out = new Int16Array(n);
@@ -152,11 +157,12 @@ function releaseRecorderHardware(r) {
   if (r.stream) r.stream.getTracks().forEach(t => t.stop());
   if (r.ctx) r.ctx.close();
 }
-function resetRecorderUI(error) {
+function resetRecorderUI(error, note) {
   micEl.textContent = '语音输入'; micEl.disabled = false;
   cancelEl.disabled = true;
   languageEl.disabled = false;
   if (error) { statusEl.className='err'; statusEl.textContent=error.message || String(error); }
+  else if (note) { statusEl.className='warn'; statusEl.textContent=note; }
 }
 function cancelRecorder(error, r = recorder) {
   if (recorder === r) recorder = null;
@@ -167,10 +173,12 @@ function cancelRecorder(error, r = recorder) {
 async function finishStoppedRecorder(r, inflight, unsent) {
   // A session with no callback has no PCM that can carry final=true.  It must be
   // explicitly cancelled; otherwise the server retains its in-memory session.
-  if (!unsent.length) {
+  // 整段没有任何声音时同样不发 final：那次转写只会慢，并可能把幻觉文本当成提问。
+  const silent = !(r.peakRms >= SILENT_RECORDING_PEAK_RMS);
+  if (!unsent.length || silent) {
     r.cancelled = true;
     fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
-    resetRecorderUI();
+    resetRecorderUI(null, unsent.length ? '没有听到声音，这次录音已取消' : null);
     return;
   }
   try {
@@ -197,6 +205,7 @@ function observeVoiceActivity(r, samples, sampleRate) {
   for (let i = 0; i < samples.length; i++) squares += samples[i] * samples[i];
   const rms = samples.length ? Math.sqrt(squares / samples.length) : 0;
   r.heldIsSpeech = rms >= VAD_SPEECH_RMS;
+  if (!(r.peakRms >= rms)) r.peakRms = rms;
   if (r.heldIsSpeech) {
     r.heardSpeech = true;
     r.silenceMs = 0;
