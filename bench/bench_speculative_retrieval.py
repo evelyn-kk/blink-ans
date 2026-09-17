@@ -66,15 +66,35 @@ def runtime_identity(store) -> dict:
         "implementation_commit": commit,
         "working_tree_dirty": bool(dirty),
         "index_chunks": store.count(),
+        "index_fingerprint": index_fingerprint(store),
         "dictionary_version": store.meta.get("dictionary_version"),
         "embedding_model": store.meta.get("embedding_model"),
         "top_k": TOP_K,
         "candidates": CANDIDATES,
     }
-    missing = [k for k in ("index_chunks", "dictionary_version", "embedding_model") if not identity[k]]
+    missing = [k for k in ("index_chunks", "index_fingerprint", "dictionary_version", "embedding_model")
+               if not identity[k]]
     if missing:
         raise SystemExit(f"索引缺少身份字段，拒绝产出不可复验的报告：{missing}")
     return identity
+
+
+def index_fingerprint(store) -> str:
+    """全量块的内容指纹：排序后的 `source_url\tchecksum` 之 SHA-256。
+
+    只记块数不行——同样是 17080 块可以是完全不同的内容（CR-159 复审）。
+    `UNIQUE(source_url, checksum)` 保证这对值能唯一标识一块，排序后逐行入哈希，
+    与插入顺序、rowid 分配都无关，因此索引重建后可独立复算比对。
+    """
+    rows = store.execute("SELECT source_url, checksum FROM chunks ORDER BY source_url, checksum")
+    digest = hashlib.sha256()
+    counted = 0
+    for row in rows:
+        digest.update(f"{row['source_url']}\t{row['checksum']}\n".encode("utf-8"))
+        counted += 1
+    if counted != store.count():
+        raise SystemExit(f"索引指纹覆盖 {counted} 块，与 count() 的 {store.count()} 不一致，拒绝产出报告")
+    return digest.hexdigest() if counted else ""
 
 
 def sha256(text: str) -> str:
@@ -222,6 +242,8 @@ def main() -> None:
     ap.add_argument("--drop", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     ap.add_argument("--pcm", help="clip_id=path，给争用测量用；省略则跳过")
     ap.add_argument("--runs", type=int, default=5)
+    ap.add_argument("--expect-index-fingerprint",
+                    help="复跑时声明预期的索引指纹；对不上即退出，不产出报告")
     args = ap.parse_args()
 
     embedder = Embedder()
@@ -230,7 +252,14 @@ def main() -> None:
         raise SystemExit(f"嵌入模型不可用：{embedder.error}")
     store = ChunkStore()
     try:
-        payload = {"identity": runtime_identity(store)}
+        identity = runtime_identity(store)
+        expected = args.expect_index_fingerprint
+        if expected and expected != identity["index_fingerprint"]:
+            raise SystemExit(
+                f"索引指纹不符：预期 {expected}，实际 {identity['index_fingerprint']}；"
+                "本次检索结果与既往报告不可比，已中止")
+        identity["expected_index_fingerprint"] = expected
+        payload = {"identity": identity}
         payload["agreement"] = agreement(store, embedder, args.drop)
         if args.pcm:
             payload["contention"] = contention(store, embedder, args.pcm.split("=", 1)[1], args.runs)
