@@ -123,11 +123,12 @@ function pcmBase64(blocks) {
   }
   return btoa(binary);
 }
-// R177：partial 只在"已听到语音且当前帧不是静音"时发。说话前的静音转写不出内容；说完后的
-// 静音窗口里启动的 partial 会在 VAD 停止时被 final 取代，却让 final 排在它后面等一次整段转写。
-// 静音块不丢：留在 pending，恢复说话时并入下一个 partial，停止时并入 final。
+// R177：partial 只在"已有语音块进入 pending 且当前帧不是静音"时发。M4 实测 whisper 对纯静音
+// 反而更慢（单块静音 6.4 s、五块静音 3.4 s，加一块语音后 0.85 s），而说话的第一帧还扣在 held 里，
+// 所以不能只看"听到过语音"。说完后的静音窗口里启动的 partial 会在 VAD 停止时被 final 取代，
+// 却让 final 排在它后面等一次整段转写。静音块不丢：留在 pending，随下一个 partial 或 final 发出。
 function speaking(r) {
-  return r.heardSpeech && r.silenceMs === 0;
+  return r.speechQueued && r.silenceMs === 0;
 }
 async function pumpPartials(r) {
   // 停止/取消都会先置 hardwareReleased；停止已把 pending 并入 final，取消则丢弃它们。
@@ -195,7 +196,8 @@ function observeVoiceActivity(r, samples, sampleRate) {
   let squares = 0;
   for (let i = 0; i < samples.length; i++) squares += samples[i] * samples[i];
   const rms = samples.length ? Math.sqrt(squares / samples.length) : 0;
-  if (rms >= VAD_SPEECH_RMS) {
+  r.heldIsSpeech = rms >= VAD_SPEECH_RMS;
+  if (r.heldIsSpeech) {
     r.heardSpeech = true;
     r.silenceMs = 0;
     return;
@@ -226,7 +228,7 @@ micEl.addEventListener('click', async () => {
       const samples = e.inputBuffer.getChannelData(0);
       const next = pcm16(samples, ctx.sampleRate), prior = r.held;
       r.held = next;
-      if (prior) r.pending.push(prior);
+      if (prior) { r.pending.push(prior); if (r.heldIsSpeech) r.speechQueued = true; }
       // 先更新 VAD：它可能就在这一帧停止录音（把 pending 并入 final），也决定这一帧是否在说话。
       observeVoiceActivity(r, samples, ctx.sampleRate);
       // 是否正在说话由 pumpPartials 的循环条件统一判断：既管这次要不要发，也管在途 partial 返回时要不要接着发。

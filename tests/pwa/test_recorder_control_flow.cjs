@@ -567,16 +567,18 @@ async function partialsPauseWhileNotSpeaking() {
   await feed([0, 0, 0, 0]);
   assert.equal(sent.length, 0, 'pre-speech silence must not start partial transcriptions');
   await feed([0.1]);
-  assert.equal(sent.length, 1, 'the first speech frame sends the buffered audio as one partial');
-  assert.equal(decodePcm(sent[0].pcm_s16le_b64).length, 4 * N, 'pre-speech silence is kept, not dropped');
-  await feed([0.1, 0, 0, 0, 0]);
-  assert.equal(sent.length, 2, 'post-speech silence must not start more partials');
+  assert.equal(sent.length, 0, 'the first speech frame is still held, so a partial now would be silence only');
+  await feed([0.1]);
+  assert.equal(sent.length, 1, 'once speech is queued the buffered audio goes out as one partial');
+  assert.equal(decodePcm(sent[0].pcm_s16le_b64).length, 5 * N, 'pre-speech silence is kept, not dropped');
+  await feed([0, 0, 0, 0]);
+  assert.equal(sent.length, 1, 'post-speech silence must not start more partials');
   await feed([0.2]);
-  assert.equal(sent.length, 3, 'resumed speech sends the paused audio');
-  assert.equal(decodePcm(sent[2].pcm_s16le_b64).length, 5 * N, 'paused silence rides on the next partial');
+  assert.equal(sent.length, 2, 'resumed speech sends the paused audio');
+  assert.equal(decodePcm(sent[1].pcm_s16le_b64).length, 5 * N, 'paused silence rides on the next partial');
   await feed(Array(12).fill(0));  // 1.2 s of silence: the page VAD stops
   await settle();
-  assert.deepEqual(sent.map(c => c.final), [false, false, false, true], 'the silence window only feeds the final');
+  assert.deepEqual(sent.map(c => c.final), [false, false, true], 'the silence window only feeds the final');
   const levels = [0, 0, 0, 0, 0.1, 0.1, 0, 0, 0, 0, 0.2, ...Array(12).fill(0)];
   const expected = levels.flatMap(level => Array(N).fill(Math.trunc(level * 32767)));
   const uploaded = sent.flatMap(c => decodePcm(c.pcm_s16le_b64));
