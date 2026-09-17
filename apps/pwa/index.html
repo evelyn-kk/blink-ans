@@ -44,6 +44,7 @@
   <input id="q" placeholder="例如：Kafka 消费者重复消费怎么排查" autocomplete="off" autofocus>
   <button id="go">提问</button>
   <button id="mic" type="button">语音输入</button>
+  <button id="cancel" type="button" disabled>取消录音</button>
 </form>
 
 <p id="transcript"></p>
@@ -56,7 +57,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const statusEl = $('#status'), answerEl = $('#answer'), srcEl = $('#sources'), metaEl = $('#meta');
-const transcriptEl = $('#transcript'), micEl = $('#mic'), languageEl = $('#language');
+const transcriptEl = $('#transcript'), micEl = $('#mic'), cancelEl = $('#cancel'), languageEl = $('#language');
 
 // 证据充分性直接影响用户该多信任这个回答，必须显式呈现而不是藏起来。
 const SUFFICIENCY = {
@@ -118,6 +119,7 @@ function releaseRecorderHardware(r) {
 }
 function resetRecorderUI(error) {
   micEl.textContent = '语音输入'; micEl.disabled = false;
+  cancelEl.disabled = true;
   languageEl.disabled = false;
   if (error) { statusEl.className='err'; statusEl.textContent=error.message || String(error); }
 }
@@ -135,7 +137,7 @@ async function finishStoppedRecorder(r, queue, held) {
 }
 micEl.addEventListener('click', async () => {
   if (recorder) { // stop: serialize behind earlier chunks, then final held chunk
-    const r = recorder; recorder = null; micEl.disabled = true;
+    const r = recorder; recorder = null; micEl.disabled = true; cancelEl.disabled = true;
     // 先冻结上传，再立即释放隐私敏感硬件；网络 drain 不得继续占用麦克风。
     const queue = r.queue, held = r.held;
     releaseRecorderHardware(r);
@@ -153,6 +155,7 @@ micEl.addEventListener('click', async () => {
     if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
     ({transcript_id:id} = await created.json());
     recorder = {stream, ctx, node, id, language, held:null, queue:Promise.resolve()};
+    cancelEl.disabled = false;
     node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false, r.language)); };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {
@@ -163,6 +166,16 @@ micEl.addEventListener('click', async () => {
     if (id) fetch(`/v1/transcriptions/${id}`, {method:'DELETE'}).catch(() => {});
     resetRecorderUI(e);
   }
+});
+cancelEl.addEventListener('click', () => {
+  const r = recorder;
+  if (!r) return;
+  recorder = null; micEl.disabled = true; cancelEl.disabled = true;
+  // 取消不排空队列也不发送 final：用户明确丢弃本段语音。
+  r.cancelled = true;
+  releaseRecorderHardware(r);
+  fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
+  resetRecorderUI();
 });
 
 // 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，

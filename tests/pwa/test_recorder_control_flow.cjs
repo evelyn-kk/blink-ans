@@ -34,7 +34,7 @@ function deferred() {
 
 function boot({fetch, getUserMedia, context}) {
   const elements = new Map();
-  for (const id of ['f', 'language', 'q', 'go', 'mic', 'transcript', 'status', 'answer', 'sources', 'meta']) {
+  for (const id of ['f', 'language', 'q', 'go', 'mic', 'cancel', 'transcript', 'status', 'answer', 'sources', 'meta']) {
     elements.set(`#${id}`, {
       disabled: false, textContent: '', innerHTML: '', className: '', value: '',
       handlers: {}, addEventListener(name, fn) { this.handlers[name] = fn; },
@@ -55,6 +55,7 @@ function boot({fetch, getUserMedia, context}) {
   elements.get('#language').value = 'zh';
   return {
     click: () => elements.get('#mic').handlers.click(),
+    cancel: () => elements.get('#cancel').handlers.click(),
     submit: () => elements.get('#f').handlers.submit({preventDefault() {}}),
     element: id => elements.get(`#${id}`),
     chooseLanguage: value => {
@@ -249,6 +250,41 @@ async function finalTranscriptStartsOneLanguageBoundAnswer() {
   assert.equal(app.element('q').value, 'How does Kafka compaction work?');
 }
 
+async function cancellationReleasesHardwareAndNeverFinalizes() {
+  const track = {stopped: false, stop() { this.stopped = true; }};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {closed: false, sampleRate: 16000, destination: {}, close() { this.closed = true; }, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const partial = deferred(), chunks = [], deleted = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      if (url === '/v1/transcriptions') return response({transcript_id: 'cancel-me'});
+      if (url === '/v1/transcriptions/cancel-me/chunks') {
+        chunks.push(JSON.parse(options.body)); await partial.promise; return response({stream_url: '/partial'});
+      }
+      if (url === '/v1/transcriptions/cancel-me') { deleted.push(options.method); return response({}); }
+      if (url === '/partial') return streamResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  await app.click();
+  const audio = value => ({inputBuffer: {getChannelData: () => new Float32Array([value])}});
+  node.onaudioprocess(audio(0.1)); node.onaudioprocess(audio(0.2));
+  await tick();
+  app.cancel();
+  assert.equal(track.stopped, true); assert.equal(ctx.closed, true);
+  assert.deepEqual(deleted, ['DELETE']);
+  assert.equal(app.element('cancel').disabled, true);
+  partial.resolve(); for (let i = 0; i < 3; i++) await tick();
+  assert.equal(chunks.length, 1, 'cancel must not append a final chunk');
+  assert.equal(chunks[0].final, false);
+}
+
 (async () => {
   await initializationFailureReleasesEverything();
   await audioContextFailureReleasesGrantedMicrophone();
@@ -256,5 +292,6 @@ async function finalTranscriptStartsOneLanguageBoundAnswer() {
   await chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording();
   await failedCreationUnlocksLanguage();
   await finalTranscriptStartsOneLanguageBoundAnswer();
+  await cancellationReleasesHardwareAndNeverFinalizes();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
