@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -39,6 +41,44 @@ QUESTION_FILES = (
 )
 TOP_K = 10          # 与 Orchestrator 一致：max_evidence(5) * 2
 CANDIDATES = 30     # AnswerConfig.candidates
+_FULL_GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def runtime_identity(store) -> dict:
+    """查询前钉住运行期身份，失败即退出（CR-159）。
+
+    没有这些字段，报告里的 rowid 在索引重建后可能指向别的块，"54/148" 就只能
+    自洽、无法独立复验（与 CR-147 同类）。因此这里失败关闭，而不是记个 None。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+    except OSError as exc:
+        raise SystemExit(f"无法读取实现身份（git commit）：{exc}")
+    commit = result.stdout.strip()
+    if result.returncode or not _FULL_GIT_COMMIT.fullmatch(commit):
+        raise SystemExit(f"无法验证完整 Git commit：{result.stderr.strip() or commit!r}")
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True,
+                           capture_output=True, check=False).stdout.strip()
+    identity = {
+        "implementation_commit": commit,
+        "working_tree_dirty": bool(dirty),
+        "index_chunks": store.count(),
+        "dictionary_version": store.meta.get("dictionary_version"),
+        "embedding_model": store.meta.get("embedding_model"),
+        "top_k": TOP_K,
+        "candidates": CANDIDATES,
+    }
+    missing = [k for k in ("index_chunks", "dictionary_version", "embedding_model") if not identity[k]]
+    if missing:
+        raise SystemExit(f"索引缺少身份字段，拒绝产出不可复验的报告：{missing}")
+    return identity
+
+
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def questions() -> list[tuple[str, str, str]]:
@@ -72,29 +112,40 @@ def truncate(text: str, lang: str, drop: int) -> str:
     return stripped[:-drop] if drop < len(stripped) else ""
 
 
-def top_rowids(store, embedder, text: str) -> list[int]:
+def top_hits(store, embedder, text: str) -> list[dict]:
+    """top-k 的可复验身份：rowid 会随重建漂移，正文 checksum 不会。"""
     hits = hybrid_search(
         store, text, embedder.encode_one(text), limit=TOP_K,
         technology=detect_technology(text), candidates=CANDIDATES,
     )
-    return [h.rowid for h in hits]
+    return [{"rowid": h.rowid, "text_sha256": sha256(h.text), "source_url": h.source_url} for h in hits]
+
+
+def keys(hits: list[dict]) -> list[str]:
+    return [h["text_sha256"] for h in hits]
 
 
 def agreement(store, embedder, drops: list[int]) -> dict:
     rows = []
     for qid, lang, text in questions():
-        full = top_rowids(store, embedder, text)
-        entry = {"id": qid, "lang": lang, "full_top1": full[0] if full else None, "drops": {}}
+        full = top_hits(store, embedder, text)
+        full_keys = keys(full)
+        # 题面存哈希不存原文：题库本身在仓库里，审查方可自行按同一哈希对上。
+        entry = {"id": qid, "lang": lang, "question_sha256": sha256(text),
+                 "question_chars": len(text), "full_top5": full[:5], "drops": {}}
         for drop in drops:
             partial = truncate(text, lang, drop)
             if not partial.strip():
                 continue
-            got = top_rowids(store, embedder, partial)
+            got = top_hits(store, embedder, partial)
+            got_keys = keys(got)
             entry["drops"][str(drop)] = {
-                "same_top1": bool(got and full and got[0] == full[0]),
-                "same_top5_set": set(got[:5]) == set(full[:5]),
-                "same_top10_order": got == full,
-                "overlap5": len(set(got[:5]) & set(full[:5])),
+                "partial_sha256": sha256(partial),
+                "partial_top5": got[:5],
+                "same_top1": bool(got_keys and full_keys and got_keys[0] == full_keys[0]),
+                "same_top5_set": set(got_keys[:5]) == set(full_keys[:5]),
+                "same_top10_order": got_keys == full_keys,
+                "overlap5": len(set(got_keys[:5]) & set(full_keys[:5])),
             }
         rows.append(entry)
     summary = {}
@@ -118,7 +169,7 @@ def contention(store, embedder, pcm_path: str, runs: int) -> dict:
     audio = x[: SAMPLE_RATE * 7]
     query = "Kafka 消费者重复消费怎么排查"
     mlx_whisper_transcriber(audio, language="en")        # warm
-    top_rowids(store, embedder, query)                   # warm
+    top_hits(store, embedder, query)                     # warm
 
     alone = []
     for _ in range(runs):
@@ -133,7 +184,7 @@ def contention(store, embedder, pcm_path: str, runs: int) -> dict:
 
         def spin():
             while not stop.is_set():
-                top_rowids(store, embedder, query)
+                top_hits(store, embedder, query)
                 count[0] += 1
 
         worker = threading.Thread(target=spin)
@@ -148,11 +199,13 @@ def contention(store, embedder, pcm_path: str, runs: int) -> dict:
     solo_retrieval = []
     for _ in range(runs):
         started = time.perf_counter()
-        top_rowids(store, embedder, query)
+        top_hits(store, embedder, query)
         solo_retrieval.append(round((time.perf_counter() - started) * 1000, 1))
 
     return {
         "audio_s": 7, "runs": runs,
+        "query_sha256": sha256(query),
+        "asr_model": "mlx-community/whisper-large-v3-turbo",
         "transcribe_alone_ms": alone,
         "transcribe_with_concurrent_retrieval_ms": with_retrieval,
         "retrievals_completed_during_each_transcription": retrieval_counts,
@@ -177,13 +230,15 @@ def main() -> None:
         raise SystemExit(f"嵌入模型不可用：{embedder.error}")
     store = ChunkStore()
     try:
-        payload = {"top_k": TOP_K, "candidates": CANDIDATES, "agreement": agreement(store, embedder, args.drop)}
+        payload = {"identity": runtime_identity(store)}
+        payload["agreement"] = agreement(store, embedder, args.drop)
         if args.pcm:
             payload["contention"] = contention(store, embedder, args.pcm.split("=", 1)[1], args.runs)
     finally:
         store.close()
     Path(args.json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"agreement": payload["agreement"]["summary"],
+    print(json.dumps({"identity": payload["identity"],
+                      "agreement": payload["agreement"]["summary"],
                       "contention": {k: v for k, v in payload.get("contention", {}).items() if k.startswith("median")
                                      or k.startswith("retrievals")}}, ensure_ascii=False, indent=2))
 
