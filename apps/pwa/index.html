@@ -99,6 +99,9 @@ $('#f').addEventListener('submit', async e => {
 
 // T-008：浏览器只上传 16 kHz 单声道 s16le PCM。单个 held chunk 留到下一块/停止时
 // 才发送，使最后一块可以带 final=true，服务端无需用重复 PCM 触发最终转写。
+// R176：服务端每个 partial 都对累计音频整段重转写，远慢于 callback 节奏；因此同一时刻
+// 只允许一个 partial 在途，其间到达的块在 `pending` 里合并成下一个 partial，
+// 停止时只等在途那一个，其余未发送的音频全部并入唯一的 final。
 let recorder = null;
 // 这是待真机校准的起点，而不是跨设备的音量或时延结论。静音以样本时长累计，
 // 不以 callback 次数累计，避免不同浏览器的 buffer 大小时长改变 VAD 语义。
@@ -109,7 +112,22 @@ function pcm16(samples, inputRate) {
   for (let i = 0; i < n; i++) {
     const x = Math.max(-1, Math.min(1, samples[Math.floor(i * ratio)])); out[i] = x * 32767;
   }
-  return btoa(String.fromCharCode(...new Uint8Array(out.buffer)));
+  return out;
+}
+function pcmBase64(blocks) {
+  let binary = '';
+  for (const block of blocks) {
+    const bytes = new Uint8Array(block.buffer, block.byteOffset, block.byteLength);
+    // 合并后的块可达数秒；分段展开，避免一次 fromCharCode(...) 超出参数个数上限。
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+async function pumpPartials(r) {
+  // 停止/取消都会先置 hardwareReleased；停止已把 pending 并入 final，取消则丢弃它们。
+  while (r.pending.length && !r.hardwareReleased) {
+    await postChunk(r, pcmBase64(r.pending.splice(0)), false);
+  }
 }
 async function postChunk(recording, pcm_s16le_b64, final) {
   const r = await fetch(`/v1/transcriptions/${recording.id}/chunks`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pcm_s16le_b64, final})});
@@ -139,16 +157,20 @@ function cancelRecorder(error, r = recorder) {
   if (r && r.id) fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
   resetRecorderUI(error);
 }
-async function finishStoppedRecorder(r, queue, held) {
+async function finishStoppedRecorder(r, inflight, unsent) {
   // A session with no callback has no PCM that can carry final=true.  It must be
   // explicitly cancelled; otherwise the server retains its in-memory session.
-  if (!held) {
+  if (!unsent.length) {
     r.cancelled = true;
     fetch(`/v1/transcriptions/${r.id}`, {method:'DELETE'}).catch(() => {});
     resetRecorderUI();
     return;
   }
-  try { await queue; r.finalSentAt = performance.now(); await postChunk(r, held, true); }
+  try {
+    await inflight;
+    if (r.uploadError) throw r.uploadError;
+    r.finalSentAt = performance.now(); await postChunk(r, pcmBase64(unsent), true);
+  }
   catch (e) { cancelRecorder(e, r); return; }
   // A delivered final closes the server session; do not cancel it while it is being drained.
   resetRecorderUI();
@@ -159,9 +181,9 @@ function stopRecording(r = recorder, reason = 'manual') {
   r.stoppedAt = performance.now(); r.stopReason = reason;
   recorder = null; micEl.disabled = true; cancelEl.disabled = true;
   // Freeze upload state, then free privacy-sensitive hardware before waiting on the network.
-  const queue = r.queue, held = r.held;
+  const inflight = r.inflight, unsent = r.held ? [...r.pending.splice(0), r.held] : [];
   releaseRecorderHardware(r);
-  void finishStoppedRecorder(r, queue, held);
+  void finishStoppedRecorder(r, inflight, unsent);
 }
 function observeVoiceActivity(r, samples, sampleRate) {
   let squares = 0;
@@ -190,7 +212,7 @@ micEl.addEventListener('click', async () => {
     const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language})});
     if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
     ({transcript_id:id} = await created.json());
-    recorder = {stream, ctx, node, id, language, held:null, queue:Promise.resolve()};
+    recorder = {stream, ctx, node, id, language, held:null, pending:[], inflight:null};
     cancelEl.disabled = false;
     node.onaudioprocess = e => {
       const r = recorder;
@@ -198,7 +220,13 @@ micEl.addEventListener('click', async () => {
       const samples = e.inputBuffer.getChannelData(0);
       const next = pcm16(samples, ctx.sampleRate), prior = r.held;
       r.held = next;
-      if (prior) r.queue = r.queue.then(() => postChunk(r, prior, false));
+      if (prior) {
+        r.pending.push(prior);
+        if (!r.inflight && !r.uploadError) {
+          // 失败后不再发后续 partial，留到停止时取消会话（与原串行 queue 被拒后的语义一致）。
+          r.inflight = pumpPartials(r).catch(e => { r.uploadError = e; }).finally(() => { r.inflight = null; });
+        }
+      }
       observeVoiceActivity(r, samples, ctx.sampleRate);
     };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';

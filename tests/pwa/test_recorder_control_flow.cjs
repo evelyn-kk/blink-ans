@@ -479,6 +479,76 @@ async function voiceAnswerReportsClientStopToFirstTextAndServerStages() {
   assert.ok(textMeta.includes('服务端（自 answer_requested，ms）'));
 }
 
+function recorderHarness(fetchChunk) {
+  const track = {stopped: false, stop() { this.stopped = true; }};
+  const stream = {getTracks: () => [track]};
+  const ctx = {sampleRate: 16000, destination: {}, close() {}, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (ctx.node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const calls = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      calls.push([url, options.method || 'GET']);
+      if (url === '/v1/transcriptions') return response({transcript_id: 'backlog'});
+      if (url === '/v1/transcriptions/backlog/chunks') return fetchChunk(JSON.parse(options.body));
+      if (url === '/v1/transcriptions/backlog' || url === '/empty-stream') return streamResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  return {app, ctx, calls};
+}
+const decodePcm = b64 => Array.from(new Int16Array(new Uint8Array(Buffer.from(b64, 'base64')).buffer));
+
+async function partialBacklogCoalescesBehindOneInflightUpload() {
+  // 20000 samples per block = 40000 bytes, so a merged chunk also crosses the 0x8000 encode slice.
+  const N = 20000, gates = [], chunks = [];
+  const {app, ctx} = recorderHarness(async payload => {
+    chunks.push(payload);
+    if (!payload.final) { const gate = deferred(); gates.push(gate); await gate.promise; }
+    return response({stream_url: '/empty-stream'});
+  });
+  await app.click();
+  const block = k => ({inputBuffer: {getChannelData: () => new Float32Array(N).fill(k / 100)}});
+  for (const k of [2, 3, 4, 5, 6]) ctx.node.onaudioprocess(block(k));
+  await tick();
+  assert.equal(chunks.length, 1, 'only one partial may be in flight');
+  gates[0].resolve(); for (let i = 0; i < 4; i++) await tick();
+  assert.equal(chunks.length, 2, 'blocks that arrived during the first upload form one next partial');
+  assert.equal(decodePcm(chunks[1].pcm_s16le_b64).length, 3 * N, 'the second partial merges three blocks');
+  ctx.node.onaudioprocess(block(7));
+  const stopping = app.click();
+  assert.equal(chunks.length, 2, 'stop waits for the in-flight partial instead of sending more partials');
+  gates[1].resolve();
+  await stopping; for (let i = 0; i < 6; i++) await tick();
+  assert.deepEqual(chunks.map(c => c.final), [false, false, true], 'the rest of the audio rides on the one final');
+  const expected = [2, 3, 4, 5, 6, 7].flatMap(k => Array(N).fill(Math.trunc(k / 100 * 32767)));
+  const uploaded = chunks.flatMap(c => decodePcm(c.pcm_s16le_b64));
+  assert.equal(uploaded.length, expected.length, 'no audio is dropped or duplicated by merging');
+  assert.ok(uploaded.every((v, i) => v === expected[i]), 'merged audio keeps capture order');
+}
+
+async function failedPartialStopsLaterUploadsAndCancelsOnStop() {
+  const chunks = [];
+  const {app, ctx, calls} = recorderHarness(async payload => {
+    chunks.push(payload);
+    return {ok: false, status: 503};
+  });
+  await app.click();
+  const block = k => ({inputBuffer: {getChannelData: () => new Float32Array(160).fill(k / 100)}});
+  for (const k of [2, 3]) ctx.node.onaudioprocess(block(k));
+  for (let i = 0; i < 4; i++) await tick();
+  for (const k of [4, 5, 6]) ctx.node.onaudioprocess(block(k));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(chunks.length, 1, 'after a failed partial no further partials are sent');
+  await app.click(); for (let i = 0; i < 4; i++) await tick();
+  assert.equal(chunks.filter(c => c.final).length, 0, 'a recording with a failed upload must not finalize');
+  assert.deepEqual(calls.at(-1), ['/v1/transcriptions/backlog', 'DELETE'], 'the server session is cancelled instead');
+  assert.equal(app.element('status').className, 'err');
+}
+
 const tests = {
   initializationFailureReleasesEverything,
   audioContextFailureReleasesGrantedMicrophone,
@@ -491,6 +561,8 @@ const tests = {
   cancellationDiscardsLateTranscriptEvents,
   vadStopsOnlyAfterSpeechAndAccumulatedSilence,
   voiceAnswerReportsClientStopToFirstTextAndServerStages,
+  partialBacklogCoalescesBehindOneInflightUpload,
+  failedPartialStopsLaterUploadsAndCancelsOnStop,
 };
 
 // PWA_ONLY=<name> runs one regression, e.g. to check it alone against an older revision.
