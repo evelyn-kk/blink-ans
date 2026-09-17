@@ -15,6 +15,7 @@ import base64
 import binascii
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -106,6 +107,11 @@ _transcripts: dict[str, TranscriptSession] = {}
 _pending_transcript_events: dict[str, tuple[str, dict]] = {}
 _MAX_TRANSCRIPTS = 16
 _MAX_PENDING_TRANSCRIPT_EVENTS = 64
+# T-008 打点（architecture.md §6.1）：final 转写成功后，按 transcript_id 暂存
+# 该发言段在服务端的时刻，等客户端以同一 transcript_id 发起答案时一次性取走。
+# 只存 perf_counter 读数，不存文本或音频。
+_voice_stage_marks: dict[str, dict[str, float]] = {}
+_MAX_VOICE_STAGE_MARKS = 64
 
 
 def _new_transcript_session(language: Language) -> TranscriptSession:
@@ -117,6 +123,7 @@ def _new_transcript_session(language: Language) -> TranscriptSession:
 def _discard_transcription(transcript_id: str) -> None:
     """结束会话并删除其尚未取走的 transcript 文本。"""
     _transcripts.pop(transcript_id, None)
+    _voice_stage_marks.pop(transcript_id, None)
     for event_id, (owner, _event) in list(_pending_transcript_events.items()):
         if owner == transcript_id:
             _pending_transcript_events.pop(event_id, None)
@@ -291,6 +298,10 @@ class AskBody(BaseModel):
     language: Language | None = Field(
         default=None, description="回答语言，不传则用服务端默认语言"
     )
+    # T-008：语音问答时带上产生这段问题的转写会话，服务端据此把 final 分片到达
+    # 与 ASR 完成接进本次答案的阶段打点。它只用于观测：找不到对应打点时照常作答，
+    # 起点退回 `answer_requested`，并在 done.stages.origin 里如实可见。
+    transcript_id: str | None = Field(default=None, max_length=64)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +332,7 @@ async def create_transcription(body: TranscriptCreateBody):
 
 @app.post("/v1/transcriptions/{transcript_id}/chunks", status_code=201)
 async def append_transcript_chunk(transcript_id: str, body: TranscriptChunkBody):
+    received_at = time.perf_counter()
     session = _transcripts.get(transcript_id)
     if session is None:
         raise HTTPException(404, "转写会话不存在或已结束")
@@ -340,6 +352,15 @@ async def append_transcript_chunk(transcript_id: str, body: TranscriptChunkBody)
         raise HTTPException(503, "本地转写暂不可用，请重新开始录音") from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+    if body.final:
+        # 两个时刻之间包含 base64 解码、线程池调度与等待会话锁，不只是模型推理。
+        if len(_voice_stage_marks) >= _MAX_VOICE_STAGE_MARKS:
+            for old_id in list(_voice_stage_marks)[:len(_voice_stage_marks) - _MAX_VOICE_STAGE_MARKS + 1]:
+                _voice_stage_marks.pop(old_id, None)
+        _voice_stage_marks[transcript_id] = {
+            "final_chunk_received": received_at,
+            "asr_final": time.perf_counter(),
+        }
     if len(_pending_transcript_events) >= _MAX_PENDING_TRANSCRIPT_EVENTS:
         for old_id in list(_pending_transcript_events)[:len(_pending_transcript_events) - _MAX_PENDING_TRANSCRIPT_EVENTS + 1]:
             _pending_transcript_events.pop(old_id, None)
@@ -385,8 +406,11 @@ async def cancel_transcription(transcript_id: str):
 
 @app.post("/v1/answers", status_code=201)
 async def create_answer(body: AskBody):
+    requested_at = time.perf_counter()
     if _orchestrator is None:
         raise HTTPException(503, "服务尚未就绪，请查看 /healthz")
+    marks = dict(_voice_stage_marks.pop(body.transcript_id, {})) if body.transcript_id else {}
+    marks["answer_requested"] = requested_at
 
     if len(_pending) >= _MAX_PENDING:
         for k in list(_pending)[: len(_pending) - _MAX_PENDING + 1]:
@@ -398,6 +422,7 @@ async def create_answer(body: AskBody):
         project=body.project, project_id=body.project_id,
         module=body.module, symbol=body.symbol, max_tokens=body.max_tokens,
         language=body.language or _DEFAULT_LANGUAGE,
+        stage_marks=marks,
     )
     return {"answer_id": aid, "stream_url": f"/v1/answers/{aid}/stream"}
 

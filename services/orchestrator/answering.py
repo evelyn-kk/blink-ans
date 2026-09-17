@@ -40,6 +40,7 @@ from packages.prompts.answer import (  # noqa: E402
 )
 from packages.schemas.chunk import estimate_tokens  # noqa: E402
 from services.inference.router import Router  # noqa: E402
+from services.orchestrator.stages import StageClock  # noqa: E402
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.search import Hit, hits_by_rowid, hybrid_search  # noqa: E402
 from services.retrieval.store import ChunkStore  # noqa: E402
@@ -375,6 +376,9 @@ class AnswerRequest:
     # 与本轮 hybrid_search 的结果合并参与判定/选取（见 Orchestrator.answer()）。
     # 默认 None：一次性问答（POST /v1/answers）与既有测试完全不受影响。
     extra_hit_rowids: list[int] | None = None
+    # T-008：网关在本请求之前已打下的阶段时刻（同进程 perf_counter 读数），
+    # 例如语音问答的 final 分片到达与 ASR 完成。None 时起点就是编排层自己的打点。
+    stage_marks: dict[str, float] | None = None
 
 
 class Orchestrator:
@@ -456,7 +460,28 @@ class Orchestrator:
         return evidence, cloud_allowed
 
     def answer(self, req: AnswerRequest) -> Iterator[dict]:
-        """产出事件流。事件类型在 I2 定死，后续迭代只加不改语义。"""
+        """产出事件流。事件类型在 I2 定死，后续迭代只加不改语义。
+
+        T-008：每个分支的 `done` 都附加 `stages`（architecture.md §6.1 打点）。
+        在这一层统一包装，而不是逐个 `done` 手写，避免某个拒答/兜底分支漏掉。
+        """
+        clock = StageClock(req.stage_marks)
+        clock.mark("answer_started")
+        events = self._answer(req, clock)
+        try:
+            for ev in events:
+                if ev["type"] == "answer_delta" and ev["text"].strip():
+                    clock.mark("first_answer_delta")
+                elif ev["type"] == "done":
+                    clock.mark("answer_done")
+                    ev = {**ev, "stages": clock.snapshot()}
+                yield ev
+        finally:
+            # 断开时 sse_stream 只 close 最外层生成器；必须显式传下去，
+            # engine.stream() 的 finally 才能及时释放引擎锁（CR-011）。
+            events.close()
+
+    def _answer(self, req: AnswerRequest, clock: StageClock) -> Iterator[dict]:
         t0 = time.perf_counter()
 
         if req.language not in SUPPORTED_LANGUAGES:
@@ -502,6 +527,7 @@ class Orchestrator:
 
         verdict = assess(hits, self.cfg)
         retrieval_ms = round((time.perf_counter() - t0) * 1000, 1)
+        clock.mark("retrieval_done")
 
         yield {
             "type": "retrieval",
@@ -541,6 +567,7 @@ class Orchestrator:
                 req.question, max_tokens=220,
                 system_override=insufficient_prompt(req.language),
                 started=t0, sufficiency=verdict.level, cloud_allowed=candidates_cloud_allowed,
+                clock=clock,
             )
             yield {"type": "sources", "items": []}
             return
@@ -575,7 +602,7 @@ class Orchestrator:
             user_msg, max_tokens=req.max_tokens or self.cfg.max_tokens,
             started=t0, sufficiency=verdict.level, evidence_count=len(evidence),
             cloud_allowed=cloud_allowed, system_override=override,
-            evidence=evidence, language=req.language,
+            evidence=evidence, language=req.language, clock=clock,
         ):
             if ev["type"] == "answer_delta":
                 answer += ev["text"]
@@ -608,8 +635,12 @@ class Orchestrator:
         sufficiency: Sufficiency, system_override: str | None = None,
         evidence_count: int = 0, cloud_allowed: bool = True,
         evidence: list[Evidence] | None = None, language: Language = "zh",
+        clock: StageClock | None = None,
     ) -> Iterator[dict]:
         text = ""
+        if clock is not None:
+            # 后端派发前的最后一刻；云端建连、本地排队等引擎锁都算在它之后。
+            clock.mark("generation_started")
         try:
             for ev in self.router.generate(
                 content, max_tokens=max_tokens, system_override=system_override,
