@@ -65,9 +65,8 @@ const SUFFICIENCY = {
   insufficient: ['warn', '本地知识库未覆盖该问题，以下不是确定结论'],
 };
 
-$('#f').addEventListener('submit', async e => {
-  e.preventDefault();
-  const question = $('#q').value.trim();
+async function submitAnswer(question, language) {
+  question = question.trim();
   if (!question) return;
 
   $('#go').disabled = true;
@@ -77,7 +76,7 @@ $('#f').addEventListener('submit', async e => {
   try {
     const r = await fetch('/v1/answers', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question, language: languageEl.value }),
+      body: JSON.stringify({ question, language }),
     });
     if (!r.ok) throw new Error(`创建会话失败 (${r.status})`);
     const { stream_url } = await r.json();
@@ -88,6 +87,10 @@ $('#f').addEventListener('submit', async e => {
   } finally {
     $('#go').disabled = false;
   }
+}
+$('#f').addEventListener('submit', async e => {
+  e.preventDefault();
+  await submitAnswer($('#q').value, languageEl.value);
 });
 
 // T-008：浏览器只上传 16 kHz 单声道 s16le PCM。单个 held chunk 留到下一块/停止时
@@ -100,11 +103,11 @@ function pcm16(samples, inputRate) {
   }
   return btoa(String.fromCharCode(...new Uint8Array(out.buffer)));
 }
-async function postChunk(id, pcm_s16le_b64, final) {
+async function postChunk(id, pcm_s16le_b64, final, language) {
   const r = await fetch(`/v1/transcriptions/${id}/chunks`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pcm_s16le_b64, final})});
   if (!r.ok) throw new Error(`转写失败 (${r.status})`);
   const {stream_url} = await r.json();
-  await consume(stream_url);
+  await consume(stream_url, language);
 }
 function releaseRecorderHardware(r) {
   if (!r || r.hardwareReleased) return;
@@ -125,7 +128,7 @@ function cancelRecorder(error, r = recorder) {
   resetRecorderUI(error);
 }
 async function finishStoppedRecorder(r, queue, held) {
-  try { await queue; if (held) await postChunk(r.id, held, true); }
+  try { await queue; if (held) await postChunk(r.id, held, true, r.language); }
   catch (e) { cancelRecorder(e, r); return; }
   // A delivered final closes the server session; do not cancel it while it is being drained.
   resetRecorderUI();
@@ -149,8 +152,8 @@ micEl.addEventListener('click', async () => {
     const created = await fetch('/v1/transcriptions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({language})});
     if (!created.ok) throw new Error(`创建转写会话失败 (${created.status})`);
     ({transcript_id:id} = await created.json());
-    recorder = {stream, ctx, node, id, held:null, queue:Promise.resolve()};
-    node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false)); };
+    recorder = {stream, ctx, node, id, language, held:null, queue:Promise.resolve()};
+    node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false, r.language)); };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {
     // `recorder` 发布后，资源所有权已交给 stopRecorder；不能再按局部变量二次 DELETE。
@@ -164,7 +167,7 @@ micEl.addEventListener('click', async () => {
 
 // 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，
 // 后续 I4 的音频分片上传需要 POST，统一走 fetch 便于复用同一套解析。
-async function consume(url) {
+async function consume(url, transcriptLanguage) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`流不可用 (${res.status})`);
   const reader = res.body.getReader();
@@ -180,15 +183,19 @@ async function consume(url) {
     while ((i = buf.indexOf('\n\n')) !== -1) {
       const block = buf.slice(0, i); buf = buf.slice(i + 2);
       const line = block.split('\n').find(l => l.startsWith('data:'));
-      if (line) handle(JSON.parse(line.slice(5)));
+      if (line) await handle(JSON.parse(line.slice(5)), transcriptLanguage);
     }
   }
 }
 
-function handle(ev) {
+async function handle(ev, transcriptLanguage) {
   switch (ev.type) {
     case 'transcript':
       transcriptEl.textContent = ev.text;
+      if (ev.final && ev.text.trim()) {
+        $('#q').value = ev.text;
+        await submitAnswer(ev.text, transcriptLanguage);
+      }
       break;
     case 'retrieval': {
       const [cls, note] = SUFFICIENCY[ev.sufficiency] || ['', ''];

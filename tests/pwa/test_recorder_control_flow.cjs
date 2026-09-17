@@ -18,7 +18,13 @@ const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const response = body => ({ok: true, json: async () => body});
-const streamResponse = () => ({ok: true, body: {getReader: () => ({read: async () => ({done: true})})}});
+const streamResponse = (sse = '') => {
+  let sent = false;
+  return {ok: true, body: {getReader: () => ({read: async () => {
+    if (sent || !sse) return {done: true};
+    sent = true; return {done: false, value: new TextEncoder().encode(sse)};
+  }})}};
+};
 
 function deferred() {
   let resolve, reject;
@@ -201,11 +207,54 @@ async function failedCreationUnlocksLanguage() {
   assert.equal(app.element('language').disabled, false, 'failed creation must restore language selection');
 }
 
+async function finalTranscriptStartsOneLanguageBoundAnswer() {
+  const track = {stop() {}};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {sampleRate: 16000, destination: {}, close() {}, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const answers = [], chunks = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      if (url === '/v1/transcriptions') return response({transcript_id: 'handoff'});
+      if (url === '/v1/transcriptions/handoff/chunks') {
+        chunks.push(JSON.parse(options.body));
+        return response({stream_url: '/final-transcript'});
+      }
+      if (url === '/final-transcript') return streamResponse(
+        'data: {"type":"transcript","text":"How does Kafka","final":false,"sequence":1}\n\n' +
+        'data: {"type":"transcript","text":"How does Kafka compaction work?","final":true,"sequence":2}\n\n'
+      );
+      if (url === '/v1/answers') {
+        answers.push(JSON.parse(options.body));
+        return response({stream_url: '/answer-stream'});
+      }
+      if (url === '/answer-stream') return streamResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  app.chooseLanguage('en');
+  await app.click();
+  node.onaudioprocess({inputBuffer: {getChannelData: () => new Float32Array([0.2])}});
+  await app.click();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(chunks.length, 1);
+  assert.equal(chunks[0].final, true);
+  assert.equal(answers.length, 1, 'partial transcript must not start an answer');
+  assert.deepEqual(answers, [{question: 'How does Kafka compaction work?', language: 'en'}]);
+  assert.equal(app.element('q').value, 'How does Kafka compaction work?');
+}
+
 (async () => {
   await initializationFailureReleasesEverything();
   await audioContextFailureReleasesGrantedMicrophone();
   await stoppingClosesCallbackBeforeAwaitingQueue();
   await chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording();
   await failedCreationUnlocksLanguage();
+  await finalTranscriptStartsOneLanguageBoundAnswer();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
