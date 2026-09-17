@@ -104,11 +104,14 @@ function pcm16(samples, inputRate) {
   }
   return btoa(String.fromCharCode(...new Uint8Array(out.buffer)));
 }
-async function postChunk(id, pcm_s16le_b64, final, language) {
-  const r = await fetch(`/v1/transcriptions/${id}/chunks`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pcm_s16le_b64, final})});
+async function postChunk(recording, pcm_s16le_b64, final) {
+  const r = await fetch(`/v1/transcriptions/${recording.id}/chunks`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({pcm_s16le_b64, final})});
   if (!r.ok) throw new Error(`转写失败 (${r.status})`);
   const {stream_url} = await r.json();
-  await consume(stream_url, language);
+  // DELETE cannot recall a request that already reached the server.  The recording
+  // object remains the immutable owner of that request, so cancelled recordings
+  // must discard every late transcript event instead of updating the next recording.
+  if (!recording.cancelled) await consume(stream_url, recording.language, recording);
 }
 function releaseRecorderHardware(r) {
   if (!r || r.hardwareReleased) return;
@@ -130,7 +133,7 @@ function cancelRecorder(error, r = recorder) {
   resetRecorderUI(error);
 }
 async function finishStoppedRecorder(r, queue, held) {
-  try { await queue; if (held) await postChunk(r.id, held, true, r.language); }
+  try { await queue; if (held) await postChunk(r, held, true); }
   catch (e) { cancelRecorder(e, r); return; }
   // A delivered final closes the server session; do not cancel it while it is being drained.
   resetRecorderUI();
@@ -156,7 +159,7 @@ micEl.addEventListener('click', async () => {
     ({transcript_id:id} = await created.json());
     recorder = {stream, ctx, node, id, language, held:null, queue:Promise.resolve()};
     cancelEl.disabled = false;
-    node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r.id, prior, false, r.language)); };
+    node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r, prior, false)); };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {
     // `recorder` 发布后，资源所有权已交给 stopRecorder；不能再按局部变量二次 DELETE。
@@ -180,7 +183,7 @@ cancelEl.addEventListener('click', () => {
 
 // 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，
 // 后续 I4 的音频分片上传需要 POST，统一走 fetch 便于复用同一套解析。
-async function consume(url, transcriptLanguage) {
+async function consume(url, transcriptLanguage, recording) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`流不可用 (${res.status})`);
   const reader = res.body.getReader();
@@ -196,12 +199,13 @@ async function consume(url, transcriptLanguage) {
     while ((i = buf.indexOf('\n\n')) !== -1) {
       const block = buf.slice(0, i); buf = buf.slice(i + 2);
       const line = block.split('\n').find(l => l.startsWith('data:'));
-      if (line) await handle(JSON.parse(line.slice(5)), transcriptLanguage);
+      if (line) await handle(JSON.parse(line.slice(5)), transcriptLanguage, recording);
     }
   }
 }
 
-async function handle(ev, transcriptLanguage) {
+async function handle(ev, transcriptLanguage, recording) {
+  if (recording && recording.cancelled) return;
   switch (ev.type) {
     case 'transcript':
       transcriptEl.textContent = ev.text;

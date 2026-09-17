@@ -285,6 +285,50 @@ async function cancellationReleasesHardwareAndNeverFinalizes() {
   assert.equal(chunks[0].final, false);
 }
 
+async function cancellationDiscardsLateTranscriptEvents() {
+  const track = {stop() {}};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {sampleRate: 16000, destination: {}, close() {}, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const partial = deferred(), answers = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      if (url === '/v1/transcriptions') return response({transcript_id: 'late-event'});
+      if (url === '/v1/transcriptions/late-event/chunks') {
+        await partial.promise;
+        return response({stream_url: '/late-transcript'});
+      }
+      if (url === '/v1/transcriptions/late-event') return response({});
+      if (url === '/late-transcript') return streamResponse(
+        'data: {"type":"transcript","text":"discarded final","final":true,"sequence":1}\n\n'
+      );
+      if (url === '/v1/answers') {
+        answers.push(JSON.parse(options.body));
+        return response({stream_url: '/answer-stream'});
+      }
+      if (url === '/answer-stream') return streamResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  await app.click();
+  const audio = value => ({inputBuffer: {getChannelData: () => new Float32Array([value])}});
+  node.onaudioprocess(audio(0.1)); node.onaudioprocess(audio(0.2));
+  await tick();
+  const transcriptBeforeCancel = app.element('transcript').textContent;
+  app.cancel();
+  partial.resolve();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(app.element('transcript').textContent, transcriptBeforeCancel,
+    'a cancelled recording must discard a late transcript SSE instead of displaying it');
+  assert.equal(app.element('q').value, '', 'a late final transcript must not overwrite the question input');
+  assert.deepEqual(answers, [], 'a late final transcript must not start an answer');
+}
+
 (async () => {
   await initializationFailureReleasesEverything();
   await audioContextFailureReleasesGrantedMicrophone();
@@ -293,5 +337,6 @@ async function cancellationReleasesHardwareAndNeverFinalizes() {
   await failedCreationUnlocksLanguage();
   await finalTranscriptStartsOneLanguageBoundAnswer();
   await cancellationReleasesHardwareAndNeverFinalizes();
+  await cancellationDiscardsLateTranscriptEvents();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
