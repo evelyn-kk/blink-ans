@@ -123,9 +123,15 @@ function pcmBase64(blocks) {
   }
   return btoa(binary);
 }
+// R177：partial 只在"已听到语音且当前帧不是静音"时发。说话前的静音转写不出内容；说完后的
+// 静音窗口里启动的 partial 会在 VAD 停止时被 final 取代，却让 final 排在它后面等一次整段转写。
+// 静音块不丢：留在 pending，恢复说话时并入下一个 partial，停止时并入 final。
+function speaking(r) {
+  return r.heardSpeech && r.silenceMs === 0;
+}
 async function pumpPartials(r) {
   // 停止/取消都会先置 hardwareReleased；停止已把 pending 并入 final，取消则丢弃它们。
-  while (r.pending.length && !r.hardwareReleased) {
+  while (r.pending.length && !r.hardwareReleased && speaking(r)) {
     await postChunk(r, pcmBase64(r.pending.splice(0)), false);
   }
 }
@@ -220,14 +226,14 @@ micEl.addEventListener('click', async () => {
       const samples = e.inputBuffer.getChannelData(0);
       const next = pcm16(samples, ctx.sampleRate), prior = r.held;
       r.held = next;
-      if (prior) {
-        r.pending.push(prior);
-        if (!r.inflight && !r.uploadError) {
-          // 失败后不再发后续 partial，留到停止时取消会话（与原串行 queue 被拒后的语义一致）。
-          r.inflight = pumpPartials(r).catch(e => { r.uploadError = e; }).finally(() => { r.inflight = null; });
-        }
-      }
+      if (prior) r.pending.push(prior);
+      // 先更新 VAD：它可能就在这一帧停止录音（把 pending 并入 final），也决定这一帧是否在说话。
       observeVoiceActivity(r, samples, ctx.sampleRate);
+      // 是否正在说话由 pumpPartials 的循环条件统一判断：既管这次要不要发，也管在途 partial 返回时要不要接着发。
+      if (recorder === r && r.pending.length && !r.inflight && !r.uploadError) {
+        // 失败后不再发后续 partial，留到停止时取消会话（与原串行 queue 被拒后的语义一致）。
+        r.inflight = pumpPartials(r).catch(e => { r.uploadError = e; }).finally(() => { r.inflight = null; });
+      }
     };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {

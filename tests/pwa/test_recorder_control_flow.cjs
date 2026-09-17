@@ -420,7 +420,7 @@ async function voiceAnswerReportsClientStopToFirstTextAndServerStages() {
     createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
   class FakeAudioContext { constructor() { return ctx; } }
   ctx.constructor = FakeAudioContext;
-  const clock = {t: 0}, partial = deferred(), answers = [];
+  const clock = {t: 0}, partial = deferred(), answers = [], chunkFinals = [];
   const doneEvent = stages => `data: ${JSON.stringify({type: 'done', ttft_s: 0.5, total_s: 1, decode_tps: 10,
     prompt_tokens: 5, prefilled_tokens: 5, template_version: 'v', stages})}\n\n`;
   const app = boot({
@@ -431,6 +431,7 @@ async function voiceAnswerReportsClientStopToFirstTextAndServerStages() {
       if (url === '/v1/transcriptions') return response({transcript_id: 'timed'});
       if (url === '/v1/transcriptions/timed/chunks') {
         const {final} = JSON.parse(options.body);
+        chunkFinals.push(final);
         if (!final) { await partial.promise; return response({stream_url: '/partial-stream'}); }
         return response({stream_url: '/final-stream'});
       }
@@ -456,12 +457,16 @@ async function voiceAnswerReportsClientStopToFirstTextAndServerStages() {
   await app.click();
   const audio = value => ({inputBuffer: {getChannelData: () => new Float32Array(9600).fill(value)}}); // 600 ms
   node.onaudioprocess(audio(0.1));
+  node.onaudioprocess(audio(0.1)); // speech: this partial stays in flight until t=1300
   node.onaudioprocess(audio(0));
   clock.t = 1000;
-  node.onaudioprocess(audio(0)); // 1.2 s post-speech silence: VAD stops here, before partials drain
+  node.onaudioprocess(audio(0)); // 1.2 s post-speech silence: VAD stops while that partial is in flight
+  await tick();
+  assert.deepEqual(chunkFinals, [false], 'the final must wait behind the one in-flight partial');
   clock.t = 1300;
   partial.resolve();
   for (let i = 0; i < 20; i++) await tick();
+  assert.deepEqual(chunkFinals, [false, true]);
 
   assert.deepEqual(answers, [{question: 'Kafka 怎么排查重复消费', language: 'zh', transcript_id: 'timed'}]);
   const meta = app.element('meta').textContent;
@@ -549,6 +554,58 @@ async function failedPartialStopsLaterUploadsAndCancelsOnStop() {
   assert.equal(app.element('status').className, 'err');
 }
 
+async function partialsPauseWhileNotSpeaking() {
+  const N = 1600, sent = [];  // 100 ms blocks at 16 kHz
+  const {app, ctx} = recorderHarness(async payload => {
+    sent.push(payload);
+    return response({stream_url: '/empty-stream'});
+  });
+  await app.click();
+  const settle = async () => { for (let i = 0; i < 6; i++) await tick(); };
+  const block = level => ({inputBuffer: {getChannelData: () => new Float32Array(N).fill(level)}});
+  const feed = async levels => { for (const level of levels) { ctx.node.onaudioprocess(block(level)); await settle(); } };
+  await feed([0, 0, 0, 0]);
+  assert.equal(sent.length, 0, 'pre-speech silence must not start partial transcriptions');
+  await feed([0.1]);
+  assert.equal(sent.length, 1, 'the first speech frame sends the buffered audio as one partial');
+  assert.equal(decodePcm(sent[0].pcm_s16le_b64).length, 4 * N, 'pre-speech silence is kept, not dropped');
+  await feed([0.1, 0, 0, 0, 0]);
+  assert.equal(sent.length, 2, 'post-speech silence must not start more partials');
+  await feed([0.2]);
+  assert.equal(sent.length, 3, 'resumed speech sends the paused audio');
+  assert.equal(decodePcm(sent[2].pcm_s16le_b64).length, 5 * N, 'paused silence rides on the next partial');
+  await feed(Array(12).fill(0));  // 1.2 s of silence: the page VAD stops
+  await settle();
+  assert.deepEqual(sent.map(c => c.final), [false, false, false, true], 'the silence window only feeds the final');
+  const levels = [0, 0, 0, 0, 0.1, 0.1, 0, 0, 0, 0, 0.2, ...Array(12).fill(0)];
+  const expected = levels.flatMap(level => Array(N).fill(Math.trunc(level * 32767)));
+  const uploaded = sent.flatMap(c => decodePcm(c.pcm_s16le_b64));
+  assert.equal(uploaded.length, expected.length, 'pausing partials must not drop or duplicate audio');
+  assert.ok(uploaded.every((v, i) => v === expected[i]), 'paused audio keeps capture order');
+}
+
+async function inflightPartialReturningDuringSilenceDoesNotChainAnother() {
+  const N = 1600, sent = [], gate = deferred();
+  const {app, ctx} = recorderHarness(async payload => {
+    sent.push(payload);
+    if (sent.length === 1) await gate.promise;
+    return response({stream_url: '/empty-stream'});
+  });
+  await app.click();
+  const block = level => ({inputBuffer: {getChannelData: () => new Float32Array(N).fill(level)}});
+  ctx.node.onaudioprocess(block(0.1));
+  ctx.node.onaudioprocess(block(0.1));  // partial #1 in flight
+  ctx.node.onaudioprocess(block(0.1));  // speech queued behind it
+  ctx.node.onaudioprocess(block(0));    // silence begins before #1 returns
+  gate.resolve();
+  for (let i = 0; i < 8; i++) await tick();
+  assert.equal(sent.length, 1, 'a partial that returns during silence must not chain another partial');
+  ctx.node.onaudioprocess(block(0.2));
+  for (let i = 0; i < 8; i++) await tick();
+  assert.equal(sent.length, 2, 'speech resumes partials');
+  assert.equal(decodePcm(sent[1].pcm_s16le_b64).length, 3 * N, 'the queued speech and silence ride together');
+}
+
 const tests = {
   initializationFailureReleasesEverything,
   audioContextFailureReleasesGrantedMicrophone,
@@ -563,6 +620,8 @@ const tests = {
   voiceAnswerReportsClientStopToFirstTextAndServerStages,
   partialBacklogCoalescesBehindOneInflightUpload,
   failedPartialStopsLaterUploadsAndCancelsOnStop,
+  partialsPauseWhileNotSpeaking,
+  inflightPartialReturningDuringSilenceDoesNotChainAnother,
 };
 
 // PWA_ONLY=<name> runs one regression, e.g. to check it alone against an older revision.
