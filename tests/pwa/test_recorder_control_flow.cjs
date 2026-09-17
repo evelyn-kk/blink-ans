@@ -329,6 +329,45 @@ async function cancellationDiscardsLateTranscriptEvents() {
   assert.deepEqual(answers, [], 'a late final transcript must not start an answer');
 }
 
+async function vadStopsOnlyAfterSpeechAndAccumulatedSilence() {
+  const track = {stopped: false, stop() { this.stopped = true; }};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {closed: false, sampleRate: 16000, destination: {}, close() { this.closed = true; }, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const chunks = [];
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    fetch: async (url, options = {}) => {
+      if (url === '/v1/transcriptions') return response({transcript_id: 'vad'});
+      if (url === '/v1/transcriptions/vad/chunks') {
+        chunks.push(JSON.parse(options.body));
+        return response({stream_url: '/vad-stream'});
+      }
+      if (url === '/vad-stream') return streamResponse();
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  await app.click();
+  const audio = value => ({inputBuffer: {getChannelData: () => new Float32Array(9600).fill(value)}}); // 600 ms at 16 kHz
+  node.onaudioprocess(audio(0));
+  node.onaudioprocess(audio(0));
+  assert.equal(track.stopped, false, 'pre-speech silence must not end a newly opened recording');
+  node.onaudioprocess(audio(0.1));
+  node.onaudioprocess(audio(0));
+  assert.equal(track.stopped, false, '600 ms of post-speech silence is below the VAD stop window');
+  node.onaudioprocess(audio(0));
+  assert.equal(track.stopped, true, 'speech followed by 1.2 s of silence must stop the microphone');
+  assert.equal(ctx.closed, true, 'VAD stop must reuse the immediate hardware-release path');
+  assert.equal(node.onaudioprocess, null, 'VAD stop must close the callback before draining uploads');
+  for (let i = 0; i < 8; i++) await tick();
+  assert.equal(chunks.filter(chunk => chunk.final).length, 1, 'VAD stop must emit one final upload');
+  assert.equal(chunks.at(-1).final, true, 'the VAD final upload must remain ordered after partials');
+}
+
 (async () => {
   await initializationFailureReleasesEverything();
   await audioContextFailureReleasesGrantedMicrophone();
@@ -338,5 +377,6 @@ async function cancellationDiscardsLateTranscriptEvents() {
   await finalTranscriptStartsOneLanguageBoundAnswer();
   await cancellationReleasesHardwareAndNeverFinalizes();
   await cancellationDiscardsLateTranscriptEvents();
+  await vadStopsOnlyAfterSpeechAndAccumulatedSilence();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

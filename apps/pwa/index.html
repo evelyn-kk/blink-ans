@@ -97,6 +97,10 @@ $('#f').addEventListener('submit', async e => {
 // T-008：浏览器只上传 16 kHz 单声道 s16le PCM。单个 held chunk 留到下一块/停止时
 // 才发送，使最后一块可以带 final=true，服务端无需用重复 PCM 触发最终转写。
 let recorder = null;
+// 这是待真机校准的起点，而不是跨设备的音量或时延结论。静音以样本时长累计，
+// 不以 callback 次数累计，避免不同浏览器的 buffer 大小时长改变 VAD 语义。
+const VAD_SPEECH_RMS = 0.015;
+const VAD_SILENCE_MS = 1200;
 function pcm16(samples, inputRate) {
   const ratio = inputRate / 16000, n = Math.floor(samples.length / ratio), out = new Int16Array(n);
   for (let i = 0; i < n; i++) {
@@ -138,14 +142,30 @@ async function finishStoppedRecorder(r, queue, held) {
   // A delivered final closes the server session; do not cancel it while it is being drained.
   resetRecorderUI();
 }
-micEl.addEventListener('click', async () => {
-  if (recorder) { // stop: serialize behind earlier chunks, then final held chunk
-    const r = recorder; recorder = null; micEl.disabled = true; cancelEl.disabled = true;
-    // 先冻结上传，再立即释放隐私敏感硬件；网络 drain 不得继续占用麦克风。
-    const queue = r.queue, held = r.held;
-    releaseRecorderHardware(r);
-    void finishStoppedRecorder(r, queue, held); return;
+function stopRecording(r = recorder) {
+  if (!r || recorder !== r) return;
+  recorder = null; micEl.disabled = true; cancelEl.disabled = true;
+  // Freeze upload state, then free privacy-sensitive hardware before waiting on the network.
+  const queue = r.queue, held = r.held;
+  releaseRecorderHardware(r);
+  void finishStoppedRecorder(r, queue, held);
+}
+function observeVoiceActivity(r, samples, sampleRate) {
+  let squares = 0;
+  for (let i = 0; i < samples.length; i++) squares += samples[i] * samples[i];
+  const rms = samples.length ? Math.sqrt(squares / samples.length) : 0;
+  if (rms >= VAD_SPEECH_RMS) {
+    r.heardSpeech = true;
+    r.silenceMs = 0;
+    return;
   }
+  // Do not auto-stop a newly opened microphone before the user has spoken.
+  if (!r.heardSpeech) return;
+  r.silenceMs += samples.length * 1000 / sampleRate;
+  if (r.silenceMs >= VAD_SILENCE_MS) stopRecording(r);
+}
+micEl.addEventListener('click', async () => {
+  if (recorder) { stopRecording(recorder); return; }
   let stream, ctx, node, id;
   try {
     stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
@@ -159,7 +179,15 @@ micEl.addEventListener('click', async () => {
     ({transcript_id:id} = await created.json());
     recorder = {stream, ctx, node, id, language, held:null, queue:Promise.resolve()};
     cancelEl.disabled = false;
-    node.onaudioprocess = e => { const r=recorder; if (!r) return; const next=pcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate); const prior=r.held; r.held=next; if (prior) r.queue=r.queue.then(()=>postChunk(r, prior, false)); };
+    node.onaudioprocess = e => {
+      const r = recorder;
+      if (!r) return;
+      const samples = e.inputBuffer.getChannelData(0);
+      const next = pcm16(samples, ctx.sampleRate), prior = r.held;
+      r.held = next;
+      if (prior) r.queue = r.queue.then(() => postChunk(r, prior, false));
+      observeVoiceActivity(r, samples, ctx.sampleRate);
+    };
     source.connect(node); node.connect(ctx.destination); micEl.textContent='停止录音'; transcriptEl.textContent='正在转写…';
   } catch (e) {
     // `recorder` 发布后，资源所有权已交给 stopRecorder；不能再按局部变量二次 DELETE。
