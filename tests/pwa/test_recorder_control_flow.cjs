@@ -32,7 +32,17 @@ function deferred() {
   return {promise, resolve, reject};
 }
 
-function boot({fetch, getUserMedia, context}) {
+const timedStream = (clock, parts) => {
+  let i = 0;
+  return {ok: true, body: {getReader: () => ({read: async () => {
+    if (i >= parts.length) return {done: true};
+    const [at, sse] = parts[i++];
+    clock.t = at;
+    return {done: false, value: new TextEncoder().encode(sse)};
+  }})}};
+};
+
+function boot({fetch, getUserMedia, context, clock = {t: 0}}) {
   const elements = new Map();
   for (const id of ['f', 'language', 'q', 'go', 'mic', 'cancel', 'transcript', 'status', 'answer', 'sources', 'meta']) {
     elements.set(`#${id}`, {
@@ -46,6 +56,7 @@ function boot({fetch, getUserMedia, context}) {
     navigator: {mediaDevices: {getUserMedia}},
     AudioContext: context.constructor,
     fetch,
+    performance: {now: () => clock.t},
     TextDecoder,
     btoa: value => Buffer.from(value, 'binary').toString('base64'),
     Int16Array, Uint8Array, Math, JSON, Error, Promise, console,
@@ -278,7 +289,8 @@ async function finalTranscriptStartsOneLanguageBoundAnswer() {
   assert.equal(chunks.length, 1);
   assert.equal(chunks[0].final, true);
   assert.equal(answers.length, 1, 'partial transcript must not start an answer');
-  assert.deepEqual(answers, [{question: 'How does Kafka compaction work?', language: 'en'}]);
+  assert.deepEqual(answers, [{question: 'How does Kafka compaction work?', language: 'en', transcript_id: 'handoff'}],
+    'a voice answer names its transcript so the server can join ASR stage marks');
   assert.equal(app.element('q').value, 'How does Kafka compaction work?');
 }
 
@@ -400,16 +412,91 @@ async function vadStopsOnlyAfterSpeechAndAccumulatedSilence() {
   assert.equal(chunks.at(-1).final, true, 'the VAD final upload must remain ordered after partials');
 }
 
+async function voiceAnswerReportsClientStopToFirstTextAndServerStages() {
+  const track = {stop() {}};
+  const stream = {getTracks: () => [track]};
+  let node;
+  const ctx = {sampleRate: 16000, destination: {}, close() {}, createMediaStreamSource: () => ({connect() {}}),
+    createScriptProcessor: () => (node = {onaudioprocess: null, connect() {}, disconnect() {}})};
+  class FakeAudioContext { constructor() { return ctx; } }
+  ctx.constructor = FakeAudioContext;
+  const clock = {t: 0}, partial = deferred(), answers = [];
+  const doneEvent = stages => `data: ${JSON.stringify({type: 'done', ttft_s: 0.5, total_s: 1, decode_tps: 10,
+    prompt_tokens: 5, prefilled_tokens: 5, template_version: 'v', stages})}\n\n`;
+  const app = boot({
+    getUserMedia: async () => stream,
+    context: ctx,
+    clock,
+    fetch: async (url, options = {}) => {
+      if (url === '/v1/transcriptions') return response({transcript_id: 'timed'});
+      if (url === '/v1/transcriptions/timed/chunks') {
+        const {final} = JSON.parse(options.body);
+        if (!final) { await partial.promise; return response({stream_url: '/partial-stream'}); }
+        return response({stream_url: '/final-stream'});
+      }
+      if (url === '/partial-stream') return streamResponse();
+      if (url === '/final-stream') return streamResponse(
+        'data: {"type":"transcript","text":"Kafka 怎么排查重复消费","final":true,"sequence":3}\n\n');
+      if (url === '/v1/answers') {
+        answers.push(JSON.parse(options.body));
+        return response({stream_url: answers.length === 1 ? '/voice-answer' : '/text-answer'});
+      }
+      if (url === '/voice-answer') return timedStream(clock, [
+        [2000, 'data: {"type":"answer_delta","text":"  "}\n\n'],
+        [3500, 'data: {"type":"answer_delta","text":"先看 offset 提交 [1]"}\n\n'],
+        [3600, doneEvent({origin: 'final_chunk_received', ms: {final_chunk_received: 0, asr_final: 400, first_answer_delta: 1900}})],
+      ]);
+      if (url === '/text-answer') return timedStream(clock, [
+        [9000, 'data: {"type":"answer_delta","text":"文本答案"}\n\n'],
+        [9100, doneEvent({origin: 'answer_requested', ms: {answer_requested: 0, answer_done: 80}})],
+      ]);
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+  await app.click();
+  const audio = value => ({inputBuffer: {getChannelData: () => new Float32Array(9600).fill(value)}}); // 600 ms
+  node.onaudioprocess(audio(0.1));
+  node.onaudioprocess(audio(0));
+  clock.t = 1000;
+  node.onaudioprocess(audio(0)); // 1.2 s post-speech silence: VAD stops here, before partials drain
+  clock.t = 1300;
+  partial.resolve();
+  for (let i = 0; i < 20; i++) await tick();
+
+  assert.deepEqual(answers, [{question: 'Kafka 怎么排查重复消费', language: 'zh', transcript_id: 'timed'}]);
+  const meta = app.element('meta').textContent;
+  assert.ok(meta.includes('本机：VAD 结束→首个正文 2500 ms'),
+    `client latency must run from the VAD stop to the first non-blank delta, got: ${meta}`);
+  assert.ok(meta.includes('排空 partial 至发出 final 300 ms'), `partial drain must be separated, got: ${meta}`);
+  assert.ok(meta.includes('服务端（自 final_chunk_received，ms）：final_chunk_received 0 · asr_final 400 · first_answer_delta 1900'),
+    `server stages must be shown on their own clock, got: ${meta}`);
+
+  app.element('q').value = '文本提问';
+  await app.submit();
+  assert.deepEqual(answers[1], {question: '文本提问', language: 'zh'}, 'text questions carry no transcript id');
+  const textMeta = app.element('meta').textContent;
+  assert.ok(!textMeta.includes('本机：'), 'a text answer must not reuse the previous recording timing');
+  assert.ok(textMeta.includes('服务端（自 answer_requested，ms）'));
+}
+
+const tests = {
+  initializationFailureReleasesEverything,
+  audioContextFailureReleasesGrantedMicrophone,
+  stoppingClosesCallbackBeforeAwaitingQueue,
+  stoppingBeforeFirstAudioCallbackCancelsServerSession,
+  chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording,
+  failedCreationUnlocksLanguage,
+  finalTranscriptStartsOneLanguageBoundAnswer,
+  cancellationReleasesHardwareAndNeverFinalizes,
+  cancellationDiscardsLateTranscriptEvents,
+  vadStopsOnlyAfterSpeechAndAccumulatedSilence,
+  voiceAnswerReportsClientStopToFirstTextAndServerStages,
+};
+
+// PWA_ONLY=<name> runs one regression, e.g. to check it alone against an older revision.
 (async () => {
-  await initializationFailureReleasesEverything();
-  await audioContextFailureReleasesGrantedMicrophone();
-  await stoppingClosesCallbackBeforeAwaitingQueue();
-  await stoppingBeforeFirstAudioCallbackCancelsServerSession();
-  await chosenLanguageFlowsToTextAndTranscriptionAndLocksDuringRecording();
-  await failedCreationUnlocksLanguage();
-  await finalTranscriptStartsOneLanguageBoundAnswer();
-  await cancellationReleasesHardwareAndNeverFinalizes();
-  await cancellationDiscardsLateTranscriptEvents();
-  await vadStopsOnlyAfterSpeechAndAccumulatedSilence();
+  const only = process.env.PWA_ONLY;
+  if (only && !tests[only]) throw new Error(`unknown PWA_ONLY test ${only}`);
+  for (const [name, test] of Object.entries(tests)) if (!only || name === only) await test();
   process.stdout.write(`pwa recorder control-flow passed${revision ? ` against ${revision}` : ''}\n`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

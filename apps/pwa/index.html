@@ -30,7 +30,7 @@
   #sources a { color:#2f6fdb; text-decoration:none; word-break:break-all; }
   #sources a:hover { text-decoration:underline; }
   .idx { display:inline-block; min-width:1.5rem; color:var(--dim); }
-  #meta { margin-top:1rem; color:var(--dim); font-size:.78rem; font-family:ui-monospace,Menlo,monospace; }
+  #meta { margin-top:1rem; white-space:pre-wrap; color:var(--dim); font-size:.78rem; font-family:ui-monospace,Menlo,monospace; }
 </style>
 
 <h1>blink-ans <small>Java / Spring 云原生问答</small></h1>
@@ -66,9 +66,12 @@ const SUFFICIENCY = {
   insufficient: ['warn', '本地知识库未覆盖该问题，以下不是确定结论'],
 };
 
-async function submitAnswer(question, language) {
+// `recording` 只在语音问答时传入：答案请求带上 transcript_id 让服务端接上转写阶段的打点，
+// 本机另按自己的时钟量"停止录音 → 收到首个非空正文"。两台机器的时钟不能互相减。
+async function submitAnswer(question, language, recording) {
   question = question.trim();
   if (!question) return;
+  const voice = recording ? {recording, firstTextAt: null} : null;
 
   $('#go').disabled = true;
   answerEl.textContent = ''; srcEl.innerHTML = ''; metaEl.textContent = '';
@@ -77,11 +80,11 @@ async function submitAnswer(question, language) {
   try {
     const r = await fetch('/v1/answers', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question, language }),
+      body: JSON.stringify(recording ? { question, language, transcript_id: recording.id } : { question, language }),
     });
     if (!r.ok) throw new Error(`创建会话失败 (${r.status})`);
     const { stream_url } = await r.json();
-    await consume(stream_url);
+    await consume(stream_url, undefined, undefined, voice);
   } catch (err) {
     statusEl.className = 'err';
     statusEl.textContent = err.message;
@@ -145,13 +148,15 @@ async function finishStoppedRecorder(r, queue, held) {
     resetRecorderUI();
     return;
   }
-  try { await queue; await postChunk(r, held, true); }
+  try { await queue; r.finalSentAt = performance.now(); await postChunk(r, held, true); }
   catch (e) { cancelRecorder(e, r); return; }
   // A delivered final closes the server session; do not cancel it while it is being drained.
   resetRecorderUI();
 }
-function stopRecording(r = recorder) {
+function stopRecording(r = recorder, reason = 'manual') {
   if (!r || recorder !== r) return;
+  // 端到端计时的客户端起点：VAD 判定或用户点击停止的这一刻，早于排空 partial 与上传 final。
+  r.stoppedAt = performance.now(); r.stopReason = reason;
   recorder = null; micEl.disabled = true; cancelEl.disabled = true;
   // Freeze upload state, then free privacy-sensitive hardware before waiting on the network.
   const queue = r.queue, held = r.held;
@@ -170,10 +175,10 @@ function observeVoiceActivity(r, samples, sampleRate) {
   // Do not auto-stop a newly opened microphone before the user has spoken.
   if (!r.heardSpeech) return;
   r.silenceMs += samples.length * 1000 / sampleRate;
-  if (r.silenceMs >= VAD_SILENCE_MS) stopRecording(r);
+  if (r.silenceMs >= VAD_SILENCE_MS) stopRecording(r, 'vad');
 }
 micEl.addEventListener('click', async () => {
-  if (recorder) { stopRecording(recorder); return; }
+  if (recorder) { stopRecording(recorder, 'manual'); return; }
   let stream, ctx, node, id;
   try {
     stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1}});
@@ -219,7 +224,7 @@ cancelEl.addEventListener('click', () => {
 
 // 用 fetch 流而非 EventSource：EventSource 只支持 GET 且无法设置请求头，
 // 后续 I4 的音频分片上传需要 POST，统一走 fetch 便于复用同一套解析。
-async function consume(url, transcriptLanguage, recording) {
+async function consume(url, transcriptLanguage, recording, voice) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`流不可用 (${res.status})`);
   const reader = res.body.getReader();
@@ -235,19 +240,19 @@ async function consume(url, transcriptLanguage, recording) {
     while ((i = buf.indexOf('\n\n')) !== -1) {
       const block = buf.slice(0, i); buf = buf.slice(i + 2);
       const line = block.split('\n').find(l => l.startsWith('data:'));
-      if (line) await handle(JSON.parse(line.slice(5)), transcriptLanguage, recording);
+      if (line) await handle(JSON.parse(line.slice(5)), transcriptLanguage, recording, voice);
     }
   }
 }
 
-async function handle(ev, transcriptLanguage, recording) {
+async function handle(ev, transcriptLanguage, recording, voice) {
   if (recording && recording.cancelled) return;
   switch (ev.type) {
     case 'transcript':
       transcriptEl.textContent = ev.text;
       if (ev.final && ev.text.trim()) {
         $('#q').value = ev.text;
-        await submitAnswer(ev.text, transcriptLanguage);
+        await submitAnswer(ev.text, transcriptLanguage, recording);
       }
       break;
     case 'retrieval': {
@@ -260,6 +265,7 @@ async function handle(ev, transcriptLanguage, recording) {
       if (!statusEl.className) statusEl.textContent = ev.message;
       break;
     case 'answer_delta':
+      if (voice && voice.firstTextAt === null && ev.text.trim()) voice.firstTextAt = performance.now();
       answerEl.textContent += ev.text;
       break;
     case 'sources':
@@ -275,13 +281,26 @@ async function handle(ev, transcriptLanguage, recording) {
     case 'done':
       metaEl.textContent =
         `首字 ${ev.ttft_s}s · 总计 ${ev.total_s}s · ${ev.decode_tps} tok/s · ` +
-        `上下文 ${ev.prompt_tokens} tok（实际 prefill ${ev.prefilled_tokens}） · 模板 ${ev.template_version}`;
+        `上下文 ${ev.prompt_tokens} tok（实际 prefill ${ev.prefilled_tokens}） · 模板 ${ev.template_version}` +
+        voiceTiming(voice) + serverStages(ev.stages);
       break;
     case 'error':
       statusEl.className = 'err';
       statusEl.textContent = `${ev.stage}: ${ev.message}`;
       break;
   }
+}
+
+function voiceTiming(voice) {
+  const r = voice && voice.recording;
+  if (!r || r.stoppedAt === undefined || voice.firstTextAt === null) return '';
+  const label = r.stopReason === 'vad' ? 'VAD 结束' : '停止录音';
+  const upload = r.finalSentAt === undefined ? '' : `（其中排空 partial 至发出 final ${Math.round(r.finalSentAt - r.stoppedAt)} ms）`;
+  return `\n本机：${label}→首个正文 ${Math.round(voice.firstTextAt - r.stoppedAt)} ms${upload}`;
+}
+function serverStages(stages) {
+  if (!stages || !stages.origin) return '';
+  return `\n服务端（自 ${stages.origin}，ms）：` + Object.entries(stages.ms).map(([k, v]) => `${k} ${v}`).join(' · ');
 }
 
 const escapeHtml = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
