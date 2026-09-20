@@ -281,6 +281,28 @@ def test_dead_letter_queue_wording_resolves_to_spring_kafka_without_mentioning_s
     assert detect_technology(q) == "spring-kafka"
 
 
+@pytest.mark.parametrize("q", [
+    "Spring Data Redis 的缓存注解怎么用",
+    "How are caching annotations used with Spring Data Redis?",
+    "Spring Boot 连 Redis 连接池怎么配",
+])
+def test_spring_and_redis_together_resolves_to_redis(q):
+    """T-023 R188：同时提到 spring 与 redis 不是跨技术域提问。
+
+    本产品的 redis 语料只有 spring-data-redis 一家（technology=`redis`），
+    与 CR-041 的 `spring`+`kafka` 同型。收敛前这类提问拿到的是 `None`——
+    而 `spring`/`redis` 两个词此前已经被 `PROJECT_TERMS` 从检索词里剔除，
+    于是两条路都没有这条信息：R187 实测英文题面的关键词路 30 名内
+    一块 spring-data-redis 都没有。
+    """
+    assert detect_technology(q) == "redis"
+
+
+def test_redis_alone_is_unchanged():
+    """只说 redis 的提问本来就能收敛，本轮不得顺手改动它。"""
+    assert detect_technology("Redis 哨兵模式怎么配置") == "redis"
+
+
 def test_genuine_cross_domain_question_still_returns_none():
     """真正涉及三个技术域的问题不能被 CR-041 的组合规则误伤——
     这里没有一个"更具体的单一域"可以收敛到，必须继续放弃过滤。"""

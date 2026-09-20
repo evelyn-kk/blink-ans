@@ -104,11 +104,23 @@ PROJECT_TERMS = {
 #   spring-kafka 已经是更具体的判定依据，`kafka` 只是背景术语。
 # 真正跨域的问题（例如同时提到 spring/kafka/redis 三个域）不在这张表里，
 # 找不到就落回一般规则返回 None。
+#
+# T-023 R188 补 `spring` + `redis`（与上面 `kafka` + `spring` 同型）：本产品的
+# redis 语料**只有 spring-data-redis 一家**（285 块，technology=`redis`），
+# 所以"Spring Data Redis 的缓存注解怎么用"说的就是这一个库，不是跨域提问。
+#
+# 不收敛的代价实测下来是双份的（R187 归因、R188 复现）：`spring` 与 `redis`
+# 都在 PROJECT_TERMS 里，**先被从检索词里剔除**（那条规则的前提是"它们改当
+# 元数据过滤用"），随后 `detect_technology()` 返回 None，**过滤也没用上**——
+# 两处都把这条信息丢了。英文题面因此只剩 `how OR caching OR annotations OR data`
+# 去打分，spring-data-redis 在关键词路 30 名内一块都没有；中文题面靠
+# `缓存注解` 的 term_map 展开侥幸补回了区分度。
 _COMBO_RESOLUTIONS: dict[frozenset[str], str] = {
     frozenset({"spring", "kafka"}): "spring-kafka",
     frozenset({"spring", "kafka", "spring-kafka"}): "spring-kafka",
     frozenset({"kafka", "spring-kafka"}): "spring-kafka",
     frozenset({"spring", "spring-kafka"}): "spring-kafka",
+    frozenset({"spring", "redis"}): "redis",
 }
 
 

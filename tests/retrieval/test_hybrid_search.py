@@ -152,6 +152,21 @@ def test_technology_group_includes_related_technology_reverse_direction(store):
     assert any(h.technology == "kafka" for h in hits)
 
 
+def test_redis_has_no_technology_group_on_purpose():
+    """T-023 R188：`redis` 收敛是路由层的改动，**没有**配分组，这是有意的。
+
+    分组会让每一道纯 redis 提问都额外拉进 spring 的候选。R188 实测过带
+    `("redis", 1.0), ("spring", 0.4)` 的变体：13 条排序探针与 9 条检索验证集
+    逐题名次与不带分组**完全相同**，4 道 spring+redis 提问的 top-5 也逐条相同——
+    收益为零而波及面更大，因此不采纳。将来若有人补上这一项，这条会失败，
+    届时必须带着新的名次证据来改，而不是顺手加。
+    """
+    from services.retrieval.search import TECHNOLOGY_GROUPS
+
+    assert "redis" not in TECHNOLOGY_GROUPS
+    assert set(TECHNOLOGY_GROUPS) == {"kafka", "spring-kafka"}
+
+
 def test_technology_group_secondary_has_lower_weight_than_primary():
     """组内主技术域权重必须大于副技术域（CR-041 实测数据驱动的取舍）：
     同权合并实测会让 spring-kafka 挤占 kafka 协议类问题的候选（CR-040 那种
