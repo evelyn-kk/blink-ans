@@ -9,6 +9,7 @@ progress.md
 
 /models/
 /data/
+/resource/
 *.gguf
 *.safetensors
 *.bin
@@ -32,8 +33,6 @@ bench/reports/*.md
 *.wav
 *.pcm
 *.m4a
-resource/*.txt
-resource/asr_t024_r112_private.yaml
 
 .env
 .env.*
