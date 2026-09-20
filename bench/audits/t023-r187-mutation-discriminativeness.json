@@ -1,0 +1,89 @@
+{
+  "round": "R187",
+  "target": "bench/bench_language_failure_attribution.py",
+  "tests": "tests/unit/test_language_failure_attribution.py",
+  "note": "脚本为本轮新增，旧 commit 上测试只会因模块不存在而失败；这份产物给的是「实现改坏一处则对应回归失败」的判别性证据。",
+  "baseline": {
+    "exit_code": 0,
+    "failed_tests": [],
+    "summary": "39 passed in 0.28s"
+  },
+  "mutations": [
+    {
+      "name": "身份字段不同时照样放行",
+      "old": "        if zh_value != en_value:",
+      "new": "        if False:",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_any_differing_identity_field_refuses_the_comparison[dictionary_version]",
+        "test_any_differing_identity_field_refuses_the_comparison[embedding_model]",
+        "test_any_differing_identity_field_refuses_the_comparison[index_chunks]",
+        "test_any_differing_identity_field_refuses_the_comparison[index_fingerprint]",
+        "test_any_differing_identity_field_refuses_the_comparison[model]",
+        "test_any_differing_identity_field_refuses_the_comparison[template_version]"
+      ],
+      "summary": "6 failed, 33 passed in 0.30s"
+    },
+    {
+      "name": "身份字段两边都缺时当成相等",
+      "old": "        if zh_value is None or en_value is None:",
+      "new": "        if False:",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_missing_identity_field_is_refused_rather_than_treated_as_equal"
+      ],
+      "summary": "1 failed, 38 passed in 0.28s"
+    },
+    {
+      "name": "两侧词项从未同时出现时报成最大窗口，而不是 None",
+      "old": "        if re.search(_PROXIMITY.sub(\"{0,%d}\" % n, keypoint), text, re.S):\n            return n\n    return None",
+      "new": "        if re.search(_PROXIMITY.sub(\"{0,%d}\" % n, keypoint), text, re.S):\n            return n\n    return _MAX_WINDOW",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_terms_that_never_co_occur_report_none_not_a_large_window"
+      ],
+      "summary": "1 failed, 38 passed in 0.28s"
+    },
+    {
+      "name": "证据正文哈希不再核对",
+      "old": "        if digest != item[\"text_sha256\"]:",
+      "new": "        if False:",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_text_hash_mismatch_stops"
+      ],
+      "summary": "1 failed, 38 passed in 0.29s"
+    },
+    {
+      "name": "拒答也算「未标引用」失败",
+      "old": "    if case[\"expect\"] == \"answered\" and not case[\"declined\"] and case[\"cited\"] == 0:",
+      "new": "    if case[\"cited\"] == 0:",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_zero_citations_counts_only_for_answers_that_were_actually_given"
+      ],
+      "summary": "1 failed, 38 passed in 0.29s"
+    },
+    {
+      "name": "语料覆盖改成只匹配块首，覆盖统计被压成 0",
+      "old": "            row[\"id\"] for row in store.execute(\"SELECT id, text FROM chunks\")\n            if compiled.search(row[\"text\"])",
+      "new": "            row[\"id\"] for row in store.execute(\"SELECT id, text FROM chunks\")\n            if compiled.match(row[\"text\"])",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_corpus_match_is_found_anywhere_in_the_chunk_not_only_at_its_start"
+      ],
+      "summary": "1 failed, 38 passed in 0.29s"
+    },
+    {
+      "name": "「证据里有没有」改看答案文本，两件事被混为一谈",
+      "old": "            arm: sorted(cid for cid, text in texts[arm].items() if pattern.search(text))",
+      "new": "            arm: sorted(cid for cid, text in texts[arm].items()\n                        if pattern.search({\"zh\": zh_case, \"en\": en_case}[arm][\"answer_text\"] or \"\"))",
+      "exit_code": 1,
+      "failed_tests": [
+        "test_answer_evidence_and_question_are_reported_separately"
+      ],
+      "summary": "1 failed, 38 passed in 0.29s"
+    }
+  ],
+  "mutations_with_no_failing_test": []
+}
