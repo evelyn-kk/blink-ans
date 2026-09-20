@@ -1,0 +1,14 @@
+{
+  "run_id": "ce77c6ed41b2400fabdf31078110e887",
+  "runner_pid": 17185,
+  "started_at_utc": "2026-09-16T07:06:32.844512+00:00",
+  "command": [
+    "/Users/yiwenkang/Code/toy/blink-ans/.venv/bin/python",
+    "/Users/yiwenkang/Code/toy/blink-ans/packages/evaltools/run_basic.py",
+    "--help"
+  ],
+  "state": "failed",
+  "exit_code": 2,
+  "finished_at_utc": "2026-09-16T07:06:32.910480+00:00",
+  "error": "child exited 0 without exactly one report bound to run_id"
+}

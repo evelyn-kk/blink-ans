@@ -1,0 +1,136 @@
+{
+  "round": "R184",
+  "implementation_commit": "5d380836547c76431ed671d76271e62eb1762026",
+  "working_tree_dirty": true,
+  "index_chunks": 17080,
+  "dictionary_version": "eba42d53742f",
+  "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+  "thresholds": {
+    "sufficient_distance": 0.72,
+    "limited_distance": 0.76
+  },
+  "note": "只读测量，未改任何阈值；guard 需要 LIMITED 带才生效，故 sufficient 带的题它结构上够不到。",
+  "en_closer_count": 5,
+  "pairs": [
+    {
+      "id": "refuse-beijing-weather",
+      "zh": {
+        "question": "今天北京的天气怎么样",
+        "top_distance": 0.8012,
+        "band": "insufficient",
+        "keyword_hits": 0,
+        "detect_technology": null,
+        "policy_guard_fires": false
+      },
+      "en": {
+        "question": "What is the weather in Beijing today?",
+        "top_distance": 0.783,
+        "band": "insufficient",
+        "keyword_hits": 10,
+        "detect_technology": null,
+        "policy_guard_fires": false
+      },
+      "en_closer_than_zh": true
+    },
+    {
+      "id": "refuse-scifi-films",
+      "zh": {
+        "question": "推荐几部值得看的科幻电影",
+        "top_distance": 0.7571,
+        "band": "limited",
+        "keyword_hits": 0,
+        "detect_technology": null,
+        "policy_guard_fires": true
+      },
+      "en": {
+        "question": "Recommend some worthwhile science-fiction films.",
+        "top_distance": 0.7171,
+        "band": "sufficient",
+        "keyword_hits": 7,
+        "detect_technology": null,
+        "policy_guard_fires": false
+      },
+      "en_closer_than_zh": true
+    },
+    {
+      "id": "refuse-swiftui-state",
+      "zh": {
+        "question": "iOS SwiftUI 的状态管理最佳实践是什么",
+        "top_distance": 0.7739,
+        "band": "insufficient",
+        "keyword_hits": 5,
+        "detect_technology": null,
+        "policy_guard_fires": false
+      },
+      "en": {
+        "question": "What are best practices for state management in iOS SwiftUI?",
+        "top_distance": 0.7428,
+        "band": "limited",
+        "keyword_hits": 6,
+        "detect_technology": null,
+        "policy_guard_fires": true
+      },
+      "en_closer_than_zh": true
+    },
+    {
+      "id": "refuse-rust-lexer",
+      "zh": {
+        "question": "怎么用 Rust 写一个词法分析器",
+        "top_distance": 0.7219,
+        "band": "limited",
+        "keyword_hits": 1,
+        "detect_technology": null,
+        "policy_guard_fires": true
+      },
+      "en": {
+        "question": "How do I write a lexer in Rust?",
+        "top_distance": 0.7469,
+        "band": "limited",
+        "keyword_hits": 5,
+        "detect_technology": null,
+        "policy_guard_fires": true
+      },
+      "en_closer_than_zh": false
+    },
+    {
+      "id": "refuse-bonus",
+      "zh": {
+        "question": "公司的年终奖一般怎么计算",
+        "top_distance": 0.7644,
+        "band": "insufficient",
+        "keyword_hits": 0,
+        "detect_technology": null,
+        "policy_guard_fires": false
+      },
+      "en": {
+        "question": "How are year-end bonuses usually calculated at a company?",
+        "top_distance": 0.7267,
+        "band": "limited",
+        "keyword_hits": 8,
+        "detect_technology": null,
+        "policy_guard_fires": true
+      },
+      "en_closer_than_zh": true
+    },
+    {
+      "id": "refuse-react-useeffect",
+      "zh": {
+        "question": "React 的 useEffect 依赖数组怎么写",
+        "top_distance": 0.7263,
+        "band": "limited",
+        "keyword_hits": 5,
+        "detect_technology": null,
+        "policy_guard_fires": true
+      },
+      "en": {
+        "question": "How should a React useEffect dependency array be written?",
+        "top_distance": 0.7111,
+        "band": "sufficient",
+        "keyword_hits": 5,
+        "detect_technology": null,
+        "policy_guard_fires": false
+      },
+      "en_closer_than_zh": true
+    }
+  ]
+}
