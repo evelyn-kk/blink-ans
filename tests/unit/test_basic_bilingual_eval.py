@@ -9,12 +9,20 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "packages" / "evaltools"))
 
 import run_basic as basic  # noqa: E402
+
+# CR-160：替身索引的两块内容。用 dict 行即可——`index_fingerprint` 只按
+# ["source_url"] / ["checksum"] 取值，与 sqlite3.Row 的取值方式一致。
+_FAKE_CHUNKS = (
+    {"source_url": "https://a.example.test/one", "checksum": "aaa"},
+    {"source_url": "https://b.example.test/two", "checksum": "bbb"},
+)
 
 
 class _FakeOrchestrator:
@@ -195,10 +203,17 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
             pass
 
     class FakeStore:
-        meta = {"dictionary_version": "test-dictionary"}
+        # CR-160：身份字段齐全（含 embedding_model），且 execute() 返回真实的
+        # (source_url, checksum) 行，使报告里的 index_fingerprint 可被独立复算。
+        meta = {"dictionary_version": "test-dictionary",
+                "embedding_model": "test-embedder"}
+        rows = _FAKE_CHUNKS
+
+        def execute(self, _sql, _params=()):
+            return list(self.rows)
 
         def count(self):
-            return 7
+            return len(self.rows)
 
         def close(self):
             pass
@@ -270,6 +285,14 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
         (["git", "rev-parse", "--verify", "HEAD^{commit}"], basic.ROOT, start_commit),
     ]
     assert report["language"] == "en"
+    # CR-160：报告必须带可独立复算的索引内容身份，而不是只有块数。
+    expected_fp = hashlib.sha256(
+        b"https://a.example.test/one\taaa\nhttps://b.example.test/two\tbbb\n"
+    ).hexdigest()
+    assert report["index_fingerprint"] == expected_fp
+    assert report["index_chunks"] == 2
+    assert report["embedding_model"] == "test-embedder"
+    assert report["dictionary_version"] == "test-dictionary"
     assert (report["passed"], report["total"]) == (1, 1)
     assert (group["en"]["passed"], group["en"]["total"]) == (1, 1)
     assert (group["en"]["keypoints_hit"], group["en"]["keypoints_total"]) == (1, 1)
@@ -311,3 +334,82 @@ def test_main_fails_closed_before_model_load_when_runtime_git_identity_is_not_a_
     assert not model_started
     assert not (tmp_path / "reports").exists()
     assert "评测身份验证失败" in capsys.readouterr().err
+
+
+# ---------- CR-160：评测报告的索引内容身份 ----------
+
+def _identity_store(rows, *, meta=None, count=None):
+    class _Store:
+        def __init__(self):
+            self.meta = {"dictionary_version": "test-dictionary",
+                         "embedding_model": "test-embedder"} if meta is None else meta
+
+        def execute(self, _sql, _params=()):
+            return list(rows)
+
+        def count(self):
+            return len(rows) if count is None else count
+
+        def close(self):
+            pass
+    return _Store()
+
+
+def test_same_chunk_count_with_different_checksums_gives_a_different_fingerprint():
+    """CR-160 的核心：块数相同不代表索引相同。
+
+    这条正是 R184 三份报告缺失的判据——它们只存 `index_chunks: 17080`，
+    于是两份内容不同、块数相同的索引会被当成同一实验条件。
+    """
+    a = _identity_store(_FAKE_CHUNKS)
+    b = _identity_store((
+        {"source_url": "https://a.example.test/one", "checksum": "aaa"},
+        {"source_url": "https://b.example.test/two", "checksum": "CHANGED"},
+    ))
+    assert a.count() == b.count() == 2
+    assert basic.index_identity(a)["index_fingerprint"] \
+        != basic.index_identity(b)["index_fingerprint"]
+
+
+def test_fingerprint_ignores_row_order_so_a_rebuilt_index_stays_comparable():
+    """同样的内容换个遍历顺序必须得到同一指纹，否则重建索引后就没法比对。"""
+    forward = _identity_store(_FAKE_CHUNKS)
+    reversed_rows = _identity_store(tuple(reversed(_FAKE_CHUNKS)))
+    assert basic.index_identity(forward)["index_fingerprint"] \
+        == basic.index_identity(reversed_rows)["index_fingerprint"]
+
+
+@pytest.mark.parametrize("meta, why", [
+    ({"dictionary_version": "d"}, "缺 embedding_model"),
+    ({"embedding_model": "e"}, "缺 dictionary_version"),
+    ({}, "两者都缺"),
+])
+def test_missing_index_identity_fields_refuse_to_produce_a_report(meta, why):
+    """身份不全时失败关闭，而不是记个 None 就把报告写出去。"""
+    store = _identity_store(_FAKE_CHUNKS, meta=meta)
+    with pytest.raises(RuntimeError, match="索引缺少身份字段"):
+        basic.index_identity(store)
+
+
+def test_fingerprint_row_count_mismatch_fails_closed():
+    """遍历到的块数与 count() 不符 → 指纹覆盖不全，必须报错而不是返回半份指纹。"""
+    store = _identity_store(_FAKE_CHUNKS, count=99)
+    with pytest.raises(ValueError, match="与 count\\(\\) 的 99 不一致"):
+        basic.index_identity(store)
+
+
+def test_eval_and_bench_share_one_fingerprint_implementation():
+    """CR-160 要求“复用”而不是各抄一份：两边必须是同一个函数对象。
+
+    各抄一份的话，任何一侧改了取值顺序或分隔符都会算出不同指纹，
+    而指纹的全部价值就在于跨工具可比。
+    """
+    sys.path.insert(0, str(ROOT / "bench"))
+    import bench_speculative_retrieval as spec  # noqa: PLC0415
+    from services.retrieval import store as store_mod  # noqa: PLC0415
+
+    assert basic.index_fingerprint is store_mod.index_fingerprint
+    assert spec._index_fingerprint is store_mod.index_fingerprint
+    # bench 侧只包一层失败关闭语义，算法仍是同一份
+    with pytest.raises(SystemExit, match="拒绝产出报告"):
+        spec.index_fingerprint(_identity_store(_FAKE_CHUNKS, count=99))

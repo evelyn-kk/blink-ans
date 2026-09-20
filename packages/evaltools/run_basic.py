@@ -46,7 +46,7 @@ from services.orchestrator.answering import (  # noqa: E402
     AnswerConfig, AnswerRequest, Orchestrator, Sufficiency, declined,
 )
 from services.retrieval.embed import Embedder  # noqa: E402
-from services.retrieval.store import ChunkStore  # noqa: E402
+from services.retrieval.store import ChunkStore, index_fingerprint  # noqa: E402
 
 QUESTIONS = ROOT / "knowledge" / "eval" / "basic_questions.yaml"
 REPORTS = ROOT / "bench" / "reports"
@@ -122,6 +122,29 @@ def runtime_git_commit() -> str:
         detail = result.stderr.strip() or repr(commit)
         raise RuntimeError(f"无法验证评测启动时的完整 Git commit: {detail}")
     return commit
+
+
+def index_identity(store) -> dict:
+    """CR-160：**查询前**钉住索引的内容身份，缺身份就不跑、不写报告。
+
+    此前报告只存 `index_chunks`，而块数不是内容身份——同为 17080 块的两份索引
+    内容可以完全不同，于是 44/50 对 41/50 和六对 `top_distance` 都只能自洽，
+    无法在索引重建后独立复验（CR-159 已在 bench 侧踩过同一个坑）。
+
+    指纹算法复用 `services/retrieval/store.index_fingerprint`，与
+    `bench/bench_speculative_retrieval.py` 是**同一份实现**而不是各抄一份。
+    另记 `embedding_model`：距离结论依赖它，换模型后同一份索引的距离也会变。
+    """
+    identity = {
+        "index_chunks": store.count(),
+        "index_fingerprint": index_fingerprint(store),
+        "dictionary_version": store.meta.get("dictionary_version"),
+        "embedding_model": store.meta.get("embedding_model"),
+    }
+    missing = [k for k, v in identity.items() if not v]
+    if missing:
+        raise RuntimeError(f"索引缺少身份字段，拒绝产出不可复验的报告: {missing}")
+    return identity
 
 
 def _question_for(spec: dict, language: str) -> str:
@@ -337,6 +360,16 @@ def main() -> int:
         return 2
     embedder = Embedder(); embedder.load()
     store = ChunkStore()
+    # CR-160：身份在**任何一次检索之前**确定。放到写报告时再算就绑不住实际跑的
+    # 那份索引——中途换了 current.db 也看不出来。
+    try:
+        identity = index_identity(store)
+    except (RuntimeError, ValueError) as exc:
+        print(f"索引身份验证失败: {exc}", file=sys.stderr)
+        store.close()
+        return 2
+    print(f"索引 {identity['index_chunks']} 块 · 指纹 {identity['index_fingerprint'][:12]}…"
+          f" · 词典 {identity['dictionary_version']} · 嵌入 {identity['embedding_model']}")
     # T-028：与生产同一套路由（services/inference/router.py），而不是直接绑死本地
     # InferenceEngine——回归脚本要能看出真实生产会走哪个后端（served_by）。
     # --offline 强制本地，避免每次跑 50 题回归都产生云端调用开销。
@@ -446,8 +479,9 @@ def main() -> int:
         "language": args.language,
         "by_language": by_language,
         "model": DEFAULT_MODEL,
-        "index_chunks": store.count(),
-        "dictionary_version": store.meta.get("dictionary_version"),
+        # CR-160：写的是**查询前**钉住的那份身份，不在这里重读 store——
+        # 重读等于把"报告写盘那一刻的索引"当成"跑题时的索引"。
+        **identity,
         "passed": passed, "total": len(cases),
         "retrieval_misses": sum(1 for c in cases if c.retrieval_miss),
         "declined_with_evidence": sum(1 for c in cases if c.declined_with_evidence),

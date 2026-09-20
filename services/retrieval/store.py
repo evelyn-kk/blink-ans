@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -414,3 +415,42 @@ class ChunkStore:
     def close(self) -> None:
         with self._lock:
             self.db.close()
+
+
+def index_fingerprint(store) -> str:
+    """全量块的内容指纹：排序后的 `source_url\tchecksum` 之 SHA-256。
+
+    **只记块数不足以标识索引**——同样是 17080 块可以是完全不同的内容
+    （CR-159 复审给出的判据，CR-160 要求评测侧也用同一个）。
+    `UNIQUE(source_url, checksum)` 保证这对值能唯一标识一块，排序后逐行入哈希，
+    与插入顺序、rowid 分配都无关，因此索引重建后可独立复算比对。
+
+    参数按鸭子类型取 `execute()` 与 `count()`，替身 store 也能直接用——
+    这个函数是 `bench/bench_speculative_retrieval.py` 与
+    `packages/evaltools/run_basic.py` **共用的同一份实现**，不是各抄一份：
+    两份拷贝迟早会在某一次改动后算出不同的指纹，而指纹的全部价值就是跨工具可比。
+
+    遍历数与 `count()` 不符时抛 `ValueError`，由调用方决定是失败关闭还是别的处置
+    （CLI 侧一律失败关闭，见两个调用点）。
+    """
+    rows = store.execute(
+        "SELECT source_url, checksum FROM chunks ORDER BY source_url, checksum"
+    )
+    # 在 Python 侧再排一次序：SQL 的 ORDER BY 已经保证了真实索引的顺序，但这样
+    # 顺序无关就是**这个函数自己的性质**，而不是"调用方恰好传了个会排序的 store"。
+    # 审查用的替身 store 通常不解析 SQL，只把行原样返回——没有这一步，"同内容
+    # 反序仍同指纹"在替身上就不成立，而那正是审查方复核指纹时要验的性质。
+    # 对真实索引结果不变：URL 与 checksum 都是 ASCII，SQLite 的 BINARY 排序与
+    # Python 的字符串排序一致（本轮已对当前索引复算比对，见 R185 记录）。
+    lines = sorted(
+        f"{row['source_url']}\t{row['checksum']}\n" for row in rows
+    )
+    digest = hashlib.sha256()
+    counted = 0
+    for line in lines:
+        digest.update(line.encode("utf-8"))
+        counted += 1
+    total = store.count()
+    if counted != total:
+        raise ValueError(f"索引指纹覆盖 {counted} 块，与 count() 的 {total} 不一致")
+    return digest.hexdigest() if counted else ""

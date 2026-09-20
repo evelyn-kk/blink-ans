@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from services.retrieval.embed import Embedder  # noqa: E402
 from services.retrieval.search import hybrid_search  # noqa: E402
-from services.retrieval.store import ChunkStore  # noqa: E402
+from services.retrieval.store import ChunkStore, index_fingerprint as _index_fingerprint  # noqa: E402
 from services.retrieval.tokenize import detect_technology  # noqa: E402
 
 QUESTION_FILES = (
@@ -80,21 +80,12 @@ def runtime_identity(store) -> dict:
 
 
 def index_fingerprint(store) -> str:
-    """全量块的内容指纹：排序后的 `source_url\tchecksum` 之 SHA-256。
-
-    只记块数不行——同样是 17080 块可以是完全不同的内容（CR-159 复审）。
-    `UNIQUE(source_url, checksum)` 保证这对值能唯一标识一块，排序后逐行入哈希，
-    与插入顺序、rowid 分配都无关，因此索引重建后可独立复算比对。
-    """
-    rows = store.execute("SELECT source_url, checksum FROM chunks ORDER BY source_url, checksum")
-    digest = hashlib.sha256()
-    counted = 0
-    for row in rows:
-        digest.update(f"{row['source_url']}\t{row['checksum']}\n".encode("utf-8"))
-        counted += 1
-    if counted != store.count():
-        raise SystemExit(f"索引指纹覆盖 {counted} 块，与 count() 的 {store.count()} 不一致，拒绝产出报告")
-    return digest.hexdigest() if counted else ""
+    """CR-160：算法本体已挪到 `services/retrieval/store.index_fingerprint`，
+    与 `run_basic.py` 共用同一份实现；这里只保留本脚本的失败关闭语义。"""
+    try:
+        return _index_fingerprint(store)
+    except ValueError as exc:
+        raise SystemExit(f"{exc}，拒绝产出报告")
 
 
 def sha256(text: str) -> str:
