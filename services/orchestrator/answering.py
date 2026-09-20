@@ -55,7 +55,16 @@ _CITATION = re.compile(r"\[(\d{1,2})\]")
 _OUT_OF_SCOPE = re.compile(
     # Rust 常与中文连写；只排除 ASCII 字母相邻，既能识别 `用Rust写`/`Rust语言`，
     # 又不把 crust/trust 等英文单词的内部片段误判为语言名（CR-143）。
-    r"(?:(?<![A-Za-z])rust(?![A-Za-z])|swiftui|\breact\b|天气|科幻.{0,8}电影|年终奖)",
+    r"(?:(?<![A-Za-z])rust(?![A-Za-z])|swiftui|\breact\b"
+    # R184：`天气`/`科幻电影`/`年终奖` 三个概念此前**只登记了中文写法**，
+    # 于是这道确定性防线在英文提问上根本不存在。英文臂实测复现：
+    # `Recommend some worthwhile science-fiction films.` 落在 limited 带、
+    # 未被拦下，模型照常作答并返回 5 条不相关来源。
+    # 补的是同三个概念的英文写法，不是新概念——`swiftui`/`react`/`rust`
+    # 本就语言无关，所以原先只有这三条是不对称的。
+    r"|天气|\bweather\b"
+    r"|科幻.{0,8}电影|\bsci-?fi\b|\bscience[- ]?fiction\b"
+    r"|年终奖|\b(?:year[- ]end|annual)\s+bonus(?:es)?\b)",
     re.IGNORECASE,
 )
 

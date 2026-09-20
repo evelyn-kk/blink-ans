@@ -373,6 +373,14 @@ def test_declined_ignores_translated_prose():
     ("怎么用 Rust 写一个词法分析器", "可用 nom 实现词法器 [1]。"),
     ("怎么用Rust写一个词法分析器", "可用 nom 实现词法器 [1]。"),
     ("Rust语言如何写词法分析器", "可用 nom 实现词法器 [1]。"),
+    # R184：这三条是上面三道中文题的英文写法。它们在本轮之前**全部走不到
+    # policy 分支**——`天气`/`科幻电影`/`年终奖` 只登记了中文写法。
+    # 英文 50 题实测里 refuse-scifi-films 因此作答并返回 5 条来源。
+    ("Recommend some worthwhile science-fiction films.",
+     "Try A and B [1].\nNO_EVIDENCE"),
+    ("What is the weather in Beijing today?", "It is sunny [1]."),
+    ("How are year-end bonuses usually calculated at a company?",
+     "Typically 1-3 months of salary [1]."),
 ])
 def test_limited_explicitly_out_of_scope_never_streams_model_advice_or_sources(
     monkeypatch, question, model_output,
@@ -409,6 +417,14 @@ def test_limited_explicitly_out_of_scope_never_streams_model_advice_or_sources(
     ("Rust写Kafka client", None),
     ("crust 配方怎么做", None),
     ("trust 模型怎么训练", None),
+    # R184 碰撞负例：本轮新加的三个英文写法都由完整词/词组界定，含其组成字
+    # 但语义无关的提问不得被这道防线吃掉。四条的 `detect_technology()` 都是
+    # None（实测），所以**正则是唯一的闸门**——若写成带 Spring/PostgreSQL 的
+    # 句子，技术域一识别出来就必然走作答路径，负例便判别不到正则边界。
+    ("How do I weatherproof a deployment against node failure?", None),
+    ("What does the science of query planning say about join order?", None),
+    ("How is an annual report generated?", None),
+    ("How do I model a bonus allocation table?", None),
 ])
 def test_limited_in_scope_or_non_rust_word_keeps_the_existing_cautious_answer_path(
     monkeypatch, question, technology,
