@@ -1,8 +1,15 @@
 """拒答题的充分性档位随语言怎么变（T-023 R184 发现，R185 按 CR-160 补身份）。
 
-R184 实测：6 道登记拒答题里，英文题面的 `top_distance` 有 5 道比中文更近，
-且那 5 道的档位**每一道都更宽**（limited→sufficient、insufficient→limited）。
+实测（6 道登记拒答题）：英文题面的 `top_distance` 有 **5 道**比中文更近，
+其中**跨到更宽档位的是 4 道**（scifi / react 的 limited→sufficient、
+swiftui / bonus 的 insufficient→limited）。`refuse-beijing-weather` 英文也更近
+（0.7830 < 0.8012），但两侧同为 `insufficient`，**没有跨档**。
 语料全是英文官方文档，英文提问天然离语料更近——外域安全边际在英文侧更薄。
+
+**"更近"与"更宽"是独立的两问**，不能合成一句。R184 初稿把两者当成同一件事，
+断言更近的那几对全都跨了档；实测是 5 与 4，weather 就是反例，该说法已撤回（CR-161）。
+`compare_pair()` 因此把两问分开算，`en_closer_count` / `en_band_wider_count`
+两个计数也分开输出，使结论不能再脱离数据。
 
 这个脚本把那张表变成可独立复跑的产物，**不改产品代码、不改任何阈值**：
 它只读索引，逐对算 `top_distance`、档位与 `must_refuse_limited_out_of_scope()`
@@ -70,6 +77,23 @@ def runtime_identity(store) -> dict:
     return identity
 
 
+def compare_pair(zh: dict, en: dict) -> dict:
+    """英文相对中文的两问，**分开算**：距离更近吗？档位更宽吗？
+
+    合成一句就会出 R184 那个错——`refuse-beijing-weather` 英文更近
+    （0.7830 < 0.8012）却两侧同为 `insufficient`，"更近"成立而"更宽"不成立。
+    实测 6 对里更近 5 对、更宽 4 对（CR-161）。
+
+    档位按 `_BANDS` 从严到宽比较；"更宽"意味着更容易放行，是这份审计关心的方向。
+    距离缺失（没有任何候选）时两问都判 False，不猜。
+    """
+    zh_d, en_d = zh["top_distance"], en["top_distance"]
+    return {
+        "en_closer_than_zh": zh_d is not None and en_d is not None and en_d < zh_d,
+        "en_band_wider_than_zh": _BANDS.index(en["band"]) > _BANDS.index(zh["band"]),
+    }
+
+
 def measure(store, embedder, cfg: AnswerConfig, text: str, language: str) -> dict:
     tech = detect_technology(text)
     verdict = assess(
@@ -120,14 +144,7 @@ def main() -> int:
         row = {"id": spec["id"]}
         for language in ("zh", "en"):
             row[language] = measure(store, embedder, cfg, spec[f"q_{language}"], language)
-        row["en_closer_than_zh"] = (
-            row["en"]["top_distance"] is not None
-            and row["zh"]["top_distance"] is not None
-            and row["en"]["top_distance"] < row["zh"]["top_distance"]
-        )
-        row["en_band_wider_than_zh"] = (
-            _BANDS.index(row["en"]["band"]) > _BANDS.index(row["zh"]["band"])
-        )
+        row.update(compare_pair(row["zh"], row["en"]))
         pairs.append(row)
 
     out = {
