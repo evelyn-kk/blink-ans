@@ -1,0 +1,1763 @@
+{
+  "round": "R187",
+  "zh_report": "bench/reports/eval-basic-20260920T055551Z.json",
+  "en_report": "bench/reports/eval-basic-20260920T055038Z.json",
+  "zh_implementation_commit": "0d2f5037fe11adc0a7d66147ca8aea31239da28f",
+  "en_implementation_commit": "0d2f5037fe11adc0a7d66147ca8aea31239da28f",
+  "index_fingerprint": "fe11b6b41ded3d60f422768727c67a9aefe4dac8ebc83dac625efc6b1d176305",
+  "index_chunks": 17080,
+  "embedding_model": "mlx-community/bge-m3-mlx-8bit",
+  "dictionary_version": "eba42d53742f",
+  "template_version": "07e2d41f1aeb",
+  "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+  "passed": {
+    "zh": 44,
+    "en": 41
+  },
+  "total": {
+    "zh": 50,
+    "en": 50
+  },
+  "note": "只读归因，未跑检索/生成，未改题库、阈值与门禁。字段只记机械信号，失败原因的判断在同名 .md 审计里。",
+  "evidence_rows_verified": 124,
+  "arm_totals": {
+    "zh": {
+      "cases": 50,
+      "failed_cases": 6,
+      "failure_kind_counts": {
+        "keypoint": 6
+      },
+      "keypoints_registered": 44,
+      "keypoints_missed": 6,
+      "answered_with_zero_citations": 0,
+      "median_answer_chars": 268,
+      "expanded_terms_nonempty": 28
+    },
+    "en": {
+      "cases": 50,
+      "failed_cases": 9,
+      "failure_kind_counts": {
+        "keypoint": 6,
+        "citation": 1,
+        "source": 1,
+        "refusal": 1
+      },
+      "keypoints_registered": 44,
+      "keypoints_missed": 6,
+      "answered_with_zero_citations": 1,
+      "median_answer_chars": 485,
+      "expanded_terms_nonempty": 0
+    }
+  },
+  "failure_partition": {
+    "both": [
+      "k8s-eviction",
+      "spring-graceful-shutdown"
+    ],
+    "zh_only": [
+      "k8s-hpa",
+      "k8s-readiness-vs-liveness",
+      "postgres-explain-analyze",
+      "spring-auto-configuration"
+    ],
+    "en_only": [
+      "postgres-btree-index",
+      "postgres-connections",
+      "postgres-partitioning",
+      "postgres-seq-scan",
+      "redis-cache-annotations",
+      "refuse-scifi-films",
+      "spring-prometheus"
+    ]
+  },
+  "retrieval_probe": {
+    "source_mix": [
+      {
+        "id": "redis-cache-annotations",
+        "limit": 10,
+        "queries": {
+          "zh_question": "Spring Data Redis 的缓存注解怎么用",
+          "en_question": "How are caching annotations used with Spring Data Redis?",
+          "en_question_plus_zh_expansion_terms": "How are caching annotations used with Spring Data Redis? Cacheable CacheEvict cache annotation cache manager"
+        },
+        "expect_sources": [
+          "spring-data-redis"
+        ],
+        "top_source_projects": {
+          "zh_question": [
+            "spring-boot",
+            "spring-data-redis",
+            "spring-data-redis",
+            "spring-data-redis",
+            "spring-boot",
+            "spring-data-redis",
+            "spring-boot",
+            "spring-data-redis",
+            "spring-boot",
+            "spring-data-redis"
+          ],
+          "en_question": [
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-data-redis",
+            "spring-boot"
+          ],
+          "en_question_plus_zh_expansion_terms": [
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot",
+            "spring-boot"
+          ]
+        }
+      },
+      {
+        "id": "k8s-eviction",
+        "limit": 10,
+        "queries": {
+          "zh_question": "Pod 被驱逐 eviction 的触发条件是什么",
+          "en_question": "What conditions trigger Kubernetes Pod eviction?",
+          "en_question_plus_zh_expansion_terms": "What conditions trigger Kubernetes Pod eviction? eviction evicted"
+        },
+        "expect_sources": [
+          "kubernetes"
+        ],
+        "top_source_projects": {
+          "zh_question": [
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes"
+          ],
+          "en_question": [
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes"
+          ],
+          "en_question_plus_zh_expansion_terms": [
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes",
+            "kubernetes"
+          ]
+        }
+      }
+    ],
+    "keypoint_rank": [
+      {
+        "id": "postgres-btree-index",
+        "pattern": "(?i)(selectiv|选择性|function|函数|cast|类型转换)",
+        "in_corpus_chunk_count": 2610,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 1,
+          "en": 14
+        },
+        "best_chunk_id": {
+          "zh": 10937,
+          "en": 7839
+        }
+      },
+      {
+        "id": "postgres-connections",
+        "pattern": "(?i)(max_connections|最大连接)",
+        "in_corpus_chunk_count": 12,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 9,
+          "en": 20
+        },
+        "best_chunk_id": {
+          "zh": 8485,
+          "en": 8485
+        }
+      },
+      {
+        "id": "postgres-partitioning",
+        "pattern": "(?i)(PARTITION BY|分区键|分区表)",
+        "in_corpus_chunk_count": 23,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 23,
+          "en": 22
+        },
+        "best_chunk_id": {
+          "zh": 11611,
+          "en": 9253
+        }
+      },
+      {
+        "id": "postgres-seq-scan",
+        "pattern": "(?i)(index|索引).{0,40}(selectiv|选择性|statistic|统计)|(selectiv|选择性|statistic|统计).{0,40}(index|索引)",
+        "in_corpus_chunk_count": 17,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": null,
+          "en": null
+        },
+        "best_chunk_id": {
+          "zh": null,
+          "en": null
+        }
+      },
+      {
+        "id": "redis-cache-annotations",
+        "pattern": "(?i)(@Cacheable|缓存注解)",
+        "in_corpus_chunk_count": 1,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": null,
+          "en": null
+        },
+        "best_chunk_id": {
+          "zh": null,
+          "en": null
+        }
+      },
+      {
+        "id": "k8s-hpa",
+        "pattern": "(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)",
+        "in_corpus_chunk_count": 9,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 11,
+          "en": 6
+        },
+        "best_chunk_id": {
+          "zh": 7644,
+          "en": 7644
+        }
+      },
+      {
+        "id": "k8s-readiness-vs-liveness",
+        "pattern": "(?i)(ready|就绪).{0,40}(traffic|流量|service|服务)|(traffic|流量|service|服务).{0,40}(ready|就绪)",
+        "in_corpus_chunk_count": 26,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 2,
+          "en": 3
+        },
+        "best_chunk_id": {
+          "zh": 6608,
+          "en": 6608
+        }
+      },
+      {
+        "id": "postgres-explain-analyze",
+        "pattern": "(?i)(actual|实际).{0,40}(time|时间|row|行)|(time|时间|row|行).{0,40}(actual|实际)",
+        "in_corpus_chunk_count": 85,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 9,
+          "en": 8
+        },
+        "best_chunk_id": {
+          "zh": 12124,
+          "en": 17072
+        }
+      },
+      {
+        "id": "k8s-eviction",
+        "pattern": "(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)",
+        "in_corpus_chunk_count": 28,
+        "rank_limit": 50,
+        "best_rank": {
+          "zh": 11,
+          "en": 4
+        },
+        "best_chunk_id": {
+          "zh": 4058,
+          "en": 4068
+        }
+      }
+    ],
+    "note": "best_rank 对全部匹配块算，不受产物里那 8 个样本块的限制；null = 前 rank_limit 名里一块都没有，即这次连取都没取到。"
+  },
+  "wider_window_would_match": [
+    {
+      "id": "k8s-eviction",
+      "arm": "en",
+      "pattern": "(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)",
+      "registered_window_chars": 40,
+      "min_proximity_window_chars": 46
+    }
+  ],
+  "question_echo_passes": [
+    {
+      "id": "postgres-partitioning",
+      "arm": "zh",
+      "pattern": "(?i)(PARTITION BY|分区键|分区表)"
+    },
+    {
+      "id": "redis-cache-annotations",
+      "arm": "zh",
+      "pattern": "(?i)(@Cacheable|缓存注解)"
+    }
+  ],
+  "cases": [
+    {
+      "id": "postgres-btree-index",
+      "partition": "en_only",
+      "expect": "answered",
+      "question": {
+        "zh": "PostgreSQL 的 B-tree 索引什么时候会失效",
+        "en": "When can a PostgreSQL B-tree index stop being used effectively?"
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "未命中关键事实: '(?i)(selectiv|选择性|function|函数|cast|类型转换)'"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "keypoint"
+        ]
+      },
+      "detect_technology": {
+        "zh": "postgresql",
+        "en": "postgresql"
+      },
+      "expanded_terms": {
+        "zh": [
+          "index usage",
+          "examining index usage",
+          "forcing index usage",
+          "sequential scan",
+          "enable_seqscan",
+          "planner",
+          "cost estimate",
+          "EXPLAIN ANALYZE"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 290,
+        "en": 579
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 3,
+        "en": 2
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          8090,
+          8146,
+          10935,
+          10937,
+          12024
+        ],
+        "en": [
+          8146,
+          10858,
+          10859,
+          10860,
+          12024
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        8146,
+        12024
+      ],
+      "expect_sources": [
+        "postgresql"
+      ],
+      "cited_projects": {
+        "zh": [
+          "postgresql"
+        ],
+        "en": [
+          "postgresql"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(selectiv|选择性|function|函数|cast|类型转换)",
+          "registered_window_chars": null,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": true,
+            "en": false
+          },
+          "in_selected_evidence": {
+            "zh": [
+              10937
+            ],
+            "en": []
+          },
+          "in_corpus_chunk_count": 2610,
+          "in_corpus_sample_chunk_ids": [
+            10,
+            183,
+            186,
+            287,
+            375,
+            431,
+            464,
+            577
+          ]
+        }
+      ]
+    },
+    {
+      "id": "postgres-connections",
+      "partition": "en_only",
+      "expect": "answered",
+      "question": {
+        "zh": "PostgreSQL 的连接数上限怎么配置",
+        "en": "How do I configure PostgreSQL's connection limit?"
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "未命中关键事实: '(?i)(max_connections|最大连接)'"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "keypoint"
+        ]
+      },
+      "detect_technology": {
+        "zh": "postgresql",
+        "en": "postgresql"
+      },
+      "expanded_terms": {
+        "zh": [],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 176,
+        "en": 413
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 2,
+        "en": 1
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          8464,
+          8504,
+          8600,
+          11652,
+          14033
+        ],
+        "en": [
+          8504,
+          8600,
+          14042,
+          14837,
+          14897
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        8504,
+        8600
+      ],
+      "expect_sources": [
+        "postgresql"
+      ],
+      "cited_projects": {
+        "zh": [
+          "postgresql"
+        ],
+        "en": [
+          "postgresql"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(max_connections|最大连接)",
+          "registered_window_chars": null,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": true,
+            "en": false
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "in_corpus_chunk_count": 12,
+          "in_corpus_sample_chunk_ids": [
+            8484,
+            8485,
+            8752,
+            10735,
+            10736,
+            11141,
+            13324,
+            13469
+          ]
+        }
+      ]
+    },
+    {
+      "id": "postgres-partitioning",
+      "partition": "en_only",
+      "expect": "answered",
+      "question": {
+        "zh": "PostgreSQL 分区表怎么创建和使用",
+        "en": "How do I create and use partitioned tables in PostgreSQL?"
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "未命中关键事实: '(?i)(PARTITION BY|分区键|分区表)'"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "keypoint"
+        ]
+      },
+      "detect_technology": {
+        "zh": "postgresql",
+        "en": "postgresql"
+      },
+      "expanded_terms": {
+        "zh": [
+          "partitioned table",
+          "table partitioning"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 276,
+        "en": 629
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 3,
+        "en": 4
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          9241,
+          9246,
+          9272,
+          11963,
+          13240
+        ],
+        "en": [
+          9241,
+          9245,
+          9246,
+          9303,
+          11610
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        9241,
+        9246
+      ],
+      "expect_sources": [
+        "postgresql"
+      ],
+      "cited_projects": {
+        "zh": [
+          "postgresql"
+        ],
+        "en": [
+          "postgresql"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(PARTITION BY|分区键|分区表)",
+          "registered_window_chars": null,
+          "in_question": {
+            "zh": true,
+            "en": false
+          },
+          "in_answer": {
+            "zh": true,
+            "en": false
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "in_corpus_chunk_count": 23,
+          "in_corpus_sample_chunk_ids": [
+            1769,
+            2528,
+            7819,
+            7820,
+            7822,
+            7825,
+            7827,
+            7829
+          ]
+        }
+      ]
+    },
+    {
+      "id": "postgres-seq-scan",
+      "partition": "en_only",
+      "expect": "answered",
+      "question": {
+        "zh": "PostgreSQL 执行计划里出现 Seq Scan 怎么优化",
+        "en": "How should I optimize a PostgreSQL plan that uses a Seq Scan?"
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "未命中关键事实: '(?i)(index|索引).{0,40}(selectiv|选择性|statistic|统计)|(selectiv|选择性|statistic|统计).{0,40}(index|索引)'"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "keypoint"
+        ]
+      },
+      "detect_technology": {
+        "zh": "postgresql",
+        "en": "postgresql"
+      },
+      "expanded_terms": {
+        "zh": [
+          "execution plan",
+          "query plan",
+          "EXPLAIN",
+          "planner"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 238,
+        "en": 386
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 3,
+        "en": 5
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          12101,
+          12336,
+          12348,
+          12353,
+          14121
+        ],
+        "en": [
+          10917,
+          12101,
+          12336,
+          12348,
+          12353
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        12101,
+        12336,
+        12348,
+        12353
+      ],
+      "expect_sources": [
+        "postgresql"
+      ],
+      "cited_projects": {
+        "zh": [
+          "postgresql"
+        ],
+        "en": [
+          "postgresql"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(index|索引).{0,40}(selectiv|选择性|statistic|统计)|(selectiv|选择性|statistic|统计).{0,40}(index|索引)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": true,
+            "en": false
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "min_proximity_window_chars": {
+            "zh": 0,
+            "en": null
+          },
+          "in_corpus_chunk_count": 17,
+          "in_corpus_sample_chunk_ids": [
+            10801,
+            10803,
+            10842,
+            10843,
+            10844,
+            10845,
+            10847,
+            10848
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redis-cache-annotations",
+      "partition": "en_only",
+      "expect": "answered",
+      "question": {
+        "zh": "Spring Data Redis 的缓存注解怎么用",
+        "en": "How are caching annotations used with Spring Data Redis?"
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "引用中缺少期望来源 'spring-data-redis'（实际 spring-boot）"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "source"
+        ]
+      },
+      "detect_technology": {
+        "zh": null,
+        "en": null
+      },
+      "expanded_terms": {
+        "zh": [
+          "Cacheable",
+          "CacheEvict",
+          "cache annotation",
+          "cache manager"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 164,
+        "en": 475
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 2,
+        "en": 2
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          1146,
+          15225,
+          15242,
+          15315,
+          15385
+        ],
+        "en": [
+          65,
+          348,
+          800,
+          1145,
+          1437
+        ]
+      },
+      "shared_evidence_chunk_ids": [],
+      "expect_sources": [
+        "spring-data-redis"
+      ],
+      "cited_projects": {
+        "zh": [
+          "spring-boot",
+          "spring-data-redis"
+        ],
+        "en": [
+          "spring-boot"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(@Cacheable|缓存注解)",
+          "registered_window_chars": null,
+          "in_question": {
+            "zh": true,
+            "en": false
+          },
+          "in_answer": {
+            "zh": true,
+            "en": true
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "in_corpus_chunk_count": 1,
+          "in_corpus_sample_chunk_ids": [
+            15331
+          ]
+        }
+      ]
+    },
+    {
+      "id": "refuse-scifi-films",
+      "partition": "en_only",
+      "expect": "refused",
+      "question": {
+        "zh": "推荐几部值得看的科幻电影",
+        "en": "Recommend some worthwhile science-fiction films."
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "未拒绝作答（充分性=sufficient），存在编造风险",
+          "拒答时不应返回来源"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "refusal"
+        ]
+      },
+      "detect_technology": {
+        "zh": null,
+        "en": null
+      },
+      "expanded_terms": {
+        "zh": [],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 11,
+        "en": 278
+      },
+      "sufficiency": {
+        "zh": "limited",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "policy",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 0,
+        "en": 0
+      },
+      "evidence_count": {
+        "zh": 0,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [],
+        "en": [
+          10334,
+          10335,
+          10342,
+          11766,
+          11768
+        ]
+      },
+      "shared_evidence_chunk_ids": [],
+      "expect_sources": [],
+      "cited_projects": {
+        "zh": [],
+        "en": [
+          "postgresql"
+        ]
+      },
+      "keypoints": []
+    },
+    {
+      "id": "spring-prometheus",
+      "partition": "en_only",
+      "expect": "answered",
+      "question": {
+        "zh": "Spring Boot 怎么暴露 Prometheus 指标",
+        "en": "How does Spring Boot expose Prometheus metrics?"
+      },
+      "failures": {
+        "zh": [],
+        "en": [
+          "给出技术内容但未标注任何证据编号，结论无法追溯"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [],
+        "en": [
+          "citation"
+        ]
+      },
+      "detect_technology": {
+        "zh": "spring",
+        "en": "spring"
+      },
+      "expanded_terms": {
+        "zh": [
+          "metrics",
+          "micrometer",
+          "meter registry"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 213,
+        "en": 386
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 2,
+        "en": 0
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          683,
+          718,
+          730,
+          770,
+          1171
+        ],
+        "en": [
+          683,
+          689,
+          703,
+          736,
+          776
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        683
+      ],
+      "expect_sources": [
+        "spring-boot"
+      ],
+      "cited_projects": {
+        "zh": [
+          "spring-boot"
+        ],
+        "en": [
+          "spring-boot"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(/actuator/prometheus|actuator.{0,20}prometheus)",
+          "registered_window_chars": 20,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": true,
+            "en": true
+          },
+          "in_selected_evidence": {
+            "zh": [
+              683
+            ],
+            "en": [
+              683
+            ]
+          },
+          "min_proximity_window_chars": {
+            "zh": 0,
+            "en": 0
+          },
+          "in_corpus_chunk_count": 5,
+          "in_corpus_sample_chunk_ids": [
+            38,
+            130,
+            660,
+            683,
+            684
+          ]
+        }
+      ]
+    },
+    {
+      "id": "k8s-hpa",
+      "partition": "zh_only",
+      "expect": "answered",
+      "question": {
+        "zh": "Kubernetes 的 HPA 水平扩缩是怎么算的",
+        "en": "How does Kubernetes HPA calculate horizontal scaling?"
+      },
+      "failures": {
+        "zh": [
+          "未命中关键事实: '(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)'"
+        ],
+        "en": []
+      },
+      "failure_kinds": {
+        "zh": [
+          "keypoint"
+        ],
+        "en": []
+      },
+      "detect_technology": {
+        "zh": "kubernetes",
+        "en": "kubernetes"
+      },
+      "expanded_terms": {
+        "zh": [
+          "horizontal pod autoscaler",
+          "HPA",
+          "autoscaling"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 268,
+        "en": 536
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 3,
+        "en": 3
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 4
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          5028,
+          5041,
+          5067,
+          7630,
+          7647
+        ],
+        "en": [
+          5036,
+          5042,
+          5067,
+          7645
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        5067
+      ],
+      "expect_sources": [
+        "kubernetes"
+      ],
+      "cited_projects": {
+        "zh": [
+          "kubernetes"
+        ],
+        "en": [
+          "kubernetes"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": false,
+            "en": true
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "min_proximity_window_chars": {
+            "zh": null,
+            "en": 17
+          },
+          "in_corpus_chunk_count": 9,
+          "in_corpus_sample_chunk_ids": [
+            5012,
+            5013,
+            5035,
+            5037,
+            7637,
+            7638,
+            7643,
+            7644
+          ]
+        }
+      ]
+    },
+    {
+      "id": "k8s-readiness-vs-liveness",
+      "partition": "zh_only",
+      "expect": "answered",
+      "question": {
+        "zh": "readiness probe 和 liveness probe 的区别",
+        "en": "What is the difference between readiness and liveness probes?"
+      },
+      "failures": {
+        "zh": [
+          "未命中关键事实: '(?i)(ready|就绪).{0,40}(traffic|流量|service|服务)|(traffic|流量|service|服务).{0,40}(ready|就绪)'"
+        ],
+        "en": []
+      },
+      "failure_kinds": {
+        "zh": [
+          "keypoint"
+        ],
+        "en": []
+      },
+      "detect_technology": {
+        "zh": null,
+        "en": null
+      },
+      "expanded_terms": {
+        "zh": [],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 142,
+        "en": 485
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 2,
+        "en": 3
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          5496,
+          5527,
+          5528,
+          5533,
+          6601
+        ],
+        "en": [
+          5496,
+          5529,
+          6593,
+          6601,
+          6609
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        5496,
+        6601
+      ],
+      "expect_sources": [
+        "kubernetes"
+      ],
+      "cited_projects": {
+        "zh": [
+          "kubernetes"
+        ],
+        "en": [
+          "kubernetes"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(ready|就绪).{0,40}(traffic|流量|service|服务)|(traffic|流量|service|服务).{0,40}(ready|就绪)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": false,
+            "en": true
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": [
+              6609
+            ]
+          },
+          "min_proximity_window_chars": {
+            "zh": null,
+            "en": 12
+          },
+          "in_corpus_chunk_count": 26,
+          "in_corpus_sample_chunk_ids": [
+            626,
+            629,
+            630,
+            692,
+            876,
+            910,
+            1106,
+            1110
+          ]
+        }
+      ]
+    },
+    {
+      "id": "postgres-explain-analyze",
+      "partition": "zh_only",
+      "expect": "answered",
+      "question": {
+        "zh": "EXPLAIN ANALYZE 的输出怎么读",
+        "en": "How do I read PostgreSQL EXPLAIN ANALYZE output?"
+      },
+      "failures": {
+        "zh": [
+          "未命中关键事实: '(?i)(actual|实际).{0,40}(time|时间|row|行)|(time|时间|row|行).{0,40}(actual|实际)'"
+        ],
+        "en": []
+      },
+      "failure_kinds": {
+        "zh": [
+          "keypoint"
+        ],
+        "en": []
+      },
+      "detect_technology": {
+        "zh": null,
+        "en": "postgresql"
+      },
+      "expanded_terms": {
+        "zh": [],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 213,
+        "en": 445
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 3,
+        "en": 5
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          7954,
+          9921,
+          9923,
+          9924,
+          13894
+        ],
+        "en": [
+          7959,
+          7960,
+          9923,
+          9924,
+          12097
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        9923,
+        9924
+      ],
+      "expect_sources": [
+        "postgresql"
+      ],
+      "cited_projects": {
+        "zh": [
+          "postgresql"
+        ],
+        "en": [
+          "postgresql"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(actual|实际).{0,40}(time|时间|row|行)|(time|时间|row|行).{0,40}(actual|实际)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": false,
+            "en": true
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "min_proximity_window_chars": {
+            "zh": null,
+            "en": 33
+          },
+          "in_corpus_chunk_count": 85,
+          "in_corpus_sample_chunk_ids": [
+            1000,
+            1824,
+            2529,
+            2586,
+            2746,
+            2748,
+            2902,
+            3302
+          ]
+        }
+      ]
+    },
+    {
+      "id": "spring-auto-configuration",
+      "partition": "zh_only",
+      "expect": "answered",
+      "question": {
+        "zh": "Spring Boot 的自动配置是怎么生效的",
+        "en": "How does Spring Boot auto-configuration take effect?"
+      },
+      "failures": {
+        "zh": [
+          "未命中关键事实: '(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)'"
+        ],
+        "en": []
+      },
+      "failure_kinds": {
+        "zh": [
+          "keypoint"
+        ],
+        "en": []
+      },
+      "detect_technology": {
+        "zh": "spring",
+        "en": "spring"
+      },
+      "expanded_terms": {
+        "zh": [
+          "auto-configuration",
+          "autoconfigure",
+          "conditional"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 397,
+        "en": 566
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 3,
+        "en": 1
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          340,
+          902,
+          906,
+          1490,
+          1548
+        ],
+        "en": [
+          653,
+          902,
+          906,
+          1573,
+          1649
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        902,
+        906
+      ],
+      "expect_sources": [
+        "spring-boot"
+      ],
+      "cited_projects": {
+        "zh": [
+          "spring-boot"
+        ],
+        "en": [
+          "spring-boot"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": false,
+            "en": true
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "min_proximity_window_chars": {
+            "zh": null,
+            "en": 21
+          },
+          "in_corpus_chunk_count": 0,
+          "in_corpus_sample_chunk_ids": []
+        }
+      ]
+    },
+    {
+      "id": "k8s-eviction",
+      "partition": "both",
+      "expect": "answered",
+      "question": {
+        "zh": "Pod 被驱逐 eviction 的触发条件是什么",
+        "en": "What conditions trigger Kubernetes Pod eviction?"
+      },
+      "failures": {
+        "zh": [
+          "未命中关键事实: '(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)'"
+        ],
+        "en": [
+          "未命中关键事实: '(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)'"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [
+          "keypoint"
+        ],
+        "en": [
+          "keypoint"
+        ]
+      },
+      "detect_technology": {
+        "zh": null,
+        "en": "kubernetes"
+      },
+      "expanded_terms": {
+        "zh": [
+          "eviction",
+          "evicted"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 348,
+        "en": 490
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 4,
+        "en": 5
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          3902,
+          5390,
+          5452,
+          5516,
+          6398
+        ],
+        "en": [
+          4060,
+          4061,
+          4062,
+          4063,
+          4068
+        ]
+      },
+      "shared_evidence_chunk_ids": [],
+      "expect_sources": [
+        "kubernetes"
+      ],
+      "cited_projects": {
+        "zh": [
+          "kubernetes"
+        ],
+        "en": [
+          "kubernetes"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": false,
+            "en": false
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": [
+              4068
+            ]
+          },
+          "min_proximity_window_chars": {
+            "zh": null,
+            "en": 46
+          },
+          "in_corpus_chunk_count": 28,
+          "in_corpus_sample_chunk_ids": [
+            2253,
+            3414,
+            3424,
+            3427,
+            3431,
+            3462,
+            3463,
+            3464
+          ]
+        }
+      ]
+    },
+    {
+      "id": "spring-graceful-shutdown",
+      "partition": "both",
+      "expect": "answered",
+      "question": {
+        "zh": "Spring Boot 怎么做优雅停机",
+        "en": "How does Spring Boot perform graceful shutdown?"
+      },
+      "failures": {
+        "zh": [
+          "未命中关键事实: '(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)'"
+        ],
+        "en": [
+          "未命中关键事实: '(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)'"
+        ]
+      },
+      "failure_kinds": {
+        "zh": [
+          "keypoint"
+        ],
+        "en": [
+          "keypoint"
+        ]
+      },
+      "detect_technology": {
+        "zh": "spring",
+        "en": "spring"
+      },
+      "expanded_terms": {
+        "zh": [
+          "graceful shutdown",
+          "shutdown grace period",
+          "lifecycle timeout"
+        ],
+        "en": []
+      },
+      "answer_chars": {
+        "zh": 212,
+        "en": 492
+      },
+      "sufficiency": {
+        "zh": "sufficient",
+        "en": "sufficient"
+      },
+      "served_by": {
+        "zh": "local",
+        "en": "local"
+      },
+      "cited": {
+        "zh": 2,
+        "en": 2
+      },
+      "evidence_count": {
+        "zh": 5,
+        "en": 5
+      },
+      "selected_chunk_ids": {
+        "zh": [
+          386,
+          1539,
+          1545,
+          1547,
+          1548
+        ],
+        "en": [
+          83,
+          575,
+          1545,
+          1546,
+          1547
+        ]
+      },
+      "shared_evidence_chunk_ids": [
+        1545,
+        1547
+      ],
+      "expect_sources": [
+        "spring-boot"
+      ],
+      "cited_projects": {
+        "zh": [
+          "spring-boot"
+        ],
+        "en": [
+          "spring-boot"
+        ]
+      },
+      "keypoints": [
+        {
+          "pattern": "(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)",
+          "registered_window_chars": 40,
+          "in_question": {
+            "zh": false,
+            "en": false
+          },
+          "in_answer": {
+            "zh": false,
+            "en": false
+          },
+          "in_selected_evidence": {
+            "zh": [],
+            "en": []
+          },
+          "min_proximity_window_chars": {
+            "zh": null,
+            "en": null
+          },
+          "in_corpus_chunk_count": 0,
+          "in_corpus_sample_chunk_ids": []
+        }
+      ]
+    }
+  ]
+}
