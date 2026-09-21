@@ -205,11 +205,22 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
     class FakeStore:
         # CR-160：身份字段齐全（含 embedding_model），且 execute() 返回真实的
         # (source_url, checksum) 行，使报告里的 index_fingerprint 可被独立复算。
+        # R189：证据侧统计会按 `chunk_id` 回查正文，因此这个替身必须分得清两种查询；
+        # 一律返回同一批行会让"回查到的正文"变成指纹用的那几行，测不出真实行为。
         meta = {"dictionary_version": "test-dictionary",
                 "embedding_model": "test-embedder"}
         rows = _FAKE_CHUNKS
+        bodies = {
+            72: ("https://z.example.test/page", "second selected body"),
+            73: ("https://z.example.test/page", "first selected body"),
+        }
 
-        def execute(self, _sql, _params=()):
+        def execute(self, sql, params=()):
+            if "WHERE id = ?" in sql:
+                found = self.bodies.get(params[0])
+                return [{"source_url": found[0], "text": found[1]}] if found else []
+            if "SELECT text FROM chunks" in sql:
+                return [{"text": body} for _url, body in self.bodies.values()]
             return list(self.rows)
 
         def count(self):
@@ -278,7 +289,8 @@ def test_main_writes_the_language_grouped_json_report(monkeypatch, tmp_path):
     report = json.loads(report_files[0].read_text(encoding="utf-8"))
     group = report["by_language"]
     assert set(group) == {"en"}
-    assert report["schema_version"] == 2
+    # R189 把证据侧统计写进报告，schema 随之到 3。
+    assert report["schema_version"] == 3
     # 这同时锁住“运行开始时取一次”而非写盘时重读：FakeEngine.load 后 HEAD 已变为 late。
     assert report["implementation_commit"] == start_commit
     assert git_calls == [
@@ -413,3 +425,146 @@ def test_eval_and_bench_share_one_fingerprint_implementation():
     # bench 侧只包一层失败关闭语义，算法仍是同一份
     with pytest.raises(SystemExit, match="拒绝产出报告"):
         spec.index_fingerprint(_identity_store(_FAKE_CHUNKS, count=99))
+
+
+# ---------- R189：登记正则 × 证据文本（测量，不是门禁） ----------
+
+class _EvidenceStore:
+    """按 `chunk_id` 回查正文的最小替身；不解析 SQL 之外的条件。"""
+
+    def __init__(self, bodies: dict, corpus: list[str] | None = None):
+        self.bodies = bodies
+        self.corpus = corpus if corpus is not None else [b for _u, b in bodies.values()]
+
+    def execute(self, sql, params=()):
+        if "WHERE id = ?" in sql:
+            found = self.bodies.get(params[0])
+            return [{"source_url": found[0], "text": found[1]}] if found else []
+        return [{"text": text} for text in self.corpus]
+
+
+def _evidence_case(pattern, *, answer_hit, chunk_id=1, url="u", body="body", sha=None,
+                   answer_text=None):
+    case = basic.Case(id="x", language="en", question="q", expect="answered",
+                      expect_keypoints=[pattern])
+    case.keypoints_hit = [pattern] if answer_hit else []
+    # 答案文本必须带上那句话：实现若把正则拿去匹配答案而不是证据，
+    # 只有这样才会被下面的断言逮住（变异实验第一版就是因为 answer_text 为空而漏网）。
+    case.answer_text = answer_text if answer_text is not None else (
+        f"answer mentioning {pattern}" if answer_hit else "answer")
+    case.selected_evidence = [{
+        "index": 1, "chunk_id": chunk_id, "citation": "c", "url": url,
+        "text_sha256": sha or hashlib.sha256(body.encode()).hexdigest(),
+    }]
+    return case
+
+
+def test_keypoint_found_in_the_evidence_is_reported_with_its_chunk_id():
+    case = _evidence_case(r"(?i)idempotent", answer_hit=True,
+                          body="the producer is idempotent")
+    store = _EvidenceStore({1: ("u", "the producer is idempotent")})
+
+    rows, unverified = basic.keypoint_evidence(store, case)
+
+    assert rows == [{"pattern": r"(?i)idempotent", "in_answer": True,
+                     "in_evidence_chunk_ids": [1]}]
+    assert unverified == 0
+
+
+def test_a_keypoint_that_only_the_answer_has_is_not_credited_to_the_evidence():
+    """R187/R188 反复撞到的那一格：判据命中、而它命中的话不在这道题引的块里。
+
+    实现若把这条正则拿去匹配答案（而不是证据正文），这里会返回 `[1]`，
+    `in_answer_only` 这一格就永远是 0——那正是本轮要量的东西。
+    """
+    case = _evidence_case(r"(?i)commons-pool2", answer_hit=True,
+                          answer_text="pooling needs commons-pool2 on the classpath [1]",
+                          body="connect to redis through a connection factory")
+    store = _EvidenceStore({1: ("u", "connect to redis through a connection factory")})
+
+    rows, _ = basic.keypoint_evidence(store, case)
+
+    assert rows[0]["in_answer"] is True
+    assert rows[0]["in_evidence_chunk_ids"] == []
+
+
+def test_evidence_text_is_newline_normalized_like_the_answer_is():
+    """邻近判据不能因为块正文里的换行而判断开——两侧共用同一个归一化函数。"""
+    pattern = r"(?i)(pressure).{0,10}(memory)"
+    case = _evidence_case(pattern, answer_hit=False, body="pressure\n  memory")
+    store = _EvidenceStore({1: ("u", "pressure\n  memory")})
+
+    rows, _ = basic.keypoint_evidence(store, case)
+
+    assert rows[0]["in_evidence_chunk_ids"] == [1]
+
+
+def test_url_or_hash_mismatch_counts_as_unverified_and_the_text_is_not_used():
+    pattern = r"(?i)idempotent"
+    wrong_url = _evidence_case(pattern, answer_hit=True, url="other", body="idempotent")
+    wrong_hash = _evidence_case(pattern, answer_hit=True, body="idempotent",
+                                sha="0" * 64)
+    store = _EvidenceStore({1: ("u", "idempotent")})
+
+    for case in (wrong_url, wrong_hash):
+        rows, unverified = basic.keypoint_evidence(store, case)
+
+        assert unverified == 1
+        assert rows[0]["in_evidence_chunk_ids"] == []
+
+
+def test_missing_chunk_counts_as_unverified():
+    case = _evidence_case(r"(?i)idempotent", answer_hit=True, chunk_id=999)
+
+    _rows, unverified = basic.keypoint_evidence(_EvidenceStore({}), case)
+
+    assert unverified == 1
+
+
+def test_the_evidence_statistic_never_touches_the_pass_or_fail_verdict():
+    """它是测量不是门禁：算完之后 `failures` 必须一个字都没多。"""
+    case = _evidence_case(r"(?i)commons-pool2", answer_hit=True, body="unrelated")
+    store = _EvidenceStore({1: ("u", "unrelated")})
+
+    basic.keypoint_evidence(store, case)
+
+    assert case.failures == []
+    assert case.ok is True
+
+
+def test_counts_split_the_four_cells_and_exclude_unverified_cases():
+    def case_with(rows, unverified=0):
+        case = basic.Case(id="x", language="en", question="q", expect="answered")
+        case.keypoint_evidence = rows
+        case.evidence_rows_unverified = unverified
+        return case
+
+    counts = basic.keypoint_evidence_counts([
+        case_with([{"pattern": "a", "in_answer": True, "in_evidence_chunk_ids": [1]},
+                   {"pattern": "b", "in_answer": True, "in_evidence_chunk_ids": []}]),
+        case_with([{"pattern": "c", "in_answer": False, "in_evidence_chunk_ids": [2]},
+                   {"pattern": "d", "in_answer": False, "in_evidence_chunk_ids": []}]),
+        # 身份核不上的题整道排除：把它算进 in_answer_only 会凭空造出一条"无据通过"
+        case_with([{"pattern": "e", "in_answer": True, "in_evidence_chunk_ids": []}],
+                  unverified=1),
+    ])
+
+    assert counts == {"in_answer_and_evidence": 1, "in_answer_only": 1,
+                      "in_evidence_only": 1, "in_neither": 1,
+                      "cases_counted": 2,
+                      "cases_excluded_for_unverified_evidence": 1}
+
+
+def test_patterns_that_match_nothing_in_the_whole_index_are_listed_once():
+    """`spring-graceful-shutdown` 那一类：判据在整份语料里一块都匹配不到。"""
+    # 两条语料都**不以**待匹配的词开头：按行首匹配的实现会把两条都报成"匹配不到"。
+    store = _EvidenceStore({}, corpus=["the server performs graceful shutdown",
+                                       "then the application context is closed"])
+
+    unmatched = basic.keypoints_without_corpus_match(store, [
+        r"(?i)(graceful shutdown).{0,40}(application context)",   # 跨块，匹配不到
+        r"(?i)graceful shutdown",                                  # 匹配得到
+        r"(?i)(graceful shutdown).{0,40}(application context)",   # 重复登记只报一次
+    ])
+
+    assert unmatched == [r"(?i)(graceful shutdown).{0,40}(application context)"]

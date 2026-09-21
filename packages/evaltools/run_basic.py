@@ -17,6 +17,7 @@ T-023 将每道题显式写成 `q_zh` / `q_en`，而不是在运行时翻译中�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -86,6 +87,11 @@ class Case:
     sources_missed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     evidence_count: int = 0       # 送进 prompt 的证据条数
+    # 登记正则在**证据文本**里的出现情况（`keypoint_evidence()` 填），与
+    # `keypoints_hit`（看答案）是两处不同的文本，合起来才分得清
+    # 「答案写了但证据里没有」和「证据里有但答案没写」。不参与通过判定。
+    keypoint_evidence: list[dict] = field(default_factory=list)
+    evidence_rows_unverified: int = 0   # 按 chunk_id 回查后身份对不上的证据行
     declined: bool = False        # 模型明说证据未涵盖
     # 拒答分两种，成因完全不同，不能混为一谈（2026-09-02 / T-025 发现）：
     retrieval_miss: bool = False       # 检索本身没给到合格证据 → 检索问题
@@ -155,17 +161,83 @@ def _question_for(spec: dict, language: str) -> str:
     return question
 
 
-def _score_keypoints(answer: str, patterns: list[str]) -> tuple[list[str], list[str]]:
-    """事实断言：每个登记正则都必须在非拒答回答中出现。
+def _normalize_for_match(text: str) -> str:
+    """把换行折成一个空格，供登记正则匹配。
 
     Markdown 流的换行只表示排版，不能让 ``.`` 的有限距离窗口把同一事实误判
     为断开。仅将一个或多个换行及其相邻水平空白折为一个普通空格；不折叠正文
-    内的词、不删除字符。原始 ``answer_text`` 仍原样写入报告供人工审计。
+    内的词、不删除字符。原始文本（``answer_text``、索引里的块正文）都不受影响。
+
+    答案侧与证据侧**必须共用这一个函数**：两边各写一套归一化，"答案命中而证据
+    没命中"就会混进纯粹由换行折叠方式不同造成的差异。
     """
-    normalized = re.sub(r"[^\S\r\n]*[\r\n]+[^\S\r\n]*", " ", answer)
+    return re.sub(r"[^\S\r\n]*[\r\n]+[^\S\r\n]*", " ", text)
+
+
+def _score_keypoints(answer: str, patterns: list[str]) -> tuple[list[str], list[str]]:
+    """事实断言：每个登记正则都必须在非拒答回答中出现。"""
+    normalized = _normalize_for_match(answer)
     hit = [pattern for pattern in patterns if re.search(pattern, normalized)]
     missed = [pattern for pattern in patterns if pattern not in hit]
     return hit, missed
+
+
+def keypoint_evidence(store, case: Case) -> tuple[list[dict], int]:
+    """同一条登记正则，在**实际进入 prompt 的证据文本**里找不找得到。
+
+    与 `_score_keypoints()` 看的是两处不同的文本：那个看答案，这个看证据。
+    分开之后，"答案写了、但它引的块里根本没有这句话"才有名字可叫——
+    R187/R188 的逐块审计发现这类**通过**不止一例：`redis-pool` 的
+    `commons-pool2`、`postgres-connections` 的 `max_connections`
+    都不在各自引用的任何一块证据里。
+
+    **它不判对错、不进 `failures`、不改变任何一道题的通过与否。**
+    证据完全可以用别的措辞表达同一事实，这条正则照样找不到；
+    所以字段名只说到"这条正则在证据文本里出现过没有"，没有承诺"有没有依据"。
+
+    第二个返回值是**没能核验身份的证据行数**：按 `chunk_id` 回查索引后，
+    `source_url` 与正文 SHA-256 必须与 `sources` 事件登记的一致，
+    否则读到的正文就不是当时送进 prompt 的那一份，这条正则的结论也就不成立——
+    这种行只计数，不参与匹配（调用方据此失败关闭）。
+    """
+    texts: dict[int, str] = {}
+    unverified = 0
+    for item in case.selected_evidence:
+        rows = store.execute(
+            "SELECT source_url, text FROM chunks WHERE id = ?", (item["chunk_id"],)
+        )
+        if not rows or rows[0]["source_url"] != item["url"]:
+            unverified += 1
+            continue
+        text = rows[0]["text"]
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != item["text_sha256"]:
+            unverified += 1
+            continue
+        texts[item["chunk_id"]] = _normalize_for_match(text)
+
+    rows_out = []
+    for pattern in case.expect_keypoints:
+        compiled = re.compile(pattern)
+        rows_out.append({
+            "pattern": pattern,
+            "in_answer": pattern in case.keypoints_hit,
+            "in_evidence_chunk_ids": sorted(
+                cid for cid, text in texts.items() if compiled.search(text)
+            ),
+        })
+    return rows_out, unverified
+
+
+def keypoints_without_corpus_match(store, patterns: list[str]) -> list[str]:
+    """哪些登记正则在**整个索引**里一块都匹配不到。
+
+    这类判据从证据出发永远通不过：谁"通过"了它，靠的是模型自己写出那个词串
+    （R187 在 `spring-graceful-shutdown`、`spring-auto-configuration` 上实测为 0 块）。
+    它是**这份索引**上的性质，索引换了要重算，所以跟着每次运行一起记。
+    """
+    corpus = [_normalize_for_match(r["text"]) for r in store.execute("SELECT text FROM chunks")]
+    return [p for p in dict.fromkeys(patterns)
+            if not any(re.compile(p).search(t) for t in corpus)]
 
 
 def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
@@ -302,6 +374,39 @@ def validate_specs(specs: list[dict]) -> None:
             raise ValueError(f"{case_id}: 应作答题必须登记至少一个来源断言")
 
 
+def keypoint_evidence_counts(cases: list[Case]) -> dict[str, int]:
+    """把每条登记正则按「答案里有没有 × 证据里有没有」分到四格。
+
+    `in_answer_only` 就是 R187/R188 反复撞到的那一格：判据命中，但它命中的那句话
+    在这道题自己引用的证据里找不到。四格加起来等于参与统计的正则条数——
+    只统计**真的算过证据**的题（拒答题与没跑到证据的题不在内）。
+
+    **有证据行核不上身份的题整道排除**，另记在
+    `cases_excluded_for_unverified_evidence`：那种题读到的正文不是当时送进
+    prompt 的那一份，把它算进 `in_answer_only` 会凭空造出一条"无据通过"。
+    """
+    counts = {"in_answer_and_evidence": 0, "in_answer_only": 0,
+              "in_evidence_only": 0, "in_neither": 0,
+              "cases_counted": 0, "cases_excluded_for_unverified_evidence": 0}
+    for case in cases:
+        if case.evidence_rows_unverified:
+            counts["cases_excluded_for_unverified_evidence"] += 1
+            continue
+        if case.keypoint_evidence:
+            counts["cases_counted"] += 1
+        for row in case.keypoint_evidence:
+            in_answer, in_evidence = row["in_answer"], bool(row["in_evidence_chunk_ids"])
+            if in_answer and in_evidence:
+                counts["in_answer_and_evidence"] += 1
+            elif in_answer:
+                counts["in_answer_only"] += 1
+            elif in_evidence:
+                counts["in_evidence_only"] += 1
+            else:
+                counts["in_neither"] += 1
+    return counts
+
+
 def summarize_by_language(cases: list[Case]) -> dict[str, dict]:
     """按题目的实际 language 汇总，不能把中英文混成一条“总通过率”。"""
     grouped: dict[str, list[Case]] = {}
@@ -315,6 +420,7 @@ def summarize_by_language(cases: list[Case]) -> dict[str, dict]:
             "declined_with_evidence": sum(1 for c in group if c.declined_with_evidence),
             "keypoints_hit": sum(len(c.keypoints_hit) for c in group),
             "keypoints_total": sum(len(c.expect_keypoints) for c in group),
+            "keypoint_evidence_counts": keypoint_evidence_counts(group),
             "sources_missed": sum(len(c.sources_missed) for c in group),
             "cases": [vars(c) for c in group],
         }
@@ -396,6 +502,17 @@ def main() -> int:
         for f in c.failures:
             print(f"        └─ {f}")
 
+    # 证据侧的登记正则统计。放在全部题目跑完之后：它只读索引、不进生成路径，
+    # 混进循环会把 SQL 读的耗时算进逐题时延。**不改变任何一道题的通过与否**。
+    unverified_rows = 0
+    for c in cases:
+        c.keypoint_evidence, unverified = keypoint_evidence(store, c)
+        c.evidence_rows_unverified = unverified
+        unverified_rows += unverified
+    unsatisfiable = keypoints_without_corpus_match(
+        store, [p for c in cases for p in c.expect_keypoints]
+    )
+
     broken: list[str] = []
     if args.check_links:
         urls = sorted({u for c in cases for u in c.urls})
@@ -445,6 +562,20 @@ def main() -> int:
               f"  —— 检索问题")
         print(f"  ○ 拒绝编造（证据判为充分仍答不了）: {mismatch}/{len(answered)}"
               f"  —— 证据答非所问或问题超出证据范围，**不是**检索未命中")
+        cells = keypoint_evidence_counts(cases)
+        print(f"  登记正则 × 证据文本（不参与通过判定）: "
+              f"答案与证据都有 {cells['in_answer_and_evidence']}、"
+              f"**只在答案里 {cells['in_answer_only']}**、"
+              f"只在证据里 {cells['in_evidence_only']}、"
+              f"两边都没有 {cells['in_neither']}")
+        if unsatisfiable:
+            print(f"  ⚠ 在这份索引里一块都匹配不到的登记正则: {len(unsatisfiable)} 条"
+                  f"  —— 它们从证据出发永远通不过")
+            for pattern in unsatisfiable:
+                print(f"    · {pattern}")
+        if unverified_rows:
+            print(f"  ⚠ 身份核不上的证据行: {unverified_rows} 条"
+                  f"  —— 相关题目整道退出上面的统计，不影响通过判定")
     if ttfts:
         s = sorted(ttfts)
         print(f"  首 token: 中位 {statistics.median(s):.2f}s · "
@@ -466,7 +597,10 @@ def main() -> int:
     path = REPORTS / f"eval-basic-{stamp}.json"
     by_language = summarize_by_language(cases)
     path.write_text(json.dumps({
-        "schema_version": 2,
+        # 3（R189）：每道题新增 `keypoint_evidence` 与 `evidence_rows_unverified`，
+        # 报告新增 `keypoint_evidence_counts` 与 `keypoints_without_corpus_match`。
+        # 都是新增字段，旧消费者按名取值不受影响。
+        "schema_version": 3,
         "implementation_commit": implementation_commit,
         "run_id": run_id,
         "startup_pid": startup_pid,
@@ -491,11 +625,17 @@ def main() -> int:
         "total_cost_usd": total_cost_usd,
         "offline_cost_ok": offline_cost_ok,
         "broken_links": broken,
+        "keypoint_evidence_counts": keypoint_evidence_counts(cases),
+        "keypoints_without_corpus_match": unsatisfiable,
+        "evidence_rows_unverified": unverified_rows,
         "cases": [vars(c) for c in cases],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  报告 {path.name}")
 
     store.close()
+    # 证据侧统计**不参与退出码**：它是测量不是门禁。核不上身份的行只会让对应的题
+    # 退出统计（见 `keypoint_evidence_counts`），数量记在报告里由人看。
+    # 让一个信息性统计决定 CI 红绿，等于给它加一道没人要求过的门。
     return 0 if passed == len(cases) and not broken and offline_cost_ok else 1
 
 

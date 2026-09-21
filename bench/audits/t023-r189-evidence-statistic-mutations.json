@@ -1,0 +1,58 @@
+{
+  "round": "R189",
+  "target": "packages/evaltools/run_basic.py",
+  "tests": "tests/unit/test_basic_bilingual_eval.py",
+  "note": "函数为本轮新增，旧 commit 上测试只会因函数不存在而失败；这里给的是「实现改坏一处则对应回归失败」的判别性证据。第一版实验漏掉两处（答案文本为空、语料样本以待匹配词开头），已按实验结果改强测试后重跑。",
+  "mutations": [
+    {
+      "name": "证据侧改看答案文本",
+      "old": "                cid for cid, text in texts.items() if compiled.search(text)",
+      "new": "                cid for cid, text in texts.items() if compiled.search(case.answer_text)",
+      "failed_tests": [
+        "test_a_keypoint_that_only_the_answer_has_is_not_credited_to_the_evidence",
+        "test_evidence_text_is_newline_normalized_like_the_answer_is"
+      ]
+    },
+    {
+      "name": "不再核对正文哈希",
+      "old": "        if hashlib.sha256(text.encode(\"utf-8\")).hexdigest() != item[\"text_sha256\"]:",
+      "new": "        if False:",
+      "failed_tests": [
+        "test_url_or_hash_mismatch_counts_as_unverified_and_the_text_is_not_used"
+      ]
+    },
+    {
+      "name": "不再核对来源 URL",
+      "old": "        if not rows or rows[0][\"source_url\"] != item[\"url\"]:",
+      "new": "        if not rows:",
+      "failed_tests": [
+        "test_url_or_hash_mismatch_counts_as_unverified_and_the_text_is_not_used"
+      ]
+    },
+    {
+      "name": "证据文本不做换行归一化",
+      "old": "        texts[item[\"chunk_id\"]] = _normalize_for_match(text)",
+      "new": "        texts[item[\"chunk_id\"]] = text",
+      "failed_tests": [
+        "test_evidence_text_is_newline_normalized_like_the_answer_is"
+      ]
+    },
+    {
+      "name": "身份核不上的题照样计入四格",
+      "old": "            counts[\"cases_excluded_for_unverified_evidence\"] += 1\n            continue",
+      "new": "            counts[\"cases_excluded_for_unverified_evidence\"] += 1",
+      "failed_tests": [
+        "test_counts_split_the_four_cells_and_exclude_unverified_cases"
+      ]
+    },
+    {
+      "name": "语料扫描改成只匹配块首",
+      "old": "    return [p for p in dict.fromkeys(patterns)\n            if not any(re.compile(p).search(t) for t in corpus)]",
+      "new": "    return [p for p in dict.fromkeys(patterns)\n            if not any(re.compile(p).match(t) for t in corpus)]",
+      "failed_tests": [
+        "test_patterns_that_match_nothing_in_the_whole_index_are_listed_once"
+      ]
+    }
+  ],
+  "mutations_with_no_failing_test": []
+}
