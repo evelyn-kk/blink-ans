@@ -672,3 +672,42 @@ def test_an_answered_question_the_model_declined_is_also_left_out():
     case.sources, case.evidence_count, case.declined = 0, 5, True
 
     assert basic.keypoint_evidence(_EvidenceStore({}), case) == ([], 0)
+
+
+@pytest.mark.parametrize("answer, why", [
+    ("Spring Boot exposes metrics at /actuator/prometheus.", "有技术内容但一个编号都没标"),
+    ("", "整条回答是空的"),
+])
+def test_an_answer_with_no_citation_markers_is_not_a_keypoint_scoring_subject(answer, why):
+    """CR-163：`cited=0` 的题在 `run_case()` 里就没评过分，四格不能替它评。
+
+    这正是 R190 收窄分母时**没有配回归**的那个形状，也是 R189 英文报告里
+    一条**假**的 `in_evidence_only`：`spring-prometheus` 的答案确实写了
+    `/actuator/prometheus`，只因没标编号而未被评分，却被记成"证据里有、答案没写"。
+    `in_answer=False` 在这种题上表示"从未评分"，不表示"答案里没有"——
+    两者混在同一格里，那一格就不能用了。
+    """
+    class _NoCitations:
+        def answer(self, _request):
+            yield {"type": "retrieval", "sufficiency": "sufficient"}
+            yield {"type": "sources", "items": [{
+                "index": 1, "chunk_id": 101, "url": "https://example.test",
+                "citation": "kafka 4.0 · test",
+                "text_sha256": hashlib.sha256(b"idempotent producer").hexdigest()}]}
+            if answer:
+                yield {"type": "answer_delta", "text": answer}
+            yield {"type": "done", "cited_evidence": [], "ttft_s": 0.1, "total_s": 0.2,
+                   "prompt_tokens": 10, "evidence_count": 1, "served_by": "local"}
+
+    case = basic.run_case(_NoCitations(), _SPEC, "en")
+    assert case.cited == 0 and case.keypoints_scored is False, why
+
+    rows, unverified = basic.keypoint_evidence(
+        _EvidenceStore({101: ("https://example.test", "idempotent producer")}), case)
+    case.keypoint_evidence, case.evidence_rows_unverified = rows, unverified
+
+    assert (rows, unverified) == ([], 0)
+    counts = basic.keypoint_evidence_counts([case])
+    assert counts["cases_counted"] == 0
+    assert counts["in_evidence_only"] == 0
+    assert counts["cases_excluded_for_unverified_evidence"] == 0
