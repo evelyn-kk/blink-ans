@@ -1,0 +1,1644 @@
+{
+  "round": "R191",
+  "cr": "CR-163",
+  "note": "R190 用 R189 产物里「keypoint_evidence 非空」冒充新的 keypoints_scored，把两道 cited=0 的英文题留在分母，于是声称四格不变。本轮改用当前实现**端到端重跑两臂**，不再从旧产物推断。报告本身在 .gitignore 里，复核所需的逐题数据留在这里。",
+  "supersedes": "bench/audits/t023-r190-evidence-row-accounting.json",
+  "arms": {
+    "zh": {
+      "report": "bench/reports/eval-basic-20260921T073934Z.json",
+      "implementation_commit": "b38c639bdb557baf7f13c99f88b90d383b5f4dad",
+      "index_fingerprint": "fe11b6b41ded3d60f422768727c67a9aefe4dac8ebc83dac625efc6b1d176305",
+      "passed": 44,
+      "total": 50,
+      "failure_ids": [
+        "k8s-eviction",
+        "k8s-hpa",
+        "k8s-readiness-vs-liveness",
+        "postgres-explain-analyze",
+        "spring-auto-configuration",
+        "spring-graceful-shutdown"
+      ],
+      "failure_set_same_as_r189": true,
+      "r189_published": {
+        "in_answer_and_evidence": 26,
+        "in_answer_only": 12,
+        "in_evidence_only": 0,
+        "in_neither": 6,
+        "cases_counted": 44
+      },
+      "r191_measured": {
+        "in_answer_and_evidence": 26,
+        "in_answer_only": 12,
+        "in_evidence_only": 0,
+        "in_neither": 6,
+        "cases_counted": 44
+      },
+      "delta": {
+        "in_answer_and_evidence": 0,
+        "in_answer_only": 0,
+        "in_evidence_only": 0,
+        "in_neither": 0,
+        "cases_counted": 0
+      },
+      "excluded_answered_cases": [],
+      "evidence_rows_unverified": 0,
+      "keypoints_without_corpus_match": [
+        "(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)",
+        "(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)"
+      ],
+      "per_case": [
+        {
+          "id": "kafka-duplicate-consumption",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(auto.?commit|手动提交|manual commit)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-offset-commit",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(commit|提交).{0,30}(offset|位移)|(offset|位移).{0,30}(commit|提交)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-rebalance",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(rebalanc|重平衡).{0,40}(partition|分区)|(partition|分区).{0,40}(rebalanc|重平衡)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-transactional-producer",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(transaction|事务).{0,40}(exactly.?once|精确一次|恰好一次)|(exactly.?once|精确一次|恰好一次).{0,40}(transaction|事务)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-idempotent-producer",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(sequence|序列).{0,40}(producer|生产者)|(producer|生产者).{0,40}(sequence|序列)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-replica-sync",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(ISR|in.?sync|同步副本)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-delivery-semantics",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(at.?least.?once|至少一次|at.?most.?once|至多一次|exactly.?once|精确一次)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-log-compaction",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(latest|最后|最新).{0,40}(key|键|keyed)|(key|键|keyed).{0,40}(latest|最后|最新)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-acks",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)acks.{0,40}(all|0|1)|确认.{0,40}(all|全部|0|1)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-heartbeat-session-timeout",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(heartbeat|心跳).{0,40}(session|会话)|(session|会话).{0,40}(heartbeat|心跳)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-liveness-probe",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(initialDelaySeconds|初始延迟|periodSeconds|周期)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-readiness-vs-liveness",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(ready|就绪).{0,40}(traffic|流量|service|服务)|(traffic|流量|service|服务).{0,40}(ready|就绪)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-oomkilled",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(memory|内存).{0,40}(limit|限制)|(limit|限制).{0,40}(memory|内存)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-requests-limits",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(request|请求).{0,40}(schedul|调度)|(schedul|调度).{0,40}(request|请求)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-qos",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Guaranteed|保证|Burstable|可突发|BestEffort|尽力)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-rolling-update",
+          "keypoints_scored": true,
+          "cited": 5,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(maxSurge|maxUnavailable|最大激增|最大不可用)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-configmap-mount",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(volume|卷).{0,40}(ConfigMap|configmap)|(ConfigMap|configmap).{0,40}(volume|卷)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-eviction",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-hpa",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-pod-lifecycle",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Pending|等待|Running|运行|Succeeded|成功|Failed|失败)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-seq-scan",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(index|索引).{0,40}(selectiv|选择性|statistic|统计)|(selectiv|选择性|statistic|统计).{0,40}(index|索引)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-explain-analyze",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(actual|实际).{0,40}(time|时间|row|行)|(time|时间|row|行).{0,40}(actual|实际)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-autovacuum",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 3,
+          "evidence_count": 3,
+          "selected_evidence_rows": 3,
+          "cells": [
+            {
+              "pattern": "(?i)(VACUUM|真空).{0,40}(ANALYZE|分析)|(ANALYZE|分析).{0,40}(VACUUM|真空)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-isolation",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Read Committed|读已提交|Repeatable Read|可重复读|Serializable|可串行化)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-lock-wait",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(pg_locks|锁表)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-connections",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(max_connections|最大连接)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-bloat",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(VACUUM|真空|REINDEX|重建索引)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-btree-index",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(selectiv|选择性|function|函数|cast|类型转换)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-partitioning",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(PARTITION BY|分区键|分区表)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-statistics",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(ANALYZE|分析).{0,40}(statistic|统计)|(statistic|统计).{0,40}(ANALYZE|分析)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "spring-prometheus",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(/actuator/prometheus|actuator.{0,20}prometheus)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-health",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(health|健康).{0,40}(endpoint|端点)|(endpoint|端点).{0,40}(health|健康)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-auto-configuration",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "spring-logging",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(logging\\.level|日志级别)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-config-precedence",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(property source|属性源|优先级|precedence)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-graceful-shutdown",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "spring-tracing",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Micrometer|micrometer|tracing|追踪)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-executable-jar",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(BOOT-INF|boot-inf)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-serialization",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(serializer|序列化).{0,40}(key|键|value|值)|(key|键|value|值).{0,40}(serializer|序列化)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-cluster",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(RedisClusterConfiguration|cluster|集群)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-cache-annotations",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(@Cacheable|缓存注解)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "redis-template-difference",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(StringRedisTemplate|字符串).{0,40}(String|字符串)|(String|字符串).{0,40}(StringRedisTemplate|字符串)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-lua",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(RedisScript|evalsha|Lua|lua)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-pool",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(pool|连接池).{0,40}(Lettuce|Jedis|client)|(Lettuce|Jedis|client).{0,40}(pool|连接池)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "refuse-beijing-weather",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-scifi-films",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-swiftui-state",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-rust-lexer",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-bonus",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-react-useeffect",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        }
+      ]
+    },
+    "en": {
+      "report": "bench/reports/eval-basic-20260921T074433Z.json",
+      "implementation_commit": "b38c639bdb557baf7f13c99f88b90d383b5f4dad",
+      "index_fingerprint": "fe11b6b41ded3d60f422768727c67a9aefe4dac8ebc83dac625efc6b1d176305",
+      "passed": 41,
+      "total": 50,
+      "failure_ids": [
+        "k8s-eviction",
+        "postgres-btree-index",
+        "postgres-connections",
+        "postgres-partitioning",
+        "postgres-seq-scan",
+        "redis-pool",
+        "refuse-scifi-films",
+        "spring-graceful-shutdown",
+        "spring-prometheus"
+      ],
+      "failure_set_same_as_r189": true,
+      "r189_published": {
+        "in_answer_and_evidence": 26,
+        "in_answer_only": 10,
+        "in_evidence_only": 2,
+        "in_neither": 6,
+        "cases_counted": 44
+      },
+      "r191_measured": {
+        "in_answer_and_evidence": 26,
+        "in_answer_only": 10,
+        "in_evidence_only": 1,
+        "in_neither": 5,
+        "cases_counted": 42
+      },
+      "delta": {
+        "in_answer_and_evidence": 0,
+        "in_answer_only": 0,
+        "in_evidence_only": -1,
+        "in_neither": -1,
+        "cases_counted": -2
+      },
+      "excluded_answered_cases": [
+        {
+          "id": "spring-prometheus",
+          "expect": "answered",
+          "declined": false,
+          "cited": 0,
+          "published_r189_cells": [
+            {
+              "pattern": "(?i)(/actuator/prometheus|actuator.{0,20}prometheus)",
+              "in_answer": false,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-pool",
+          "expect": "answered",
+          "declined": false,
+          "cited": 0,
+          "published_r189_cells": [
+            {
+              "pattern": "(?i)(pool|连接池).{0,40}(Lettuce|Jedis|client)|(Lettuce|Jedis|client).{0,40}(pool|连接池)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        }
+      ],
+      "evidence_rows_unverified": 0,
+      "keypoints_without_corpus_match": [
+        "(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)",
+        "(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)"
+      ],
+      "per_case": [
+        {
+          "id": "kafka-duplicate-consumption",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(auto.?commit|手动提交|manual commit)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-offset-commit",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(commit|提交).{0,30}(offset|位移)|(offset|位移).{0,30}(commit|提交)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-rebalance",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(rebalanc|重平衡).{0,40}(partition|分区)|(partition|分区).{0,40}(rebalanc|重平衡)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-transactional-producer",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(transaction|事务).{0,40}(exactly.?once|精确一次|恰好一次)|(exactly.?once|精确一次|恰好一次).{0,40}(transaction|事务)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-idempotent-producer",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(sequence|序列).{0,40}(producer|生产者)|(producer|生产者).{0,40}(sequence|序列)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-replica-sync",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(ISR|in.?sync|同步副本)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-delivery-semantics",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(at.?least.?once|至少一次|at.?most.?once|至多一次|exactly.?once|精确一次)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-log-compaction",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(latest|最后|最新).{0,40}(key|键|keyed)|(key|键|keyed).{0,40}(latest|最后|最新)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "kafka-acks",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)acks.{0,40}(all|0|1)|确认.{0,40}(all|全部|0|1)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "kafka-heartbeat-session-timeout",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(heartbeat|心跳).{0,40}(session|会话)|(session|会话).{0,40}(heartbeat|心跳)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-liveness-probe",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(initialDelaySeconds|初始延迟|periodSeconds|周期)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-readiness-vs-liveness",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(ready|就绪).{0,40}(traffic|流量|service|服务)|(traffic|流量|service|服务).{0,40}(ready|就绪)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-oomkilled",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(memory|内存).{0,40}(limit|限制)|(limit|限制).{0,40}(memory|内存)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-requests-limits",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(request|请求).{0,40}(schedul|调度)|(schedul|调度).{0,40}(request|请求)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-qos",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Guaranteed|保证|Burstable|可突发|BestEffort|尽力)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-rolling-update",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(maxSurge|maxUnavailable|最大激增|最大不可用)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-configmap-mount",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(volume|卷).{0,40}(ConfigMap|configmap)|(ConfigMap|configmap).{0,40}(volume|卷)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-eviction",
+          "keypoints_scored": true,
+          "cited": 5,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(pressure|压力).{0,40}(memory|内存|disk|磁盘)|(memory|内存|disk|磁盘).{0,40}(pressure|压力)",
+              "in_answer": false,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "k8s-hpa",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 4,
+          "evidence_count": 4,
+          "selected_evidence_rows": 4,
+          "cells": [
+            {
+              "pattern": "(?i)(metric|指标).{0,40}(target|目标)|(target|目标).{0,40}(metric|指标)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "k8s-pod-lifecycle",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Pending|等待|Running|运行|Succeeded|成功|Failed|失败)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-seq-scan",
+          "keypoints_scored": true,
+          "cited": 5,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(index|索引).{0,40}(selectiv|选择性|statistic|统计)|(selectiv|选择性|statistic|统计).{0,40}(index|索引)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-explain-analyze",
+          "keypoints_scored": true,
+          "cited": 5,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(actual|实际).{0,40}(time|时间|row|行)|(time|时间|row|行).{0,40}(actual|实际)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-autovacuum",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 3,
+          "evidence_count": 3,
+          "selected_evidence_rows": 3,
+          "cells": [
+            {
+              "pattern": "(?i)(VACUUM|真空).{0,40}(ANALYZE|分析)|(ANALYZE|分析).{0,40}(VACUUM|真空)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-isolation",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Read Committed|读已提交|Repeatable Read|可重复读|Serializable|可串行化)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-lock-wait",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(pg_locks|锁表)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-connections",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(max_connections|最大连接)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-bloat",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(VACUUM|真空|REINDEX|重建索引)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "postgres-btree-index",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(selectiv|选择性|function|函数|cast|类型转换)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-partitioning",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(PARTITION BY|分区键|分区表)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "postgres-statistics",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(ANALYZE|分析).{0,40}(statistic|统计)|(statistic|统计).{0,40}(ANALYZE|分析)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-prometheus",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": []
+        },
+        {
+          "id": "spring-health",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(health|健康).{0,40}(endpoint|端点)|(endpoint|端点).{0,40}(health|健康)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-auto-configuration",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(@Conditional|条件).{0,40}(configuration|配置)|(configuration|配置).{0,40}(@Conditional|条件)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "spring-logging",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(logging\\.level|日志级别)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-config-precedence",
+          "keypoints_scored": true,
+          "cited": 1,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(property source|属性源|优先级|precedence)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-graceful-shutdown",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(graceful shutdown|优雅停机).{0,40}(application context|应用上下文)|(application context|应用上下文).{0,40}(graceful shutdown|优雅停机)",
+              "in_answer": false,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "spring-tracing",
+          "keypoints_scored": true,
+          "cited": 4,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(Micrometer|micrometer|tracing|追踪)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "spring-executable-jar",
+          "keypoints_scored": true,
+          "cited": 3,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(BOOT-INF|boot-inf)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-serialization",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(serializer|序列化).{0,40}(key|键|value|值)|(key|键|value|值).{0,40}(serializer|序列化)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-cluster",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(RedisClusterConfiguration|cluster|集群)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-cache-annotations",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(@Cacheable|缓存注解)",
+              "in_answer": true,
+              "in_evidence": false
+            }
+          ]
+        },
+        {
+          "id": "redis-template-difference",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(StringRedisTemplate|字符串).{0,40}(String|字符串)|(String|字符串).{0,40}(StringRedisTemplate|字符串)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-lua",
+          "keypoints_scored": true,
+          "cited": 2,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": [
+            {
+              "pattern": "(?i)(RedisScript|evalsha|Lua|lua)",
+              "in_answer": true,
+              "in_evidence": true
+            }
+          ]
+        },
+        {
+          "id": "redis-pool",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": []
+        },
+        {
+          "id": "refuse-beijing-weather",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-scifi-films",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5,
+          "cells": []
+        },
+        {
+          "id": "refuse-swiftui-state",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-rust-lexer",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-bonus",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 0,
+          "selected_evidence_rows": 0,
+          "cells": []
+        },
+        {
+          "id": "refuse-react-useeffect",
+          "keypoints_scored": false,
+          "cited": 0,
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 5,
+          "selected_evidence_rows": 0,
+          "cells": []
+        }
+      ]
+    }
+  }
+}

@@ -1,4 +1,6 @@
 {
+  "superseded_by": "bench/audits/t023-r191-keypoint-evidence-counts.json",
+  "correction": "CR-163：本产物的 `scored_cases=44` 是用 R189 产物里「keypoint_evidence 非空」冒充新实现的 `keypoints_scored` 算出来的。新实现只在 `not declined and cited > 0` 时评分，英文的 spring-prometheus 与 redis-pool 都是 cited=0，应当排除——英文分母是 42、四格是 26/10/1/5，本产物据此得出的「四格一字不变」**不成立**。逐行的 sources/evidence_count/selected_evidence_rows 三元组仍然有效，不成立的是由它们推出的那个结论。R191 已用当前实现端到端重跑两臂替代该推断。",
   "round": "R190",
   "note": "CR-162 的新算法（本该核对几行 − 真正核对通过几行，且只测 keypoint 真的评过分的题）作用在 R189 已发布的两份报告上逐题重算。报告在 .gitignore 里，因此把重算所需的三元组留在这里，使「四格数字不变」这句话可被独立复核。",
   "rule": "只覆盖 keypoint_evidence 非空的题；unverified = max(sources, evidence_count, 已核对行数) − 已核对行数",

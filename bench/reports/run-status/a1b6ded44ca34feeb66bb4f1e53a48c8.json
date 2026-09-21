@@ -1,0 +1,16 @@
+{
+  "run_id": "a1b6ded44ca34feeb66bb4f1e53a48c8",
+  "runner_pid": 6675,
+  "started_at_utc": "2026-09-21T07:33:54.885379+00:00",
+  "command": [
+    "/Users/yiwenkang/Code/toy/blink-ans/.venv/bin/python",
+    "/Users/yiwenkang/Code/toy/blink-ans/packages/evaltools/run_basic.py",
+    "--offline",
+    "--check-links",
+    "--language",
+    "zh"
+  ],
+  "state": "failed",
+  "exit_code": 1,
+  "finished_at_utc": "2026-09-21T07:39:35.207090+00:00"
+}
