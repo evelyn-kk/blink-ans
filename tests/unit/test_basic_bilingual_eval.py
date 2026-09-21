@@ -456,6 +456,11 @@ def _evidence_case(pattern, *, answer_hit, chunk_id=1, url="u", body="body", sha
         "index": 1, "chunk_id": chunk_id, "citation": "c", "url": url,
         "text_sha256": sha or hashlib.sha256(body.encode()).hexdigest(),
     }]
+    # CR-162：`run_case()` 会同时记下这两个计数，替身必须照做——
+    # 只填 `selected_evidence` 的替身构造不出"本该有几行"，而未核验数正是按它算的。
+    case.sources = len(case.selected_evidence)
+    case.evidence_count = len(case.selected_evidence)
+    case.keypoints_scored = True
     return case
 
 
@@ -568,3 +573,102 @@ def test_patterns_that_match_nothing_in_the_whole_index_are_listed_once():
     ])
 
     assert unmatched == [r"(?i)(graceful shutdown).{0,40}(application context)"]
+
+
+# ---------- CR-162：缺审计字段的来源事件必须整题退出四格统计 ----------
+
+class _MissingFieldOrchestrator:
+    """`sources` 事件少一个审计字段——`run_case()` 的列表推导会整体中止。"""
+
+    def __init__(self, dropped: str, answer: str = "The producer is idempotent. [1]"):
+        self.dropped = dropped
+        self.answer_text = answer   # 不能叫 answer：会盖掉下面的生成器方法
+
+    def answer(self, _request):
+        item = {"index": 1, "chunk_id": 101, "url": "https://example.test",
+                "citation": "kafka 4.0 · test",
+                "text_sha256": hashlib.sha256(b"body").hexdigest()}
+        item.pop(self.dropped)
+        yield {"type": "retrieval", "sufficiency": "sufficient"}
+        yield {"type": "sources", "items": [item]}
+        yield {"type": "answer_delta", "text": self.answer_text}
+        yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
+               "prompt_tokens": 10, "evidence_count": 1, "served_by": "local"}
+
+
+@pytest.mark.parametrize("dropped", ["chunk_id", "url", "text_sha256"])
+def test_missing_source_audit_fields_keep_the_case_out_of_the_four_cells(dropped):
+    """CR-162：缺字段是最根本的"核不上"，走的却曾是相反的路径。
+
+    复现（R189 实现）：缺 `chunk_id` 时 `selected_evidence` 为空，按"遍历失败次数"
+    算出 `unverified=0`，于是这道题被当成已核验，命中的 keypoint 记进 `in_answer_only`——
+    正是这份统计里最需要可信的那一格被凭空加了一条。
+
+    现在按"本该核对几行 − 真正核对通过几行"算，缺字段的那一行必然落在差里。
+    """
+    case = basic.run_case(_MissingFieldOrchestrator(dropped), _SPEC, "en")
+    assert any("缺少审计字段" in f for f in case.failures)   # 原有诊断不受影响
+
+    rows, unverified = basic.keypoint_evidence(_EvidenceStore({101: ("https://example.test", "body")}), case)
+    case.keypoint_evidence, case.evidence_rows_unverified = rows, unverified
+    counts = basic.keypoint_evidence_counts([case])
+
+    assert unverified == 1
+    assert counts["cases_excluded_for_unverified_evidence"] == 1
+    assert counts["cases_counted"] == 0
+    assert counts["in_answer_only"] == 0
+
+
+def test_a_sources_event_that_never_arrives_also_stays_out_of_the_four_cells():
+    """另一个同形的洞：`done` 自报送了证据，`sources` 事件却没来。
+
+    只数 `selected_evidence` 的实现在这里同样算出 0，把"没法核验"说成"证据里没有"。
+    """
+    class _NoSources:
+        def answer(self, _request):
+            yield {"type": "retrieval", "sufficiency": "sufficient"}
+            yield {"type": "answer_delta", "text": "The producer is idempotent. [1]"}
+            yield {"type": "done", "cited_evidence": [1], "ttft_s": 0.1, "total_s": 0.2,
+                   "prompt_tokens": 10, "evidence_count": 3, "served_by": "local"}
+
+    case = basic.run_case(_NoSources(), _SPEC, "en")
+
+    _rows, unverified = basic.keypoint_evidence(_EvidenceStore({}), case)
+
+    assert unverified == 3
+
+
+def test_a_fully_verified_case_reports_no_unverified_rows():
+    """反向：字段齐全、身份核得上时必须是 0，否则这条规则会把好题也排除掉。"""
+    case = _evidence_case(r"(?i)idempotent", answer_hit=True, body="idempotent")
+
+    _rows, unverified = basic.keypoint_evidence(
+        _EvidenceStore({1: ("u", "idempotent")}), case)
+
+    assert unverified == 0
+
+
+def test_a_refused_question_is_not_reported_as_unverifiable_evidence():
+    """拒答题按契约不返回来源，`done` 却仍自报 evidence_count——
+
+    照"本该核对几行"硬算，这类题会被整片记成"核不上的证据"，
+    而它根本没有登记正则、无从测起。实测 `refuse-react-useeffect` 就是
+    `sources=0` / `evidence_count=5` 这个形状（见
+    `bench/audits/t023-r190-evidence-row-accounting.json`）。
+    """
+    case = basic.Case(id="refuse", language="en", question="q", expect="refused")
+    case.sources, case.evidence_count, case.declined = 0, 5, True
+
+    rows, unverified = basic.keypoint_evidence(_EvidenceStore({}), case)
+
+    assert (rows, unverified) == ([], 0)
+    assert basic.keypoint_evidence_counts([case])["cases_excluded_for_unverified_evidence"] == 0
+
+
+def test_an_answered_question_the_model_declined_is_also_left_out():
+    """模型自己拒答的应作答题同样没走到 `_score_keypoints()`，统计对它无话可说。"""
+    case = basic.Case(id="x", language="en", question="q", expect="answered",
+                      expect_keypoints=[r"(?i)idempotent"])
+    case.sources, case.evidence_count, case.declined = 0, 5, True
+
+    assert basic.keypoint_evidence(_EvidenceStore({}), case) == ([], 0)

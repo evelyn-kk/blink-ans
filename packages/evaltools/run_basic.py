@@ -91,7 +91,11 @@ class Case:
     # `keypoints_hit`（看答案）是两处不同的文本，合起来才分得清
     # 「答案写了但证据里没有」和「证据里有但答案没写」。不参与通过判定。
     keypoint_evidence: list[dict] = field(default_factory=list)
-    evidence_rows_unverified: int = 0   # 按 chunk_id 回查后身份对不上的证据行
+    evidence_rows_unverified: int = 0   # 本该核对却没核对上的证据行数
+    # 这道题的 keypoint 到底有没有被评分过。拒答题（没有登记正则）和模型自己
+    # 拒答的题都不会走到 `_score_keypoints()`，证据侧统计对它们无话可说——
+    # 不显式记下来的话，"四格只覆盖真的算过 keypoint 的题"就只是文档里的一句话。
+    keypoints_scored: bool = False
     declined: bool = False        # 模型明说证据未涵盖
     # 拒答分两种，成因完全不同，不能混为一谈（2026-09-02 / T-025 发现）：
     retrieval_miss: bool = False       # 检索本身没给到合格证据 → 检索问题
@@ -195,25 +199,41 @@ def keypoint_evidence(store, case: Case) -> tuple[list[dict], int]:
     证据完全可以用别的措辞表达同一事实，这条正则照样找不到；
     所以字段名只说到"这条正则在证据文本里出现过没有"，没有承诺"有没有依据"。
 
-    第二个返回值是**没能核验身份的证据行数**：按 `chunk_id` 回查索引后，
-    `source_url` 与正文 SHA-256 必须与 `sources` 事件登记的一致，
-    否则读到的正文就不是当时送进 prompt 的那一份，这条正则的结论也就不成立——
-    这种行只计数，不参与匹配（调用方据此失败关闭）。
+    第二个返回值是**没能核验身份的证据行数**，定义为
+
+        这次本该核对的行数 − 真正核对通过的行数
+
+    而**不是**"我遍历时失败了几次"（CR-162）。两者在正常情况下相等，在最该
+    分辨的那种输入上正好相反：`sources` 事件缺 `chunk_id`/`url`/`text_sha256` 时，
+    `run_case()` 的列表推导整体中止、`selected_evidence` 是空的，按"遍历失败次数"
+    算出来是 0——于是"没法核验"被当成"证据里没有"，凭空造出一条 `in_answer_only`，
+    污染的正好是这份统计里最需要可信的那一格。按"该有几行"算就不会。
+
+    本该核对的行数取 `max(sources, evidence_count)`：前者是 `sources` 事件里的条数，
+    后者是 `done` 事件自报的"送进 prompt 的证据条数"，两处任一漏报都不该让统计变宽松。
+    **同一块被选中两次也会记成少核对一行**（`texts` 按 `chunk_id` 去重）——
+    实测两臂 100 道题里没有这种情况，这个方向偏严，宁可少算一题也不编造一格。
     """
+    if not case.keypoints_scored:
+        # 拒答题的 `sources` 事件按契约就不该有（"拒答时不应返回来源"），
+        # 而 `done` 仍会自报 evidence_count——照本该核对的行数算，它会被误报成
+        # 一整片"核不上的证据"。没评过分就没有可测的东西，直接不测。
+        return [], 0
+
     texts: dict[int, str] = {}
-    unverified = 0
     for item in case.selected_evidence:
         rows = store.execute(
             "SELECT source_url, text FROM chunks WHERE id = ?", (item["chunk_id"],)
         )
         if not rows or rows[0]["source_url"] != item["url"]:
-            unverified += 1
             continue
         text = rows[0]["text"]
         if hashlib.sha256(text.encode("utf-8")).hexdigest() != item["text_sha256"]:
-            unverified += 1
             continue
         texts[item["chunk_id"]] = _normalize_for_match(text)
+    # 取三者的最大值：`len(texts)` 兜住"两个计数都漏报"的情况，使这个差永远非负；
+    # 少了它，一次漏报就会算出负数，而负数在下游是"有未核验行"的假信号。
+    unverified = max(case.sources, case.evidence_count, len(texts)) - len(texts)
 
     rows_out = []
     for pattern in case.expect_keypoints:
@@ -259,9 +279,13 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
         elif t == "sources":
             items = ev["items"]
             c.sources = len(items)
-            c.urls = [i["url"] for i in items]
-            c.projects = [_project_of(i["citation"]) for i in items]
             try:
+                # CR-162：`url` / `citation` 原本在 try 之外，缺其中之一时
+                # `run_case()` 直接抛 KeyError——一道题的来源事件不合契约，
+                # 整轮 50 题评测就地崩掉，连报告都写不出来。三个审计字段
+                # 现在走同一条诊断路径：记成失败，继续跑完。
+                c.urls = [i["url"] for i in items]
+                c.projects = [_project_of(i["citation"]) for i in items]
                 c.selected_evidence = [
                     {
                         "index": i["index"],
@@ -317,6 +341,7 @@ def run_case(orch: Orchestrator, spec: dict, language: str) -> Case:
             # 结论无法追溯，用户无从判断可信度。
             c.failures.append("给出技术内容但未标注任何证据编号，结论无法追溯")
         else:
+            c.keypoints_scored = True
             c.keypoints_hit, c.keypoints_missed = _score_keypoints(
                 answer, c.expect_keypoints,
             )
@@ -597,8 +622,9 @@ def main() -> int:
     path = REPORTS / f"eval-basic-{stamp}.json"
     by_language = summarize_by_language(cases)
     path.write_text(json.dumps({
-        # 3（R189）：每道题新增 `keypoint_evidence` 与 `evidence_rows_unverified`，
-        # 报告新增 `keypoint_evidence_counts` 与 `keypoints_without_corpus_match`。
+        # 3（R189，R190 按 CR-162 修正）：每道题新增 `keypoint_evidence`、
+        # `evidence_rows_unverified` 与 `keypoints_scored`，报告新增
+        # `keypoint_evidence_counts` 与 `keypoints_without_corpus_match`。
         # 都是新增字段，旧消费者按名取值不受影响。
         "schema_version": 3,
         "implementation_commit": implementation_commit,

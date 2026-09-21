@@ -1,0 +1,588 @@
+{
+  "round": "R190",
+  "note": "CR-162 的新算法（本该核对几行 − 真正核对通过几行，且只测 keypoint 真的评过分的题）作用在 R189 已发布的两份报告上逐题重算。报告在 .gitignore 里，因此把重算所需的三元组留在这里，使「四格数字不变」这句话可被独立复核。",
+  "rule": "只覆盖 keypoint_evidence 非空的题；unverified = max(sources, evidence_count, 已核对行数) − 已核对行数",
+  "reports": {
+    "zh": {
+      "report": "bench/reports/eval-basic-20260921T014302Z.json",
+      "implementation_commit": "788358ae7843c86727425ff19e5533f526d8617a",
+      "index_fingerprint": "fe11b6b41ded3d60f422768727c67a9aefe4dac8ebc83dac625efc6b1d176305",
+      "published_keypoint_evidence_counts": {
+        "in_answer_and_evidence": 26,
+        "in_answer_only": 12,
+        "in_evidence_only": 0,
+        "in_neither": 6,
+        "cases_counted": 44,
+        "cases_excluded_for_unverified_evidence": 0
+      },
+      "scored_cases": 44,
+      "cases_with_mismatched_row_counts": [],
+      "recomputed_unverified_total": 0,
+      "unscored_cases_that_report_evidence_count": [],
+      "rows": [
+        {
+          "id": "kafka-duplicate-consumption",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-offset-commit",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-rebalance",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-transactional-producer",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-idempotent-producer",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-replica-sync",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-delivery-semantics",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-log-compaction",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-acks",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-heartbeat-session-timeout",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-liveness-probe",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-readiness-vs-liveness",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-oomkilled",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-requests-limits",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-qos",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-rolling-update",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-configmap-mount",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-eviction",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-hpa",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-pod-lifecycle",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-seq-scan",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-explain-analyze",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-autovacuum",
+          "sources": 3,
+          "evidence_count": 3,
+          "selected_evidence_rows": 3
+        },
+        {
+          "id": "postgres-isolation",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-lock-wait",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-connections",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-bloat",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-btree-index",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-partitioning",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-statistics",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-prometheus",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-health",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-auto-configuration",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-logging",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-config-precedence",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-graceful-shutdown",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-tracing",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-executable-jar",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-serialization",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-cluster",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-cache-annotations",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-template-difference",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-lua",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-pool",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        }
+      ]
+    },
+    "en": {
+      "report": "bench/reports/eval-basic-20260921T014800Z.json",
+      "implementation_commit": "788358ae7843c86727425ff19e5533f526d8617a",
+      "index_fingerprint": "fe11b6b41ded3d60f422768727c67a9aefe4dac8ebc83dac625efc6b1d176305",
+      "published_keypoint_evidence_counts": {
+        "in_answer_and_evidence": 26,
+        "in_answer_only": 10,
+        "in_evidence_only": 2,
+        "in_neither": 6,
+        "cases_counted": 44,
+        "cases_excluded_for_unverified_evidence": 0
+      },
+      "scored_cases": 44,
+      "cases_with_mismatched_row_counts": [],
+      "recomputed_unverified_total": 0,
+      "unscored_cases_that_report_evidence_count": [
+        {
+          "id": "refuse-scifi-films",
+          "expect": "refused",
+          "declined": false,
+          "sources": 5,
+          "evidence_count": 5
+        },
+        {
+          "id": "refuse-react-useeffect",
+          "expect": "refused",
+          "declined": true,
+          "sources": 0,
+          "evidence_count": 5
+        }
+      ],
+      "rows": [
+        {
+          "id": "kafka-duplicate-consumption",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-offset-commit",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-rebalance",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-transactional-producer",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-idempotent-producer",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-replica-sync",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-delivery-semantics",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-log-compaction",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-acks",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "kafka-heartbeat-session-timeout",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-liveness-probe",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-readiness-vs-liveness",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-oomkilled",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-requests-limits",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-qos",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-rolling-update",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-configmap-mount",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-eviction",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "k8s-hpa",
+          "sources": 4,
+          "evidence_count": 4,
+          "selected_evidence_rows": 4
+        },
+        {
+          "id": "k8s-pod-lifecycle",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-seq-scan",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-explain-analyze",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-autovacuum",
+          "sources": 3,
+          "evidence_count": 3,
+          "selected_evidence_rows": 3
+        },
+        {
+          "id": "postgres-isolation",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-lock-wait",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-connections",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-bloat",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-btree-index",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-partitioning",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "postgres-statistics",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-prometheus",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-health",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-auto-configuration",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-logging",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-config-precedence",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-graceful-shutdown",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-tracing",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "spring-executable-jar",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-serialization",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-cluster",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-cache-annotations",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-template-difference",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-lua",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        },
+        {
+          "id": "redis-pool",
+          "sources": 5,
+          "evidence_count": 5,
+          "selected_evidence_rows": 5
+        }
+      ]
+    }
+  }
+}
